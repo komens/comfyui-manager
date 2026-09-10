@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -26,10 +27,12 @@ type config struct {
 }
 
 type app struct {
-	db      *sql.DB
-	log     *log.Logger
-	dataDir string
-	jobs    chan int64
+	db       *sql.DB
+	log      *log.Logger
+	dataDir  string
+	jobs     chan int64
+	events   map[int64]map[chan []byte]struct{}
+	eventsMu sync.Mutex
 }
 
 type urlRequest struct {
@@ -48,7 +51,7 @@ func main() {
 	}
 	defer db.Close()
 
-	a := &app{db: db, log: log.New(os.Stdout, "comfyui-server ", log.LstdFlags), dataDir: cfg.DataDir, jobs: make(chan int64, 32)}
+	a := &app{db: db, log: log.New(os.Stdout, "comfyui-server ", log.LstdFlags), dataDir: cfg.DataDir, jobs: make(chan int64, 32), events: make(map[int64]map[chan []byte]struct{})}
 	if err := a.initDB(cfg.InitialComfyUI); err != nil {
 		log.Fatal(err)
 	}
@@ -65,6 +68,9 @@ func main() {
 	mux.HandleFunc("POST /api/tasks/direct", a.createDirectTask)
 	mux.HandleFunc("GET /api/tasks", a.listTasks)
 	mux.HandleFunc("GET /api/tasks/{id}", a.getTask)
+	mux.HandleFunc("GET /api/tasks/{id}/events", a.taskEvents)
+	mux.HandleFunc("POST /api/tasks/{id}/cancel", a.cancelTask)
+	mux.HandleFunc("POST /api/tasks/{id}/retry", a.retryTask)
 	mux.HandleFunc("GET /api/json-files", a.listJSONFiles)
 	mux.HandleFunc("POST /api/json-files/upload", a.uploadJSON)
 	mux.HandleFunc("GET /api/json-files/{id}/entries", a.listEntries)

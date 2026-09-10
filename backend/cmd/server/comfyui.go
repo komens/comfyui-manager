@@ -125,6 +125,7 @@ func (a *app) executeTask(taskID int64) {
 	}
 	_, _ = a.db.Exec(`UPDATE generation_tasks SET status='running', started_at=? WHERE id=?`, time.Now(), taskID)
 	_, _ = a.db.Exec(`UPDATE generation_items SET status='running' WHERE id=?`, itemID)
+	a.publish(taskID, map[string]any{"task_id": taskID, "item_id": itemID, "status": "running"})
 	workflowBytes, err := os.ReadFile(workflowPath)
 	if err == nil {
 		var workflow map[string]any
@@ -148,10 +149,12 @@ func (a *app) executeTask(taskID int64) {
 	if err != nil {
 		_, _ = a.db.Exec(`UPDATE generation_items SET status='failed', error_message=? WHERE id=?`, err.Error(), itemID)
 		_, _ = a.db.Exec(`UPDATE generation_tasks SET status='failed', failed_count=1, completed_at=? WHERE id=?`, time.Now(), taskID)
+		a.publish(taskID, map[string]any{"task_id": taskID, "item_id": itemID, "status": "failed", "error": err.Error()})
 		return
 	}
 	_, _ = a.db.Exec(`UPDATE generation_items SET status='success' WHERE id=?`, itemID)
 	_, _ = a.db.Exec(`UPDATE generation_tasks SET status='completed', success_count=1, completed_at=? WHERE id=?`, time.Now(), taskID)
+	a.publish(taskID, map[string]any{"task_id": taskID, "item_id": itemID, "status": "success"})
 }
 
 func injectDirectPrompt(workflow map[string]any, mappingJSON string, input map[string]any) error {
