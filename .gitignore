@@ -2,3 +2,4 @@ data/
 backend/tmp/
 backend/*.db
 backend/server
+frontend/dist/
