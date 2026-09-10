@@ -55,7 +55,9 @@ func (a *app) createDirectTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "commit task failed")
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"id": resultID(result), "status": "pending", "comfyui_url": comfyURL})
+	taskID := resultID(result)
+	a.jobs <- taskID
+	writeJSON(w, http.StatusAccepted, map[string]any{"id": taskID, "status": "pending", "comfyui_url": comfyURL})
 }
 
 func resultID(result interface{ LastInsertId() (int64, error) }) int64 {

@@ -29,6 +29,7 @@ type app struct {
 	db      *sql.DB
 	log     *log.Logger
 	dataDir string
+	jobs    chan int64
 }
 
 type urlRequest struct {
@@ -47,7 +48,7 @@ func main() {
 	}
 	defer db.Close()
 
-	a := &app{db: db, log: log.New(os.Stdout, "comfyui-server ", log.LstdFlags), dataDir: cfg.DataDir}
+	a := &app{db: db, log: log.New(os.Stdout, "comfyui-server ", log.LstdFlags), dataDir: cfg.DataDir, jobs: make(chan int64, 32)}
 	if err := a.initDB(cfg.InitialComfyUI); err != nil {
 		log.Fatal(err)
 	}
@@ -64,6 +65,11 @@ func main() {
 	mux.HandleFunc("POST /api/tasks/direct", a.createDirectTask)
 	mux.HandleFunc("GET /api/tasks", a.listTasks)
 	mux.HandleFunc("GET /api/tasks/{id}", a.getTask)
+	mux.HandleFunc("GET /api/json-files", a.listJSONFiles)
+	mux.HandleFunc("POST /api/json-files/upload", a.uploadJSON)
+	mux.HandleFunc("GET /api/json-files/{id}/entries", a.listEntries)
+	mux.HandleFunc("POST /api/tasks/json", a.createJSONTasks)
+	go a.worker()
 
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,
@@ -110,6 +116,29 @@ CREATE TABLE IF NOT EXISTS workflows (
   enabled INTEGER NOT NULL DEFAULT 1,
   created_at DATETIME NOT NULL,
   updated_at DATETIME NOT NULL
+);
+CREATE TABLE IF NOT EXISTS json_files (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  filename TEXT NOT NULL UNIQUE,
+  storage_path TEXT NOT NULL,
+  total_count INTEGER NOT NULL DEFAULT 0,
+  completed_count INTEGER NOT NULL DEFAULT 0,
+  failed_count INTEGER NOT NULL DEFAULT 0,
+  created_at DATETIME NOT NULL,
+  updated_at DATETIME NOT NULL
+);
+CREATE TABLE IF NOT EXISTS prompt_entries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  json_file_id INTEGER NOT NULL,
+  entry_key TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  positive_prompt TEXT NOT NULL,
+  negative_prompt TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',
+  completed_at DATETIME,
+  UNIQUE(json_file_id, entry_key),
+  FOREIGN KEY(json_file_id) REFERENCES json_files(id)
 );
 CREATE TABLE IF NOT EXISTS generation_tasks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
