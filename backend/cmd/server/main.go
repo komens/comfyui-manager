@@ -26,8 +26,9 @@ type config struct {
 }
 
 type app struct {
-	db  *sql.DB
-	log *log.Logger
+	db      *sql.DB
+	log     *log.Logger
+	dataDir string
 }
 
 type urlRequest struct {
@@ -46,7 +47,7 @@ func main() {
 	}
 	defer db.Close()
 
-	a := &app{db: db, log: log.New(os.Stdout, "comfyui-server ", log.LstdFlags)}
+	a := &app{db: db, log: log.New(os.Stdout, "comfyui-server ", log.LstdFlags), dataDir: cfg.DataDir}
 	if err := a.initDB(cfg.InitialComfyUI); err != nil {
 		log.Fatal(err)
 	}
@@ -57,6 +58,12 @@ func main() {
 	mux.HandleFunc("PUT /api/settings/comfyui", a.updateComfyUI)
 	mux.HandleFunc("POST /api/settings/comfyui/test", a.testComfyUI)
 	mux.HandleFunc("GET /api/comfyui/status", a.comfyUIStatus)
+	mux.HandleFunc("GET /api/workflows", a.listWorkflows)
+	mux.HandleFunc("POST /api/workflows", a.createWorkflow)
+	mux.HandleFunc("GET /api/workflows/{id}", a.getWorkflow)
+	mux.HandleFunc("POST /api/tasks/direct", a.createDirectTask)
+	mux.HandleFunc("GET /api/tasks", a.listTasks)
+	mux.HandleFunc("GET /api/tasks/{id}", a.getTask)
 
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,
@@ -93,6 +100,49 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,
   updated_at DATETIME NOT NULL
+);
+CREATE TABLE IF NOT EXISTS workflows (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  workflow_path TEXT NOT NULL,
+  mapping_json TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at DATETIME NOT NULL,
+  updated_at DATETIME NOT NULL
+);
+CREATE TABLE IF NOT EXISTS generation_tasks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_type TEXT NOT NULL,
+  workflow_id INTEGER NOT NULL,
+  comfyui_url TEXT NOT NULL,
+  parameters_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  total_count INTEGER NOT NULL DEFAULT 1,
+  success_count INTEGER NOT NULL DEFAULT 0,
+  failed_count INTEGER NOT NULL DEFAULT 0,
+  created_at DATETIME NOT NULL,
+  started_at DATETIME,
+  completed_at DATETIME,
+  FOREIGN KEY(workflow_id) REFERENCES workflows(id)
+);
+CREATE TABLE IF NOT EXISTS generation_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER NOT NULL,
+  positive_prompt TEXT NOT NULL,
+  negative_prompt TEXT NOT NULL DEFAULT '',
+  comfy_prompt_id TEXT,
+  status TEXT NOT NULL DEFAULT 'queued',
+  error_message TEXT NOT NULL DEFAULT '',
+  FOREIGN KEY(task_id) REFERENCES generation_tasks(id)
+);
+CREATE TABLE IF NOT EXISTS images (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  generation_item_id INTEGER NOT NULL,
+  filename TEXT NOT NULL,
+  storage_path TEXT NOT NULL,
+  created_at DATETIME NOT NULL,
+  FOREIGN KEY(generation_item_id) REFERENCES generation_items(id)
 );
 INSERT OR IGNORE INTO settings(key, value, updated_at)
 VALUES ('comfyui_url', ?, CURRENT_TIMESTAMP);
