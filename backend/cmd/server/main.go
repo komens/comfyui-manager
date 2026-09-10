@@ -75,6 +75,7 @@ func main() {
 	mux.HandleFunc("POST /api/json-files/upload", a.uploadJSON)
 	mux.HandleFunc("GET /api/json-files/{id}/entries", a.listEntries)
 	mux.HandleFunc("POST /api/tasks/json", a.createJSONTasks)
+	mux.HandleFunc("GET /api/images", a.listImages)
 	go a.worker()
 
 	server := &http.Server{

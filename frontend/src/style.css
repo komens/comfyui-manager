@@ -26,6 +26,13 @@ nav a.router-link-active { background: #e5f2f2; color: #126a6e; font-weight: 650
 .task-link:hover { background: #f6fafb; }
 .task-summary { display: flex; justify-content: space-between; gap: 16px; padding-bottom: 18px; border-bottom: 1px solid #edf0f2; }
 .payload { overflow: auto; padding: 16px; background: #f4f6f8; border-radius: 6px; font-size: 12px; }
+.entry-check { display: flex; align-items: flex-start; gap: 8px; margin: 0; font-weight: 400; }
+.entry-check small { display: block; margin-top: 4px; color: #68737d; }
+.check-all { margin: 18px 0 8px; }
+.image-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 16px; }
+.image-item { overflow: hidden; border: 1px solid #dfe4e8; border-radius: 8px; background: #fff; }
+.image-placeholder { display: grid; place-items: center; min-height: 160px; padding: 16px; background: #e9eef0; color: #52606a; text-align: center; font-size: 13px; }
+.image-item small { display: block; padding: 10px 12px; color: #68737d; }
 .form-panel { max-width: 760px; }
 select, textarea { width: 100%; padding: 12px 14px; border: 1px solid #b8c2ca; border-radius: 6px; background: #fff; font: inherit; resize: vertical; }
 .toolbar { display: flex; align-items: center; gap: 16px; margin-bottom: 18px; }

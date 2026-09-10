@@ -5,6 +5,8 @@ import JsonFilesView from '../views/JsonFilesView.vue'
 import WorkflowsView from '../views/WorkflowsView.vue'
 import SettingsView from '../views/SettingsView.vue'
 import TaskDetailView from '../views/TaskDetailView.vue'
+import JsonFileDetailView from '../views/JsonFileDetailView.vue'
+import GalleryView from '../views/GalleryView.vue'
 
 export default createRouter({ history: createWebHistory(), routes: [
   { path: '/', component: DashboardView },
@@ -13,4 +15,6 @@ export default createRouter({ history: createWebHistory(), routes: [
   { path: '/workflows', component: WorkflowsView },
   { path: '/settings', component: SettingsView },
   { path: '/tasks/:id', component: TaskDetailView },
+  { path: '/json-files/:id', component: JsonFileDetailView },
+  { path: '/gallery', component: GalleryView },
 ] })
