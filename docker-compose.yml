@@ -8,9 +8,9 @@ services:
     environment:
       COMFYUI_URL: ${COMFYUI_URL:-http://127.0.0.1:8188}
       SERVER_PORT: 8080
-      DATA_DIR: /data
-      DB_PATH: /data/db/comfyui.db
-      STATIC_DIR: /static
+      DATA_DIR: /app/data
+      DB_PATH: /app/data/db/comfyui.db
+      STATIC_DIR: /app/static
     volumes:
-      - ./data:/data
+      - ./data:/app/data
     restart: unless-stopped

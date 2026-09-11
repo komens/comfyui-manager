@@ -107,6 +107,27 @@ docker compose up -d --build
 2. **Stage 2** - `golang:1.23` 构建后端（CGO_ENABLED=0 静态编译）
 3. **Stage 3** - `distroless` 最终镜像，包含后端二进制 + 前端静态文件
 
+### 🐳 NAS Docker 部署
+
+如果需要在 NAS 上部署，可以使用以下命令：
+
+```bash
+# 构建镜像（NAS 部署）
+docker build --platform linux/amd64 -t comfyui-server:1.0.0 .
+
+# 运行容器（NAS 部署）
+docker run -p 8080:8080 -v comfyui_server_data:/data comfyui-server:1.0.0
+
+# 导出镜像（用于 NAS 部署）
+docker save comfyui-server:1.0.0 -o comfyui-server.tar
+```
+
+**说明：**
+- `--platform linux/amd64`：指定构建平台为 x86_64 架构（适用于大多数 NAS）
+- `-p 8080:8080`：将容器的 8080 端口映射到主机的 8080 端口
+- `-v comfyui_server_data:/data`：使用 Docker 卷挂载数据目录，持久化数据库和图片
+- `docker save`：导出镜像为 tar 文件，方便传输到 NAS 设备
+
 ### 环境变量
 
 | 变量 | 默认值 | 说明 |
@@ -122,17 +143,21 @@ docker compose up -d --build
 ```
 data/
 ├── db/comfyui.db      # SQLite 数据库
-├── images/            # 生成的图片（格式：20260910_211633_1.png）
-├── json/              # JSON 文件备份
-└── workflows/         # 工作流 JSON 文件
+├── images/            # 生成的图片
+└── json/              # 上传的 JSON 文件备份
 ```
 
-### 更新部署
+### 常用命令
 
 ```bash
-git pull
-docker compose up -d --build
+# 查看日志
 docker compose logs -f
+
+# 停止服务
+docker compose down
+
+# 重新构建
+docker compose up -d --build
 ```
 
 ## 项目结构

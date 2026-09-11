@@ -65,6 +65,8 @@ func main() {
 	mux.HandleFunc("GET /api/health", a.health)
 	mux.HandleFunc("GET /api/settings", a.getSettings)
 	mux.HandleFunc("GET /api/settings/backup", a.backupDatabase)
+	mux.HandleFunc("GET /api/export", a.exportData)
+	mux.HandleFunc("POST /api/import", a.importData)
 	mux.HandleFunc("PUT /api/settings/comfyui", a.updateComfyUI)
 	mux.HandleFunc("POST /api/settings/comfyui/test", a.testComfyUI)
 	mux.HandleFunc("GET /api/comfyui/status", a.comfyUIStatus)
