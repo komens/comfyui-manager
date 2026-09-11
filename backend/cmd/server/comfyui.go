@@ -19,7 +19,6 @@ type comfySubmitResponse struct {
 
 func submitComfy(ctx context.Context, baseURL string, workflow map[string]any, clientID string) (string, error) {
 	body, _ := json.Marshal(map[string]any{"prompt": workflow, "client_id": clientID})
-	dumpSubmitPayload(baseURL+"/prompt", clientID, body) // 临时调试：落盘真正提交的载荷
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/prompt", strings.NewReader(string(body)))
 	if err != nil {
 		return "", err
@@ -136,6 +135,26 @@ func (a *app) failItem(itemID, taskID int64, errMsg string) {
 	a.publish(taskID, map[string]any{"task_id": taskID, "item_id": itemID, "status": "failed", "error": errMsg})
 }
 
+// maxSaveAttempts 是「图已生成、但保存失败」的连续重试上限。
+// downloader 每 5s 一轮，40 轮≈200s；只有持续故障（磁盘满、库一直锁）才会触发判失败，
+// 避免把可恢复错误当成「无输出」直接判死。
+const maxSaveAttempts = 40
+
+// bumpSaveFailure 记录一次保存失败，返回该 item 的连续失败次数。
+func (a *app) bumpSaveFailure(itemID int64) int {
+	a.saveFailMu.Lock()
+	defer a.saveFailMu.Unlock()
+	a.saveFailures[itemID]++
+	return a.saveFailures[itemID]
+}
+
+// resetSaveFailure 在保存成功后清除该 item 的失败计数。
+func (a *app) resetSaveFailure(itemID int64) {
+	a.saveFailMu.Lock()
+	defer a.saveFailMu.Unlock()
+	delete(a.saveFailures, itemID)
+}
+
 // downloader 轮询下载阶段（每5秒检查 submitted items 是否完成）
 func (a *app) downloader() {
 	ticker := time.NewTicker(5 * time.Second)
@@ -195,6 +214,7 @@ func (a *app) checkAndDownload(itemID, taskID int64, comfyPromptID, baseURL stri
 		return
 	}
 	found := false
+	var saveErr error
 	for _, nodeOutput := range outputs {
 		nodeMap, _ := nodeOutput.(map[string]any)
 		if nodeMap == nil {
@@ -215,11 +235,13 @@ func (a *app) checkAndDownload(itemID, taskID int64, comfyPromptID, baseURL stri
 			imgData, dlErr := downloadComfyImage(ctx, baseURL, filename, subfolder, imgType)
 			if dlErr != nil {
 				a.log.Printf("download image failed: %v", dlErr)
+				saveErr = dlErr
 				continue
 			}
 			res, insertErr := a.db.Exec(`INSERT INTO images(generation_item_id, filename, storage_path, created_at) VALUES(?,?,'',?)`, itemID, filename, time.Now())
 			if insertErr != nil {
 				a.log.Printf("insert image record failed: %v", insertErr)
+				saveErr = insertErr
 				continue
 			}
 			imageID, _ := res.LastInsertId()
@@ -227,6 +249,7 @@ func (a *app) checkAndDownload(itemID, taskID int64, comfyPromptID, baseURL stri
 			target := filepath.Join(a.dataDir, "images", imgFilename)
 			if writeErr := os.WriteFile(target, imgData, 0o644); writeErr != nil {
 				a.log.Printf("write image file failed: %v", writeErr)
+				saveErr = writeErr
 				continue
 			}
 			_, _ = a.db.Exec(`UPDATE images SET storage_path=? WHERE id=?`, target, imageID)
@@ -234,9 +257,23 @@ func (a *app) checkAndDownload(itemID, taskID int64, comfyPromptID, baseURL stri
 		}
 	}
 	if !found {
+		if saveErr != nil {
+			// ComfyUI 确实产出了图，但本轮没能下载/落库/落盘（如 SQLITE_BUSY、磁盘错误）。
+			// 这属于**可恢复的基础设施错误**，不能判定成「无输出」——否则会丢掉已生成的图，
+			// 且重跑还要重新作图。保持 submitted，交给下一轮轮询自动重试；
+			// 连续失败过多（见 maxSaveAttempts）才判失败，避免因持续故障永久卡住。
+			if n := a.bumpSaveFailure(itemID); n >= maxSaveAttempts {
+				a.failItem(itemID, taskID, fmt.Sprintf("保存图片连续失败 %d 次: %v", n, saveErr))
+				return
+			} else {
+				a.log.Printf("item %d 保存失败（第 %d 次），保留 submitted 等待重试: %v", itemID, n, saveErr)
+				return
+			}
+		}
 		a.failItem(itemID, taskID, "no images in ComfyUI output")
 		return
 	}
+	a.resetSaveFailure(itemID)
 	// 成功
 	_, _ = a.db.Exec(`UPDATE generation_items SET status='success' WHERE id=?`, itemID)
 	_, _ = a.db.Exec(`UPDATE prompts SET status='done', completed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=(SELECT prompt_id FROM generation_items WHERE id=?)`, itemID)

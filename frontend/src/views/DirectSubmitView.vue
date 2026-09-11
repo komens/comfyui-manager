@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import ParamForm from '../components/ParamForm.vue'
 import { api, type Workflow } from '../api/client'
-import { buildRunMapping } from '../utils/workflowParams'
+import { buildRunMapping, pickDefaultWorkflow } from '../utils/workflowParams'
 
 const router = useRouter()
 const workflows = ref<Workflow[]>([])

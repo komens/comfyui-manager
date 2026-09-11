@@ -64,8 +64,9 @@ async function loadWorkflows() {
 }
 
 function openRunModal() {
-  const enabled = workflows.value.filter(w => w.enabled)
-  if (enabled.length) selectedWorkflow.value = enabled[0].id
+  // 预选默认工作流：下拉只列出启用项，默认项被禁用时退回 0
+  const preferred = pickDefaultWorkflow(workflows.value)
+  selectedWorkflow.value = preferred && preferred.enabled ? preferred.id : 0
   showRunModal.value = true
 }
 

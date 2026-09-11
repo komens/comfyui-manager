@@ -35,6 +35,10 @@ type app struct {
 	dbPath   string
 	events   map[int64]map[chan []byte]struct{}
 	eventsMu sync.Mutex
+	// 保存图片（下载/写库/写盘）的连续失败计数：itemID -> 次数。
+	// 仅 downloader 单个 goroutine 使用；加锁是为防止将来被并发调用时踩 map。
+	saveFailures map[int64]int
+	saveFailMu   sync.Mutex
 }
 
 type urlRequest struct {
@@ -49,14 +53,24 @@ func main() {
 		log.Fatal(err)
 	}
 
-	db, err := sql.Open("sqlite", cfg.DBPath+"?_journal_mode=WAL&_busy_timeout=5000")
+	// DSN 参数必须是 modernc.org/sqlite 的语法：
+	//   _pragma=...   逐条执行 PRAGMA（可重复）
+	//   _txlock=immediate  BeginTx 直接 BEGIN IMMEDIATE
+	// 注意：mattn/go-sqlite3 风格的 `_journal_mode=` / `_busy_timeout=` 会被**静默忽略**：
+	// 曾因此 WAL 从未开启、busy_timeout=0，稍一并发写库就 SQLITE_BUSY(database is locked)。
+	// 为什么必须加 _txlock=immediate：默认 deferred 事务若先 SELECT（拿读锁）再 UPDATE
+	// （升级写锁），两个并发事务会互相等待升级 → 直接 SQLITE_BUSY，且 busy_timeout 对
+	// 这种「升级死锁」不生效（SQLite 为避免无限等待会立即返回）。改成 immediate 后，
+	// 事务一开始就取写锁，并发写会老老实实在 busy_timeout 内排队。
+	// 驱动内部会把 busy_timeout 排在最前执行，确保设置 journal_mode 时已有锁等待。
+	dsn := cfg.DBPath + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_txlock=immediate"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer db.Close()
 
-	a := &app{db: db, log: log.New(os.Stdout, "comfyui-server ", log.LstdFlags), dataDir: cfg.DataDir, dbPath: cfg.DBPath, events: make(map[int64]map[chan []byte]struct{})}
-	initSubmitDump(cfg.DataDir, a.log) // 临时调试：提交载荷落盘（见 submitdump.go）
+	a := &app{db: db, log: log.New(os.Stdout, "comfyui-server ", log.LstdFlags), dataDir: cfg.DataDir, dbPath: cfg.DBPath, events: make(map[int64]map[chan []byte]struct{}), saveFailures: make(map[int64]int)}
 	if err := a.initDB(cfg.InitialComfyUI); err != nil {
 		log.Fatal(err)
 	}
