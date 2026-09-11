@@ -8,6 +8,7 @@ interface ParamDef {
   default?: any
   min?: number
   max?: number
+  step?: number
   label?: string
   options?: string[]
   visible?: boolean
@@ -82,7 +83,7 @@ function getVisibleParams() {
           v-model.number="params[key]"
           :min="def.min"
           :max="def.max"
-          step="1"
+          :step="def.step ?? 1"
         />
       </template>
 
@@ -94,7 +95,7 @@ function getVisibleParams() {
           v-model.number="params[key]"
           :min="def.min"
           :max="def.max"
-          step="0.1"
+          :step="def.step ?? 0.1"
         />
       </template>
 

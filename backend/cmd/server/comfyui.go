@@ -19,6 +19,7 @@ type comfySubmitResponse struct {
 
 func submitComfy(ctx context.Context, baseURL string, workflow map[string]any, clientID string) (string, error) {
 	body, _ := json.Marshal(map[string]any{"prompt": workflow, "client_id": clientID})
+	dumpSubmitPayload(baseURL+"/prompt", clientID, body) // 临时调试：落盘真正提交的载荷
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/prompt", strings.NewReader(string(body)))
 	if err != nil {
 		return "", err
@@ -88,9 +89,11 @@ func (a *app) submitItem(itemID, taskID int64, positive, baseURL, parameters, wo
 	_, _ = a.db.Exec(`UPDATE generation_items SET status='running' WHERE id=?`, itemID)
 	a.publish(taskID, map[string]any{"task_id": taskID, "item_id": itemID, "status": "running"})
 
-	workflowBytes, err := os.ReadFile(workflowPath)
+	// workflow_path 在库里可能是纯文件名（新）或绑定旧 cwd 的相对路径，统一按当前 dataDir 解析
+	resolvedPath := a.workflowFilePath(workflowPath)
+	workflowBytes, err := os.ReadFile(resolvedPath)
 	if err != nil {
-		a.failItem(itemID, taskID, fmt.Sprintf("read workflow failed: %v", err))
+		a.failItem(itemID, taskID, fmt.Sprintf("read workflow failed: %v (resolved path: %s)", err, resolvedPath))
 		return
 	}
 	var workflow map[string]any
@@ -363,7 +366,7 @@ func injectDirectPrompt(workflow map[string]any, mappingJSON string, input map[s
 		} else if userPrefix, ok := params["output_prefix"].(string); ok && userPrefix != "" {
 			prefix = userPrefix
 		}
-		if err := setWorkflowField(workflow, mapping.OutputPrefix, prefix); err != nil {
+		if err := setWorkflowField(workflow, mapping.OutputPrefix, expandDateTemplate(prefix)); err != nil {
 			return err
 		}
 	}
@@ -373,7 +376,11 @@ func injectDirectPrompt(workflow map[string]any, mappingJSON string, input map[s
 			value, ok = location.Default, true
 		}
 		if ok {
-			if err := setWorkflowField(workflow, map[string]string{"node_id": location.NodeID, "field": location.Field}, value); err != nil {
+			// 展开 %date:...% 模板：uiToAPIFormat 已对工作流自带的 widget 值做过，
+			// 但经由 parameters 显式覆盖是另一条入口，漏掉会让 ComfyUI 收到未替换的
+			// %date:yyyy-MM-dd% 字面量——Windows 下目录名含 ':' 会被判为非法路径，
+			// 整个节点执行失败（no images in ComfyUI output）。
+			if err := setWorkflowField(workflow, map[string]string{"node_id": location.NodeID, "field": location.Field}, expandDateTemplate(value)); err != nil {
 				return err
 			}
 		}
@@ -573,6 +580,15 @@ func resolveDateTemplate(s string) string {
 		s = strings.ReplaceAll(s, k, v)
 	}
 	return s
+}
+
+// expandDateTemplate 对字符串值展开 %date:...% 模板，非字符串原样返回。
+// 与 uiToAPIFormat 处理 widget 值时用的是同一套替换规则（resolveDateTemplate）。
+func expandDateTemplate(value any) any {
+	if s, ok := value.(string); ok {
+		return resolveDateTemplate(s)
+	}
+	return value
 }
 
 func (a *app) waitAndDownload(ctx context.Context, baseURL, promptID string, taskID, itemID int64) error {

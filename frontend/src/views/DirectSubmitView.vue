@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import ParamForm from '../components/ParamForm.vue'
 import { api, type Workflow } from '../api/client'
+import { buildRunMapping } from '../utils/workflowParams'
 
 const router = useRouter()
 const workflows = ref<Workflow[]>([])
@@ -16,12 +17,16 @@ const messageType = ref<'success' | 'error' | 'info'>('info')
 const busy = ref(false)
 
 const selectedWorkflow = computed(() => workflows.value.find(w => w.id === workflowId.value))
-const mapping = computed(() => selectedWorkflow.value?.mapping || null)
+const mapping = computed(() => buildRunMapping(selectedWorkflow.value))
+// 生成参数项数：用于折叠面板的标题提示与显隐判断
+const paramCount = computed(() => Object.keys(mapping.value?.parameters ?? {}).length)
 
 onMounted(async () => {
   const result = await api<{ items: Workflow[] }>('/api/workflows?page_size=200')
   workflows.value = result.items
-  if (workflows.value[0]) workflowId.value = workflows.value[0].id
+  // 预选默认工作流（无默认时退回第一个启用项）
+  const preferred = pickDefaultWorkflow(workflows.value)
+  if (preferred) workflowId.value = preferred.id
 })
 
 watch(workflowId, () => {
@@ -83,11 +88,17 @@ async function submit() {
         <textarea id="positive" v-model="positive" rows="8" placeholder="描述你想要生成的图像内容..." />
       </div>
 
-      <!-- Dynamic Parameters -->
-      <div v-if="mapping?.parameters && Object.keys(mapping.parameters).length > 0">
-        <h3 class="text-sm mb-2" style="font-weight:600; margin-top:24px;">生成参数</h3>
-        <ParamForm :mapping="mapping" v-model="parameters" />
-      </div>
+      <!-- 生成参数：低频调整项，默认折叠。注意用 <details> 只是视觉隐藏，
+           子组件仍会挂载，ParamForm 的默认值照常参与提交，不影响作图结果 -->
+      <details v-if="paramCount > 0" class="collapse-panel">
+        <summary>
+          <span>生成参数</span>
+          <span class="text-xs muted">{{ paramCount }} 项 · 默认折叠</span>
+        </summary>
+        <div class="collapse-body">
+          <ParamForm :mapping="mapping" v-model="parameters" />
+        </div>
+      </details>
 
       <div class="btn-group" style="margin-top:24px;">
         <button class="btn btn-primary" :disabled="busy || !workflowId || !positive.trim()" @click="submit">

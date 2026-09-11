@@ -56,6 +56,7 @@ func main() {
 	defer db.Close()
 
 	a := &app{db: db, log: log.New(os.Stdout, "comfyui-server ", log.LstdFlags), dataDir: cfg.DataDir, dbPath: cfg.DBPath, events: make(map[int64]map[chan []byte]struct{})}
+	initSubmitDump(cfg.DataDir, a.log) // 临时调试：提交载荷落盘（见 submitdump.go）
 	if err := a.initDB(cfg.InitialComfyUI); err != nil {
 		log.Fatal(err)
 	}
@@ -77,9 +78,13 @@ func main() {
 	mux.HandleFunc("GET /api/workflows/{id}", a.getWorkflow)
 	mux.HandleFunc("PUT /api/workflows/{id}", a.updateWorkflow)
 	mux.HandleFunc("DELETE /api/workflows/{id}", a.deleteWorkflow)
+	mux.HandleFunc("PUT /api/workflows/{id}/default", a.setDefaultWorkflow)
 	mux.HandleFunc("POST /api/workflows/detect-params", a.detectWorkflowParams)
 	mux.HandleFunc("POST /api/tasks/direct", a.createDirectTask)
 	mux.HandleFunc("GET /api/tasks", a.listTasks)
+	mux.HandleFunc("POST /api/tasks/batch-cancel", a.batchCancelTasks)
+	mux.HandleFunc("POST /api/tasks/batch-retry", a.batchRetryTasks)
+	mux.HandleFunc("POST /api/tasks/batch-delete", a.batchDeleteTasks)
 	mux.HandleFunc("GET /api/tasks/{id}", a.getTask)
 	mux.HandleFunc("GET /api/tasks/{id}/events", a.taskEvents)
 	mux.HandleFunc("POST /api/tasks/{id}/cancel", a.cancelTask)
@@ -151,6 +156,8 @@ func main() {
 }
 
 func loadConfig() config {
+	// 约定：后端在 backend/ 目录下启动，数据目录为上一级的 ../data。
+	// 若从别处启动，必须显式指定 DATA_DIR，否则会指向错误的相对路径。
 	dataDir := envOr("DATA_DIR", "../data")
 	dbPath := envOr("DB_PATH", filepath.Join(dataDir, "db", "comfyui.db"))
 	return config{
@@ -185,6 +192,7 @@ CREATE TABLE IF NOT EXISTS workflows (
   negative_prompt TEXT NOT NULL DEFAULT '',
   params_schema TEXT NOT NULL DEFAULT '{}',
   enabled INTEGER NOT NULL DEFAULT 1,
+  is_default INTEGER NOT NULL DEFAULT 0,
   created_at DATETIME NOT NULL,
   updated_at DATETIME NOT NULL
 );
@@ -227,7 +235,7 @@ CREATE TABLE IF NOT EXISTS generation_items (
   prompt_id INTEGER,
   positive_prompt TEXT NOT NULL,
   comfy_prompt_id TEXT,
-  status TEXT NOT NULL DEFAULT 'queued',
+  status TEXT NOT NULL DEFAULT 'pending',
   error_message TEXT NOT NULL DEFAULT '',
   FOREIGN KEY(task_id) REFERENCES generation_tasks(id),
   FOREIGN KEY(prompt_id) REFERENCES prompts(id)
@@ -252,10 +260,12 @@ VALUES ('comfyui_url', ?, CURRENT_TIMESTAMP);
 		// Add new columns to workflows
 		`ALTER TABLE workflows ADD COLUMN negative_prompt TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE workflows ADD COLUMN params_schema TEXT NOT NULL DEFAULT '{}'`,
+		`ALTER TABLE workflows ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0`,
 		// Add prompt_id to generation_items (for old databases with entry_id)
 		`ALTER TABLE generation_items ADD COLUMN prompt_id INTEGER`,
 		`ALTER TABLE prompts ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE images ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0`,
+		`UPDATE generation_items SET status='pending' WHERE status='queued'`,
 	}
 	for _, stmt := range migrations {
 		if _, err := a.db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
@@ -296,13 +306,21 @@ func (a *app) getStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) recoverTasks() {
-	// 重启时将 submitted/running 的 item 重置为 pending，由 submitter 重新提交
-	n, _ := a.db.Exec(`UPDATE generation_items SET status='pending', comfy_prompt_id='' WHERE status IN ('submitted','running')`)
-	affected, _ := n.RowsAffected()
-	// 将 pending/running 的 task 重置为 pending
-	_, _ = a.db.Exec(`UPDATE generation_tasks SET status='pending', failed_count=0, completed_at=NULL WHERE status IN ('pending','running')`)
-	if affected > 0 {
-		a.log.Printf("recovered %d items to pending", affected)
+	// 重启恢复策略：
+	// 1) 已经拿到 comfy_prompt_id 的 item —— 说明 ComfyUI 那边已收单，保留 submitted 与原 prompt_id，
+	//    交给 downloader 查 /history 收尾。之前这里无条件清空 prompt_id 并重置为 pending，
+	//    会导致每次重启都把已提交的任务重新提交一遍（重复排队、重复出图）。
+	kept, _ := a.db.Exec(`UPDATE generation_items SET status='submitted' WHERE status IN ('submitted','running') AND COALESCE(comfy_prompt_id,'')!=''`)
+	keptN, _ := kept.RowsAffected()
+	// 2) 没有 prompt_id 的 item —— 提交中途中断（HTTP 已发但结果未知除外），重置为 pending 重新提交
+	reset, _ := a.db.Exec(`UPDATE generation_items SET status='pending', comfy_prompt_id='' WHERE status IN ('submitted','running') AND COALESCE(comfy_prompt_id,'')=''`)
+	resetN, _ := reset.RowsAffected()
+	// 3) task 状态跟随：先统一回到 pending，若仍有 in-flight item 再提升为 running
+	_, _ = a.db.Exec(`UPDATE generation_tasks SET status='pending', completed_at=NULL WHERE status IN ('pending','running')`)
+	_, _ = a.db.Exec(`UPDATE generation_tasks SET status='running' WHERE status='pending' AND EXISTS (
+		SELECT 1 FROM generation_items gi WHERE gi.task_id=generation_tasks.id AND gi.status IN ('submitted','running'))`)
+	if keptN > 0 || resetN > 0 {
+		a.log.Printf("recovered tasks: %d items kept in-flight (awaiting ComfyUI history), %d items reset to pending", keptN, resetN)
 	}
 }
 

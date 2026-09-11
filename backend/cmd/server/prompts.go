@@ -3,7 +3,6 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -182,8 +181,8 @@ func (a *app) updatePrompt(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid JSON body")
 		return
 	}
-	var oldTitle, oldDesc, oldPositive, oldGroupName string
-	err = a.db.QueryRowContext(r.Context(), `SELECT title, description, positive_prompt, group_name FROM prompts WHERE id=?`, id).Scan(&oldTitle, &oldDesc, &oldPositive, &oldGroupName)
+	var oldTitle, oldDesc, oldPositive, oldGroupName, oldGroupID string
+	err = a.db.QueryRowContext(r.Context(), `SELECT title, description, positive_prompt, group_name, group_id FROM prompts WHERE id=?`, id).Scan(&oldTitle, &oldDesc, &oldPositive, &oldGroupName, &oldGroupID)
 	if err != nil {
 		writeError(w, 404, "prompt not found")
 		return
@@ -204,7 +203,15 @@ func (a *app) updatePrompt(w http.ResponseWriter, r *http.Request) {
 	if groupName == "" {
 		groupName = oldGroupName
 	}
-	groupID := slugify(groupName)
+	// 分组名没变就保留原 group_id（中文分组名会被 slugify 过滤成空串，
+	// 无条件重算会让 "manual" 之类的既有 id 漂移成随机值）
+	groupID := oldGroupID
+	if groupName != oldGroupName {
+		groupID = ""
+		if groupName != "" {
+			groupID = slugify(groupName)
+		}
+	}
 	_, err = a.db.ExecContext(r.Context(),
 		`UPDATE prompts SET title=?, description=?, positive_prompt=?, group_name=?, group_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
 		title, desc, positive, groupName, groupID, id)
@@ -296,7 +303,7 @@ func (a *app) runPrompt(w http.ResponseWriter, r *http.Request) {
 	}
 	taskID, _ := result.LastInsertId()
 	_, err = tx.ExecContext(r.Context(),
-		`INSERT INTO generation_items(task_id, prompt_id, positive_prompt) VALUES(?,?,?)`, taskID, id, positive)
+		`INSERT INTO generation_items(task_id, prompt_id, positive_prompt, status) VALUES(?,?,?,'pending')`, taskID, id, positive)
 	if err != nil {
 		_ = tx.Rollback()
 		writeError(w, 500, "create task item failed")
@@ -331,6 +338,8 @@ func (a *app) listPromptGroups(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, items)
 }
 
+// slugify 把分组名转成稳定的 ASCII id。纯中文等无法转换的输入返回空串，
+// 不再伪造 group-<时间戳>——那会让同一分组的 id 每次调用都不同。
 func slugify(s string) string {
 	s = strings.TrimSpace(strings.ToLower(s))
 	var b strings.Builder
@@ -342,8 +351,9 @@ func slugify(s string) string {
 		}
 	}
 	result := b.String()
-	if result == "" {
-		return fmt.Sprintf("group-%d", time.Now().UnixMilli())
+	result = strings.Trim(result, "-")
+	for strings.Contains(result, "--") {
+		result = strings.ReplaceAll(result, "--", "-")
 	}
 	return result
 }
@@ -408,7 +418,7 @@ func (a *app) batchRunPrompts(w http.ResponseWriter, r *http.Request) {
 		}
 		taskID, _ := result.LastInsertId()
 		_, _ = tx.ExecContext(r.Context(),
-			`INSERT INTO generation_items(task_id, prompt_id, positive_prompt) VALUES(?,?,?)`, taskID, id, positive)
+			`INSERT INTO generation_items(task_id, prompt_id, positive_prompt, status) VALUES(?,?,?,'pending')`, taskID, id, positive)
 		_, _ = tx.ExecContext(r.Context(), `UPDATE prompts SET status='running', updated_at=CURRENT_TIMESTAMP WHERE id=?`, id)
 		_ = tx.Commit()
 		created++
@@ -465,7 +475,7 @@ func (a *app) groupRunPrompts(w http.ResponseWriter, r *http.Request) {
 		}
 		taskID, _ := result.LastInsertId()
 		_, _ = tx.ExecContext(r.Context(),
-			`INSERT INTO generation_items(task_id, prompt_id, positive_prompt) VALUES(?,?,?)`, taskID, it.id, it.positive)
+			`INSERT INTO generation_items(task_id, prompt_id, positive_prompt, status) VALUES(?,?,?,'pending')`, taskID, it.id, it.positive)
 		_, _ = tx.ExecContext(r.Context(), `UPDATE prompts SET status='running', updated_at=CURRENT_TIMESTAMP WHERE id=?`, it.id)
 		_ = tx.Commit()
 		created++

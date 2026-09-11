@@ -1,12 +1,22 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+)
+
+// 任务操作的统一错误语义：单任务接口据此映射 HTTP 状态码，批量接口据此计入 skipped。
+var (
+	errTaskNotFound       = errors.New("task not found")
+	errTaskRunning        = errors.New("cannot delete running task, cancel it first")
+	errTaskNotCancellable = errors.New("task is not cancellable")
+	errTaskNotFailed      = errors.New("only failed tasks can be retried")
 )
 
 type directTaskInput struct {
@@ -63,7 +73,7 @@ func (a *app) createDirectTask(w http.ResponseWriter, r *http.Request) {
 	}
 	taskID, _ := result.LastInsertId()
 	_, err = tx.ExecContext(r.Context(),
-		`INSERT INTO generation_items(task_id, prompt_id, positive_prompt) VALUES(?,?,?)`,
+		`INSERT INTO generation_items(task_id, prompt_id, positive_prompt, status) VALUES(?,?,?,'pending')`,
 		taskID, promptID, input.PositivePrompt)
 	if err != nil {
 		_ = tx.Rollback()
@@ -157,29 +167,191 @@ func (a *app) deleteTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid task id")
 		return
 	}
-	// 只允许删除非 running 状态的任务
-	var status string
-	if err := a.db.QueryRow(`SELECT status FROM generation_tasks WHERE id=?`, id).Scan(&status); err != nil {
-		writeError(w, 404, "task not found")
-		return
-	}
-	if status == "running" {
-		writeError(w, 409, "cannot delete running task, cancel it first")
-		return
-	}
-	// 删除关联数据（使用事务）
-	tx, err := a.db.BeginTx(r.Context(), nil)
-	if err != nil {
-		writeError(w, 500, "delete task failed")
-		return
-	}
-	_, _ = tx.Exec(`DELETE FROM images WHERE generation_item_id IN (SELECT id FROM generation_items WHERE task_id=?)`, id)
-	_, _ = tx.Exec(`DELETE FROM generation_items WHERE task_id=?`, id)
-	_, _ = tx.Exec(`DELETE FROM generation_tasks WHERE id=?`, id)
-	if err := tx.Commit(); err != nil {
-		_ = tx.Rollback()
-		writeError(w, 500, "delete task failed")
+	if err := a.deleteTaskByID(r.Context(), id); err != nil {
+		switch {
+		case errors.Is(err, errTaskNotFound):
+			writeError(w, 404, "task not found")
+		case errors.Is(err, errTaskRunning):
+			writeError(w, 409, "cannot delete running task, cancel it first")
+		default:
+			writeError(w, 500, "delete task failed")
+		}
 		return
 	}
 	writeJSON(w, 200, map[string]any{"id": id, "status": "deleted"})
+}
+
+// batchTaskInput 是批量操作共用的请求体。
+type batchTaskInput struct {
+	IDs []int64 `json:"ids"`
+}
+
+// batchResult 汇总批量操作结果：applied 为实际生效数，skipped 为状态不允许/不存在的数量。
+func batchResult(applied, skipped int) map[string]any {
+	return map[string]any{"applied": applied, "skipped": skipped}
+}
+
+// runTaskBatch 对一组任务逐个执行 op，统一处理参数校验与结果计数。
+// op 返回 errTask* 系列错误时计入 skipped，其它错误视为服务端错误直接中断。
+func (a *app) runTaskBatch(w http.ResponseWriter, r *http.Request, op func(ctx context.Context, id int64) error) {
+	var input batchTaskInput
+	if err := decodeJSON(r, &input); err != nil || len(input.IDs) == 0 {
+		writeError(w, 400, "ids is required")
+		return
+	}
+	if len(input.IDs) > 500 {
+		writeError(w, 400, "too many ids, max 500 per request")
+		return
+	}
+	applied, skipped := 0, 0
+	for _, id := range input.IDs {
+		err := op(r.Context(), id)
+		switch {
+		case err == nil:
+			applied++
+		case errors.Is(err, errTaskNotFound), errors.Is(err, errTaskRunning),
+			errors.Is(err, errTaskNotCancellable), errors.Is(err, errTaskNotFailed):
+			skipped++
+		default:
+			writeError(w, 500, "batch operation failed")
+			return
+		}
+	}
+	writeJSON(w, 200, batchResult(applied, skipped))
+}
+
+func (a *app) batchCancelTasks(w http.ResponseWriter, r *http.Request) {
+	a.runTaskBatch(w, r, a.cancelTaskByID)
+}
+
+func (a *app) batchRetryTasks(w http.ResponseWriter, r *http.Request) {
+	a.runTaskBatch(w, r, a.retryTaskByID)
+}
+
+func (a *app) batchDeleteTasks(w http.ResponseWriter, r *http.Request) {
+	a.runTaskBatch(w, r, a.deleteTaskByID)
+}
+
+// cancelTaskByID 取消单个任务：更新 task 状态、通知 ComfyUI 清队列、推送事件。
+// 已终态或不存在时返回 errTaskNotCancellable / errTaskNotFound。
+func (a *app) cancelTaskByID(ctx context.Context, id int64) error {
+	var status string
+	if err := a.db.QueryRowContext(ctx, `SELECT status FROM generation_tasks WHERE id=?`, id).Scan(&status); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return errTaskNotFound
+		}
+		return err
+	}
+	if status != "pending" && status != "running" {
+		return errTaskNotCancellable
+	}
+	// 先查出该 task 下所有已提交的 comfy_prompt_id（一个 task 可能有多个 item）
+	var comfyPromptIDs []string
+	if rows, err := a.db.QueryContext(ctx, `SELECT comfy_prompt_id FROM generation_items WHERE task_id=? AND COALESCE(comfy_prompt_id,'')!=''`, id); err == nil {
+		for rows.Next() {
+			var pid string
+			if err := rows.Scan(&pid); err == nil && pid != "" {
+				comfyPromptIDs = append(comfyPromptIDs, pid)
+			}
+		}
+		rows.Close()
+	}
+	// 提交时用的是 task 上的地址快照，优先用它，settings 仅作兜底
+	var taskURL string
+	_ = a.db.QueryRowContext(ctx, `SELECT comfyui_url FROM generation_tasks WHERE id=?`, id).Scan(&taskURL)
+
+	result, err := a.db.ExecContext(ctx, `UPDATE generation_tasks SET status='cancelled', completed_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('pending','running')`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := result.RowsAffected(); n == 0 {
+		// 状态在 SELECT 与 UPDATE 之间被改掉（并发），按不可取消处理
+		return errTaskNotCancellable
+	}
+	// 通知 ComfyUI 从队列中删除（只删排队项；正在执行的不能靠 /interrupt，那会影响同实例的其它任务）
+	if len(comfyPromptIDs) > 0 {
+		comfyURL := taskURL
+		if comfyURL == "" {
+			comfyURL, _ = a.setting(ctx, "comfyui_url")
+		}
+		if comfyURL != "" {
+			for _, pid := range comfyPromptIDs {
+				go a.deleteComfyQueueItem(comfyURL, pid)
+			}
+		}
+	}
+	a.publish(id, map[string]any{"task_id": id, "status": "cancelled"})
+	return nil
+}
+
+// retryTaskByID 重跑失败任务：重置 task 与失败 item，成功的 item 保持不动，避免重复出图。
+func (a *app) retryTaskByID(ctx context.Context, id int64) error {
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE generation_tasks SET status='pending', failed_count=0, completed_at=NULL WHERE id=? AND status='failed'`, id)
+	if err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if n, _ := result.RowsAffected(); n == 0 {
+		_ = tx.Rollback()
+		return errTaskNotFailed
+	}
+	// 关键：只重置 task 是没用的，submitter 只捞 item.status='pending'。
+	// 必须把该 task 下失败的 item 一并重置（成功的 item 保持不动，避免重复出图）。
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE generation_items SET status='pending', comfy_prompt_id='', error_message='' WHERE task_id=? AND status='failed'`, id); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	// 关联提示词状态同步回 pending，保持列表与任务状态一致
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE prompts SET status='pending', updated_at=CURRENT_TIMESTAMP
+		 WHERE id IN (SELECT prompt_id FROM generation_items WHERE task_id=? AND status='pending' AND prompt_id IS NOT NULL)`, id); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	a.publish(id, map[string]any{"task_id": id, "status": "pending"})
+	return nil
+}
+
+// deleteTaskByID 删除任务及其关联的 items / images（running 状态不允许删除）。
+func (a *app) deleteTaskByID(ctx context.Context, id int64) error {
+	var status string
+	if err := a.db.QueryRowContext(ctx, `SELECT status FROM generation_tasks WHERE id=?`, id).Scan(&status); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return errTaskNotFound
+		}
+		return err
+	}
+	if status == "running" {
+		return errTaskRunning
+	}
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	_, _ = tx.ExecContext(ctx, `DELETE FROM images WHERE generation_item_id IN (SELECT id FROM generation_items WHERE task_id=?)`, id)
+	_, _ = tx.ExecContext(ctx, `DELETE FROM generation_items WHERE task_id=?`, id)
+	// 带上状态条件，避免 SELECT 之后任务转为 running 时被并发删除
+	result, err := tx.ExecContext(ctx, `DELETE FROM generation_tasks WHERE id=? AND status!='running'`, id)
+	if err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if n, _ := result.RowsAffected(); n == 0 {
+		_ = tx.Rollback()
+		return errTaskRunning
+	}
+	if err := tx.Commit(); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return nil
 }

@@ -25,6 +25,8 @@
 
 ### 1. 启动后端
 
+必须在 **`backend/` 目录**下运行。`DATA_DIR` 默认 `../data`，即项目根目录下的 `data/`：
+
 ```bash
 cd backend
 go run ./cmd/server
@@ -36,9 +38,12 @@ go run ./cmd/server
 
 ```bash
 SERVER_PORT=8080        # 监听端口，默认 8080
-DATA_DIR=../data        # 数据目录，默认 backend 同级的 data/
+DATA_DIR=../data        # 数据目录，默认 ../data（相对启动目录，即项目根目录的 data/）
 COMFYUI_URL=http://127.0.0.1:8188  # ComfyUI 地址
 ```
+
+> `DATA_DIR` 是相对**启动时的工作目录**解析的。请固定从 `backend/` 目录启动；
+> 若必须从其他目录启动，请显式传入绝对路径的 `DATA_DIR`，否则会读写到错误的目录。
 
 ### 2. 启动前端
 
@@ -116,7 +121,7 @@ docker compose up -d --build
 docker build --platform linux/amd64 -t comfyui-server:1.0.0 .
 
 # 运行容器（NAS 部署）
-docker run -p 8080:8080 -v comfyui_server_data:/data comfyui-server:1.0.0
+docker run -p 8080:8080 -v comfyui_server_data:/app/data comfyui-server:1.0.0
 
 # 导出镜像（用于 NAS 部署）
 docker save comfyui-server:1.0.0 -o comfyui-server.tar
@@ -125,7 +130,7 @@ docker save comfyui-server:1.0.0 -o comfyui-server.tar
 **说明：**
 - `--platform linux/amd64`：指定构建平台为 x86_64 架构（适用于大多数 NAS）
 - `-p 8080:8080`：将容器的 8080 端口映射到主机的 8080 端口
-- `-v comfyui_server_data:/data`：使用 Docker 卷挂载数据目录，持久化数据库和图片
+- `-v comfyui_server_data:/app/data`：使用 Docker 卷挂载数据目录，持久化数据库和图片
 - `docker save`：导出镜像为 tar 文件，方便传输到 NAS 设备
 
 ### 环境变量
@@ -134,9 +139,9 @@ docker save comfyui-server:1.0.0 -o comfyui-server.tar
 |------|--------|------|
 | `COMFYUI_URL` | `http://127.0.0.1:8188` | ComfyUI 服务地址（首次写入数据库） |
 | `SERVER_PORT` | `8080` | 后端监听端口 |
-| `DATA_DIR` | `/data` | 数据存储目录 |
-| `DB_PATH` | `/data/db/comfyui.db` | SQLite 数据库路径 |
-| `STATIC_DIR` | `/static` | 前端静态文件目录（Docker 内置） |
+| `DATA_DIR` | `/app/data` | 数据存储目录 |
+| `DB_PATH` | `/app/data/db/comfyui.db` | SQLite 数据库路径 |
+| `STATIC_DIR` | `/app/static` | 前端静态文件目录（Docker 内置） |
 
 ### 数据目录
 

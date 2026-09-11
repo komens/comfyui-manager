@@ -25,16 +25,17 @@ type PromptRecord struct {
 	PositivePrompt string `json:"positive_prompt"`
 	NegativePrompt string `json:"negative_prompt"`
 	GroupName      string `json:"group_name"`
-	GroupID        int64  `json:"group_id"`
+	GroupID        string `json:"group_id"` // prompts.group_id 是 TEXT 列，不能按整数扫描
 	Status         string `json:"status"`
 	IsFavorite     bool   `json:"is_favorite"`
 }
 
 type ImageRecord struct {
 	ID             int64  `json:"id"`
-	Filename       string `json:"filename"`
-	PromptID       int64  `json:"prompt_id"`       // 原始 prompt ID，导入时需要映射
-	PositivePrompt string `json:"positive_prompt"` // 冗余存储，方便导入时关联
+	Filename       string `json:"filename"`               // 展示/下载用的文件名（通常是 ComfyUI 原始名）
+	ArchiveName    string `json:"archive_name,omitempty"` // ZIP 内的实际文件名，与 filename 不同时才写入
+	PromptID       int64  `json:"prompt_id"`              // 原始 prompt ID，导入时需要映射
+	PositivePrompt string `json:"positive_prompt"`        // 冗余存储，方便导入时关联
 	IsFavorite     bool   `json:"is_favorite"`
 }
 
@@ -69,7 +70,7 @@ func (a *app) exportData(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 查询 prompts
-	rows, err := a.db.Query(`SELECT p.id, COALESCE(p.title,''), COALESCE(p.description,''), COALESCE(p.positive_prompt,''), COALESCE((SELECT negative_prompt FROM workflows w JOIN generation_tasks t ON t.workflow_id=w.id JOIN generation_items i ON i.task_id=t.id WHERE i.prompt_id=p.id LIMIT 1),''), COALESCE(p.group_name,''), COALESCE(p.group_id,0), COALESCE(p.status,''), p.is_favorite FROM prompts p`+promptCond, promptArgs...)
+	rows, err := a.db.Query(`SELECT p.id, COALESCE(p.title,''), COALESCE(p.description,''), COALESCE(p.positive_prompt,''), COALESCE((SELECT negative_prompt FROM workflows w JOIN generation_tasks t ON t.workflow_id=w.id JOIN generation_items i ON i.task_id=t.id WHERE i.prompt_id=p.id LIMIT 1),''), COALESCE(p.group_name,''), COALESCE(p.group_id,''), COALESCE(p.status,''), p.is_favorite FROM prompts p`+promptCond, promptArgs...)
 	if err != nil {
 		writeError(w, 500, "query prompts failed")
 		return
@@ -91,6 +92,7 @@ func (a *app) exportData(w http.ResponseWriter, r *http.Request) {
 
 	// 查询关联图片
 	var images []ImageRecord
+	imageStorage := map[int64]string{} // image id -> 磁盘路径
 	if len(promptIDs) > 0 {
 		// 构建 IN 子句
 		placeholders := make([]string, len(promptIDs))
@@ -101,7 +103,7 @@ func (a *app) exportData(w http.ResponseWriter, r *http.Request) {
 		}
 		imgCond := strings.Join(placeholders, ",")
 
-		imgRows, err := a.db.Query(`SELECT img.id, img.filename, i.prompt_id, COALESCE(p.positive_prompt,''), img.is_favorite
+		imgRows, err := a.db.Query(`SELECT img.id, img.filename, img.storage_path, i.prompt_id, COALESCE(p.positive_prompt,''), img.is_favorite
 			FROM images img
 			JOIN generation_items i ON i.id=img.generation_item_id
 			LEFT JOIN prompts p ON p.id=i.prompt_id
@@ -110,9 +112,17 @@ func (a *app) exportData(w http.ResponseWriter, r *http.Request) {
 			defer imgRows.Close()
 			for imgRows.Next() {
 				var img ImageRecord
+				var storage string
 				var fav int
-				if err := imgRows.Scan(&img.ID, &img.Filename, &img.PromptID, &img.PositivePrompt, &fav); err == nil {
+				if err := imgRows.Scan(&img.ID, &img.Filename, &storage, &img.PromptID, &img.PositivePrompt, &fav); err == nil {
 					img.IsFavorite = fav == 1
+					// filename 与磁盘上的实际文件名常常不一致（下载时被重命名为 <时间戳>_<id>.png），
+					// ZIP 条目必须以磁盘文件名为准，否则导入侧按 filename 找不到文件。
+					archive := filepath.Base(storage)
+					if archive != "" && archive != "." && archive != img.Filename {
+						img.ArchiveName = archive
+					}
+					imageStorage[img.ID] = storage
 					images = append(images, img)
 				}
 			}
@@ -140,13 +150,24 @@ func (a *app) exportData(w http.ResponseWriter, r *http.Request) {
 
 	// 写入图片文件
 	for _, img := range images {
-		srcPath := filepath.Join(a.dataDir, "images", img.Filename)
+		srcPath := a.imageFilePath(imageStorage[img.ID])
+		if srcPath == "" {
+			continue
+		}
 		srcFile, err := os.Open(srcPath)
 		if err != nil {
 			continue
 		}
-		fw, _ := zw.Create("images/" + img.Filename)
-		io.Copy(fw, srcFile)
+		entryName := img.Filename
+		if img.ArchiveName != "" {
+			entryName = img.ArchiveName
+		}
+		fw, err := zw.Create("images/" + entryName)
+		if err != nil {
+			srcFile.Close()
+			continue
+		}
+		_, _ = io.Copy(fw, srcFile)
 		srcFile.Close()
 	}
 }
@@ -243,9 +264,23 @@ func (a *app) importData(w http.ResponseWriter, r *http.Request) {
 	skippedImages := 0
 
 	for _, img := range images {
+		// ZIP 内的实际文件名：优先 archive_name，兼容旧导出包仅有 filename 的情况
+		archiveName := strings.TrimSpace(img.ArchiveName)
+		if archiveName == "" {
+			archiveName = strings.TrimSpace(img.Filename)
+		}
+		if archiveName == "" {
+			skippedImages++
+			continue
+		}
+		displayName := img.Filename
+		if displayName == "" {
+			displayName = archiveName
+		}
+
 		// 检查文件是否已存在
 		var existingID int64
-		err := tx.QueryRow(`SELECT id FROM images WHERE filename=?`, img.Filename).Scan(&existingID)
+		err := tx.QueryRow(`SELECT id FROM images WHERE filename=?`, displayName).Scan(&existingID)
 		if err == nil {
 			skippedImages++
 			continue
@@ -261,13 +296,12 @@ func (a *app) importData(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// 写入图片文件
-		if zf, ok := fileMap[img.Filename]; ok {
+		target := filepath.Join(a.dataDir, "images", archiveName)
+		if zf, ok := fileMap[archiveName]; ok {
 			rc, err := zf.Open()
 			if err == nil {
-				target := filepath.Join(a.dataDir, "images", img.Filename)
-				dst, err := os.Create(target)
-				if err == nil {
-					io.Copy(dst, rc)
+				if dst, createErr := os.Create(target); createErr == nil {
+					_, _ = io.Copy(dst, rc)
 					dst.Close()
 				}
 				rc.Close()
@@ -276,7 +310,7 @@ func (a *app) importData(w http.ResponseWriter, r *http.Request) {
 
 		// 插入图片记录
 		_, err = tx.Exec(`INSERT INTO images(generation_item_id, filename, storage_path, is_favorite, created_at) VALUES(?,?,?,?,CURRENT_TIMESTAMP)`,
-			itemID, img.Filename, filepath.Join(a.dataDir, "images", img.Filename), boolToInt(img.IsFavorite))
+			itemID, displayName, target, boolToInt(img.IsFavorite))
 		if err != nil {
 			skippedImages++
 			continue

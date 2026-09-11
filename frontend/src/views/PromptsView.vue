@@ -3,7 +3,8 @@ import { onMounted, ref, computed } from 'vue'
 import { RouterLink } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import Pagination from '../components/Pagination.vue'
-import { api } from '../api/client'
+import { api, type Workflow } from '../api/client'
+import { pickDefaultWorkflow } from '../utils/workflowParams'
 
 type Prompt = {
   id: number
@@ -154,7 +155,9 @@ async function batchDelete() {
 // 打开批量重跑弹窗
 function openBatchRun(mode: 'selected' | 'group') {
   batchRunMode.value = mode
-  batchRunWorkflow.value = workflows.value.length ? workflows.value[0].id : 0
+  // 预选默认工作流：下拉只列出启用项，默认项被禁用时退回 0
+  const preferred = pickDefaultWorkflow(workflows.value)
+  batchRunWorkflow.value = preferred && preferred.enabled ? preferred.id : 0
   showBatchRunModal.value = true
 }
 
@@ -234,7 +237,7 @@ onMounted(() => {
         </button>
         <button
           v-for="g in groups"
-          :key="g.group_id"
+          :key="g.group_name"
           class="group-item"
           :class="{ active: selectedGroup === g.group_name }"
           @click="selectGroup(g.group_name)"
@@ -272,7 +275,7 @@ onMounted(() => {
         <button class="btn btn-sm" :class="{ 'btn-primary': favOnly }" @click="favOnly = !favOnly; resetAndLoad()">
           {{ favOnly ? '★ 仅收藏' : '☆ 仅收藏' }}
         </button>
-        <RouterLink to="/submit" class="btn btn-primary">+ 新建提示词</RouterLink>
+        <RouterLink to="/prompts/new" class="btn btn-primary">+ 新建提示词</RouterLink>
       </div>
 
       <!-- 操作栏 -->

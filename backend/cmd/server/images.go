@@ -3,9 +3,23 @@ package main
 import (
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
+
+// imageFilePath 把 images.storage_path 解析成可读的真实路径。
+// storage_path 是写入时按当时的 cwd/DATA_DIR 拼出来的，换目录启动后可能失效，
+// 因此原路径读不到时回退到 dataDir/images/<basename>。
+func (a *app) imageFilePath(storagePath string) string {
+	if strings.TrimSpace(storagePath) == "" {
+		return ""
+	}
+	if _, err := os.Stat(storagePath); err == nil {
+		return storagePath
+	}
+	return filepath.Join(a.dataDir, "images", filepath.Base(storagePath))
+}
 
 func (a *app) listImages(w http.ResponseWriter, r *http.Request) {
 	// 收藏过滤

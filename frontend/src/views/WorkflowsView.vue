@@ -21,6 +21,7 @@ const loading = ref(false)
 const showForm = ref(false)
 const editingId = ref<number | null>(null)
 const detecting = ref(false)
+const defaultBusy = ref<number | null>(null)
 
 const page = ref(1)
 const pageSize = ref(20)
@@ -148,6 +149,26 @@ async function deleteWorkflow(id: number, wfName: string) {
   }
 }
 
+// 设为默认 / 取消默认：默认工作流全局唯一，由后端在事务内保证
+async function setDefaultWorkflow(wf: Workflow, value: boolean) {
+  defaultBusy.value = wf.id
+  try {
+    await api(`/api/workflows/${wf.id}/default`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ is_default: value }),
+    })
+    message.value = value ? `已将「${wf.name}」设为默认工作流` : '已取消默认工作流'
+    messageType.value = 'success'
+    await load()
+  } catch (e) {
+    message.value = e instanceof Error ? e.message : '设置默认工作流失败'
+    messageType.value = 'error'
+  } finally {
+    defaultBusy.value = null
+  }
+}
+
 async function editWorkflow(wf: Workflow) {
   try {
     const detail = await api<Workflow & { workflow_json: any; params_schema: any }>(`/api/workflows/${wf.id}`)
@@ -271,12 +292,22 @@ onMounted(load)
     <div v-else>
       <div v-for="wf in workflows" :key="wf.id" class="list-row">
         <div class="flex-1" style="min-width:0;">
-          <div style="font-weight:600;">{{ wf.name }}</div>
+          <div style="font-weight:600;">
+            {{ wf.name }}
+            <span v-if="wf.is_default" class="badge badge-default">默认</span>
+          </div>
           <div class="text-xs muted" style="margin-top:3px;">{{ wf.description || '未填写描述' }}</div>
         </div>
         <span class="badge" :class="wf.enabled ? 'badge-success' : 'badge-cancelled'">
           {{ wf.enabled ? '启用' : '禁用' }}
         </span>
+        <button
+          class="btn btn-ghost btn-sm"
+          :class="{ 'is-default': wf.is_default }"
+          :disabled="defaultBusy === wf.id"
+          :title="wf.is_default ? '取消默认工作流' : '设为默认工作流'"
+          @click="setDefaultWorkflow(wf, !wf.is_default)"
+        >{{ wf.is_default ? '★ 默认' : '☆ 设为默认' }}</button>
         <button class="btn btn-ghost btn-sm" @click="editWorkflow(wf)" title="编辑">&#9998;</button>
         <button class="btn btn-ghost btn-sm" @click="deleteWorkflow(wf.id, wf.name)" title="删除">&#10005;</button>
       </div>
@@ -311,6 +342,8 @@ onMounted(load)
 .param-item label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 4px; color: var(--c-text); }
 .param-item input { width: 100%; }
 .adv-details summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--c-muted); padding: 8px 0; }
+.badge-default { margin-left: 6px; background: var(--c-primary-light); color: var(--c-primary); border: 1px solid var(--c-primary-border); }
+.is-default { color: var(--c-primary); font-weight: 600; }
 @media (max-width: 600px) {
   .form-row { grid-template-columns: 1fr; }
 }

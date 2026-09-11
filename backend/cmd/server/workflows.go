@@ -26,7 +26,7 @@ func (a *app) listWorkflows(w http.ResponseWriter, r *http.Request) {
 	_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM workflows`).Scan(&total)
 	// 分页
 	page, pageSize, offset := parsePagination(r)
-	rows, err := a.db.QueryContext(r.Context(), `SELECT id, name, description, workflow_path, mapping_json, COALESCE(negative_prompt,''), params_schema, enabled, created_at, updated_at FROM workflows ORDER BY id DESC LIMIT ? OFFSET ?`, pageSize, offset)
+	rows, err := a.db.QueryContext(r.Context(), `SELECT id, name, description, workflow_path, mapping_json, COALESCE(negative_prompt,''), params_schema, enabled, is_default, created_at, updated_at FROM workflows ORDER BY id DESC LIMIT ? OFFSET ?`, pageSize, offset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "query workflows failed")
 		return
@@ -34,16 +34,16 @@ func (a *app) listWorkflows(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	items := make([]map[string]any, 0)
 	for rows.Next() {
-		var id, enabled int
+		var id, enabled, isDefault int
 		var name, description, path, mapping, negative, schema, created, updated string
-		if err := rows.Scan(&id, &name, &description, &path, &mapping, &negative, &schema, &enabled, &created, &updated); err != nil {
+		if err := rows.Scan(&id, &name, &description, &path, &mapping, &negative, &schema, &enabled, &isDefault, &created, &updated); err != nil {
 			writeError(w, http.StatusInternalServerError, "read workflow failed")
 			return
 		}
 		items = append(items, map[string]any{"id": id, "name": name, "description": description,
 			"workflow_path": path, "mapping": json.RawMessage(mapping),
 			"negative_prompt": negative, "params_schema": json.RawMessage(schema),
-			"enabled": enabled == 1, "created_at": created, "updated_at": updated})
+			"enabled": enabled == 1, "is_default": isDefault == 1, "created_at": created, "updated_at": updated})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "page": page, "page_size": pageSize})
 }
@@ -75,20 +75,21 @@ func (a *app) createWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "params_schema must be valid JSON")
 		return
 	}
-	path := a.dataDir + "/workflows/" + safeFilename(input.Name) + ".json"
-	if err := writeAtomic(path, input.WorkflowJSON); err != nil {
+	// 只存文件名，读取时按当前 dataDir 解析（避免绑定启动目录）
+	fileName := safeFilename(input.Name) + ".json"
+	if err := writeAtomic(filepath.Join(a.dataDir, "workflows", fileName), input.WorkflowJSON); err != nil {
 		writeError(w, http.StatusInternalServerError, "save workflow file failed")
 		return
 	}
 	result, err := a.db.ExecContext(r.Context(),
 		`INSERT INTO workflows(name, description, workflow_path, mapping_json, negative_prompt, params_schema, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?)`,
-		input.Name, input.Description, path, string(mapping), input.NegativePrompt, string(schema), time.Now(), time.Now())
+		input.Name, input.Description, fileName, string(mapping), input.NegativePrompt, string(schema), time.Now(), time.Now())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "save workflow failed")
 		return
 	}
 	id, _ := result.LastInsertId()
-	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "name": input.Name, "workflow_path": path,
+	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "name": input.Name, "workflow_path": fileName,
 		"mapping": json.RawMessage(mapping), "negative_prompt": input.NegativePrompt,
 		"params_schema": json.RawMessage(schema)})
 }
@@ -100,25 +101,71 @@ func (a *app) getWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var name, description, path, mapping, negative, schema, created, updated string
-	var enabled int
+	var enabled, isDefault int
 	err = a.db.QueryRowContext(r.Context(),
-		`SELECT name, description, workflow_path, mapping_json, COALESCE(negative_prompt,''), params_schema, enabled, created_at, updated_at FROM workflows WHERE id=?`, id).
-		Scan(&name, &description, &path, &mapping, &negative, &schema, &enabled, &created, &updated)
+		`SELECT name, description, workflow_path, mapping_json, COALESCE(negative_prompt,''), params_schema, enabled, is_default, created_at, updated_at FROM workflows WHERE id=?`, id).
+		Scan(&name, &description, &path, &mapping, &negative, &schema, &enabled, &isDefault, &created, &updated)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "workflow not found")
 		return
 	}
-	workflowJSON, err := os.ReadFile(path)
+	workflowJSON, err := os.ReadFile(a.workflowFilePath(path))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "read workflow file failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id": id, "name": name, "description": description, "workflow_path": path,
+		"id": id, "name": name, "description": description, "workflow_path": filepath.Base(path),
 		"workflow_json": json.RawMessage(workflowJSON), "mapping": json.RawMessage(mapping),
 		"negative_prompt": negative, "params_schema": json.RawMessage(schema),
-		"enabled": enabled == 1, "created_at": created, "updated_at": updated,
+		"enabled": enabled == 1, "is_default": isDefault == 1, "created_at": created, "updated_at": updated,
 	})
+}
+
+// setDefaultWorkflow 设置/取消默认工作流。默认工作流全局唯一：
+// 设为默认时会先把其它工作流的 is_default 清零，保证任意时刻至多一个默认。
+func (a *app) setDefaultWorkflow(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid workflow id")
+		return
+	}
+	var input struct {
+		IsDefault bool `json:"is_default"`
+	}
+	if err := decodeJSON(r, &input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "set default failed")
+		return
+	}
+	var exists int
+	if err := tx.QueryRowContext(r.Context(), `SELECT 1 FROM workflows WHERE id=?`, id).Scan(&exists); err != nil {
+		_ = tx.Rollback()
+		writeError(w, http.StatusNotFound, "workflow not found")
+		return
+	}
+	if _, err := tx.ExecContext(r.Context(), `UPDATE workflows SET is_default=0 WHERE is_default=1`); err != nil {
+		_ = tx.Rollback()
+		writeError(w, http.StatusInternalServerError, "set default failed")
+		return
+	}
+	if input.IsDefault {
+		if _, err := tx.ExecContext(r.Context(), `UPDATE workflows SET is_default=1, updated_at=? WHERE id=?`, time.Now(), id); err != nil {
+			_ = tx.Rollback()
+			writeError(w, http.StatusInternalServerError, "set default failed")
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		_ = tx.Rollback()
+		writeError(w, http.StatusInternalServerError, "set default failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "is_default": input.IsDefault})
 }
 
 func (a *app) updateWorkflow(w http.ResponseWriter, r *http.Request) {
@@ -144,7 +191,8 @@ func (a *app) updateWorkflow(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(name) == "" {
 		name = oldName
 	}
-	path := oldPath
+	// 归一化为文件名（兼容旧数据里的 "./data/workflows/x.json"）
+	path := filepath.Base(oldPath)
 	mapping := oldMapping
 	if len(input.WorkflowJSON) > 0 {
 		var workflow any
@@ -152,8 +200,8 @@ func (a *app) updateWorkflow(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "workflow_json must be valid JSON")
 			return
 		}
-		path = a.dataDir + "/workflows/" + safeFilename(name) + ".json"
-		if err := writeAtomic(path, input.WorkflowJSON); err != nil {
+		path = safeFilename(name) + ".json"
+		if err := writeAtomic(filepath.Join(a.dataDir, "workflows", path), input.WorkflowJSON); err != nil {
 			writeError(w, http.StatusInternalServerError, "save workflow file failed")
 			return
 		}
@@ -293,6 +341,47 @@ func (a *app) detectWorkflowParams(w http.ResponseWriter, r *http.Request) {
 			if v, ok := inputs["ckpt_name"]; ok {
 				params = append(params, map[string]any{"name": "checkpoint", "label": "模型", "type": "string", "node_id": nodeID, "field": "inputs.ckpt_name", "default": v})
 			}
+		default:
+			// 通用参数检测：跳过已知类型和连接类型输入
+			knownInputs := map[string]bool{
+				"steps": true, "cfg": true, "seed": true, "width": true, "height": true,
+				"batch_size": true, "ckpt_name": true, "text": true, "image": true,
+				"model": true, "clip": true, "vae": true, "positive": true, "negative": true,
+				"samples": true, "latent": true, "conditioning": true, "control_net": true,
+			}
+			for k, v := range inputs {
+				if knownInputs[k] {
+					continue
+				}
+				// 跳过连接类型（数组 [node_id, slot]）
+				if _, ok := v.([]any); ok {
+					continue
+				}
+				paramType := "string"
+				switch v.(type) {
+				case float64:
+					if v == float64(int(v.(float64))) {
+						paramType = "integer"
+					} else {
+						paramType = "number"
+					}
+				case bool:
+					paramType = "boolean"
+				}
+				if paramType == "string" {
+					if s, ok := v.(string); ok && len(s) > 200 {
+						continue // 跳过长文本
+					}
+				}
+				label := k
+				if len(label) > 30 {
+					label = label[:30]
+				}
+				params = append(params, map[string]any{
+					"name": fmt.Sprintf("%s_%s", classType, k), "label": label, "type": paramType,
+					"node_id": nodeID, "field": "inputs." + k, "default": v,
+				})
+			}
 		case classType == "CLIPTextEncode":
 			text, _ := inputs["text"].(string)
 			lower := strings.ToLower(text)
@@ -329,10 +418,19 @@ func (a *app) detectWorkflowParams(w http.ResponseWriter, r *http.Request) {
 		nodeID, _ := p["node_id"].(string)
 		field, _ := p["field"].(string)
 		if name == "seed" {
+			// seed 单独走 mapping.seed，避免被 parameters 循环用默认值 0 覆盖掉随机种子
 			mapping["seed"] = map[string]string{"node_id": nodeID, "field": field}
-		} else {
-			paramMap[name] = map[string]string{"node_id": nodeID, "field": field}
+			continue
 		}
+		// 带上 type/label/default：前端 ParamForm 靠 def.type 选控件类型，
+		// 只给 node_id/field 会让 steps、cfg、width 等全部退化成文本输入框。
+		entry := map[string]any{"node_id": nodeID, "field": field}
+		for _, key := range []string{"type", "label", "default"} {
+			if v, ok := p[key]; ok {
+				entry[key] = v
+			}
+		}
+		paramMap[name] = entry
 	}
 	mapping["parameters"] = paramMap
 	mappingJSON, _ := json.Marshal(mapping)
@@ -433,6 +531,21 @@ func safeFilename(value string) string {
 		return "workflow"
 	}
 	return value
+}
+
+// workflowFilePath 把 workflows.workflow_path 解析成当前 dataDir 下的真实文件路径。
+// 新数据只存文件名；旧数据可能是 "./data/workflows/x.json" 这种绑定写入时工作目录的相对路径，
+// 统一取 basename 后重新拼到 dataDir/workflows 下，避免换启动目录 / 换 DATA_DIR / Docker 挂载点后失效。
+func (a *app) workflowFilePath(stored string) string {
+	stored = strings.TrimSpace(stored)
+	if stored == "" {
+		return ""
+	}
+	base := filepath.Base(stored)
+	if base == "." || base == string(filepath.Separator) {
+		return ""
+	}
+	return filepath.Join(a.dataDir, "workflows", base)
 }
 
 func writeAtomic(path string, content []byte) error {

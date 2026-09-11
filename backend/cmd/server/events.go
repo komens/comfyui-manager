@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -68,28 +69,17 @@ func (a *app) cancelTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid task id")
 		return
 	}
-	// 先查出 comfy_prompt_id，用于通知 ComfyUI 删除队列
-	var comfyPromptID string
-	_ = a.db.QueryRow(`SELECT comfy_prompt_id FROM generation_items WHERE task_id=? AND comfy_prompt_id!=''`, id).Scan(&comfyPromptID)
-
-	result, err := a.db.ExecContext(r.Context(), `UPDATE generation_tasks SET status='cancelled', completed_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('pending','running')`, id)
-	if err != nil {
-		writeError(w, 500, "cancel task failed")
-		return
-	}
-	n, _ := result.RowsAffected()
-	if n == 0 {
-		writeError(w, 409, "task is not cancellable")
-		return
-	}
-	// 通知 ComfyUI 从队列中删除
-	if comfyPromptID != "" {
-		comfyURL, _ := a.setting(r.Context(), "comfyui_url")
-		if comfyURL != "" {
-			go a.deleteComfyQueueItem(comfyURL, comfyPromptID)
+	if err := a.cancelTaskByID(r.Context(), id); err != nil {
+		switch {
+		case errors.Is(err, errTaskNotFound):
+			writeError(w, 404, "task not found")
+		case errors.Is(err, errTaskNotCancellable):
+			writeError(w, 409, "task is not cancellable")
+		default:
+			writeError(w, 500, "cancel task failed")
 		}
+		return
 	}
-	a.publish(id, map[string]any{"task_id": id, "status": "cancelled"})
 	writeJSON(w, 200, map[string]any{"id": id, "status": "cancelled"})
 }
 
@@ -99,14 +89,12 @@ func (a *app) retryTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid task id")
 		return
 	}
-	result, err := a.db.ExecContext(r.Context(), `UPDATE generation_tasks SET status='pending', failed_count=0, completed_at=NULL WHERE id=? AND status='failed'`, id)
-	if err != nil {
+	if err := a.retryTaskByID(r.Context(), id); err != nil {
+		if errors.Is(err, errTaskNotFailed) {
+			writeError(w, 409, "only failed tasks can be retried")
+			return
+		}
 		writeError(w, 500, "retry task failed")
-		return
-	}
-	n, _ := result.RowsAffected()
-	if n == 0 {
-		writeError(w, 409, "only failed tasks can be retried")
 		return
 	}
 	writeJSON(w, 202, map[string]any{"id": id, "status": "pending"})
