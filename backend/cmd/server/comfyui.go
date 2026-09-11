@@ -1,12 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
+	"math/rand"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,19 +15,6 @@ import (
 
 type comfySubmitResponse struct {
 	PromptID string `json:"prompt_id"`
-}
-type comfyImage struct {
-	Filename  string `json:"filename"`
-	Subfolder string `json:"subfolder"`
-	Type      string `json:"type"`
-}
-type comfyHistory struct {
-	Status struct {
-		StatusStr string `json:"status_str"`
-	} `json:"status"`
-	Outputs map[string]struct {
-		Images []comfyImage `json:"images"`
-	} `json:"outputs"`
 }
 
 func submitComfy(ctx context.Context, baseURL string, workflow map[string]any, clientID string) (string, error) {
@@ -43,8 +30,7 @@ func submitComfy(ctx context.Context, baseURL string, workflow map[string]any, c
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		data, _ := io.ReadAll(io.LimitReader(response.Body, 4<<10))
-		return "", fmt.Errorf("ComfyUI /prompt HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(data)))
+		return "", fmt.Errorf("ComfyUI /prompt HTTP %d", response.StatusCode)
 	}
 	var result comfySubmitResponse
 	if err := json.NewDecoder(response.Body).Decode(&result); err != nil || result.PromptID == "" {
@@ -53,117 +39,283 @@ func submitComfy(ctx context.Context, baseURL string, workflow map[string]any, c
 	return result.PromptID, nil
 }
 
-func getHistory(ctx context.Context, baseURL, promptID string) (comfyHistory, error) {
-	var result map[string]comfyHistory
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/history/"+promptID, nil)
-	if err != nil {
-		return comfyHistory{}, err
-	}
-	response, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return comfyHistory{}, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return comfyHistory{}, fmt.Errorf("ComfyUI history HTTP %d", response.StatusCode)
-	}
-	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
-		return comfyHistory{}, err
-	}
-	return result[promptID], nil
-}
-
-func downloadComfyImage(ctx context.Context, baseURL string, image comfyImage, target string) error {
-	query := "filename=" + urlQuery(image.Filename) + "&subfolder=" + urlQuery(image.Subfolder) + "&type=" + urlQuery(image.Type)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/view?"+query, nil)
-	if err != nil {
-		return err
-	}
-	response, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("ComfyUI view HTTP %d", response.StatusCode)
-	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return err
-	}
-	temporary, err := os.CreateTemp(filepath.Dir(target), ".tmp-image-*")
-	if err != nil {
-		return err
-	}
-	name := temporary.Name()
-	defer os.Remove(name)
-	if _, err := io.Copy(temporary, response.Body); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	return os.Rename(name, target)
-}
-
-func urlQuery(value string) string { return url.QueryEscape(value) }
-
-func (a *app) worker() {
-	for taskID := range a.jobs {
-		a.executeTask(taskID)
-	}
-}
-
-func (a *app) executeTask(taskID int64) {
-	ctx := context.Background()
-	var baseURL, parameters, workflowPath, mappingJSON string
-	var itemID int64
-	err := a.db.QueryRow(`SELECT t.comfyui_url, t.parameters_json, w.workflow_path, w.mapping_json, i.id FROM generation_tasks t JOIN workflows w ON w.id=t.workflow_id JOIN generation_items i ON i.task_id=t.id WHERE t.id=?`, taskID).Scan(&baseURL, &parameters, &workflowPath, &mappingJSON, &itemID)
-	if err != nil {
-		a.log.Printf("task %d load failed: %v", taskID, err)
-		return
-	}
-	_, _ = a.db.Exec(`UPDATE generation_tasks SET status='running', started_at=? WHERE id=?`, time.Now(), taskID)
-	_, _ = a.db.Exec(`UPDATE generation_items SET status='running' WHERE id=?`, itemID)
-	a.publish(taskID, map[string]any{"task_id": taskID, "item_id": itemID, "status": "running"})
-	workflowBytes, err := os.ReadFile(workflowPath)
-	if err == nil {
-		var workflow map[string]any
-		err = json.Unmarshal(workflowBytes, &workflow)
-		if err == nil {
-			var input map[string]any
-			err = json.Unmarshal([]byte(parameters), &input)
-			if err == nil {
-				err = injectDirectPrompt(workflow, mappingJSON, input)
-			}
-			if err == nil {
-				var promptID string
-				promptID, err = submitComfy(ctx, baseURL, workflow, fmt.Sprintf("comfyui-server-task-%d", taskID))
-				if err == nil {
-					_, _ = a.db.Exec(`UPDATE generation_items SET comfy_prompt_id=? WHERE id=?`, promptID, itemID)
-					err = a.waitAndDownload(ctx, baseURL, promptID, taskID, itemID)
-				}
+// submitter 提交阶段（每3秒扫描 pending items 提交到 ComfyUI）
+func (a *app) submitter() {
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		rows, err := a.db.Query(`SELECT i.id, i.task_id, i.positive_prompt, t.comfyui_url, t.parameters_json, w.workflow_path, w.mapping_json, COALESCE(w.negative_prompt,'')
+			FROM generation_items i
+			JOIN generation_tasks t ON t.id=i.task_id
+			JOIN workflows w ON w.id=t.workflow_id
+			WHERE i.status='pending' AND t.status='pending'
+			ORDER BY i.id LIMIT 10`)
+		if err != nil {
+			a.log.Printf("submitter query error: %v", err)
+			continue
+		}
+		type pendingItem struct {
+			ItemID         int64
+			TaskID         int64
+			Positive       string
+			BaseURL        string
+			Parameters     string
+			WorkflowPath   string
+			MappingJSON    string
+			NegativePrompt string
+		}
+		var items []pendingItem
+		for rows.Next() {
+			var p pendingItem
+			if err := rows.Scan(&p.ItemID, &p.TaskID, &p.Positive, &p.BaseURL, &p.Parameters, &p.WorkflowPath, &p.MappingJSON, &p.NegativePrompt); err == nil {
+				items = append(items, p)
 			}
 		}
+		rows.Close()
+		for _, p := range items {
+			a.submitItem(p.ItemID, p.TaskID, p.Positive, p.BaseURL, p.Parameters, p.WorkflowPath, p.MappingJSON, p.NegativePrompt)
+		}
 	}
+}
+
+// submitItem 提交单个 item 到 ComfyUI
+func (a *app) submitItem(itemID, taskID int64, positive, baseURL, parameters, workflowPath, mappingJSON, negativePrompt string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// 标记 task 为 running
+	_, _ = a.db.Exec(`UPDATE generation_tasks SET status='running', started_at=CASE WHEN started_at IS NULL THEN ? ELSE started_at END WHERE id=? AND status='pending'`, time.Now(), taskID)
+	_, _ = a.db.Exec(`UPDATE generation_items SET status='running' WHERE id=?`, itemID)
+	a.publish(taskID, map[string]any{"task_id": taskID, "item_id": itemID, "status": "running"})
+
+	workflowBytes, err := os.ReadFile(workflowPath)
 	if err != nil {
-		_, _ = a.db.Exec(`UPDATE generation_items SET status='failed', error_message=? WHERE id=?`, err.Error(), itemID)
-		_, _ = a.db.Exec(`UPDATE generation_tasks SET status='failed', failed_count=1, completed_at=? WHERE id=?`, time.Now(), taskID)
-		a.publish(taskID, map[string]any{"task_id": taskID, "item_id": itemID, "status": "failed", "error": err.Error()})
+		a.failItem(itemID, taskID, fmt.Sprintf("read workflow failed: %v", err))
 		return
 	}
+	var workflow map[string]any
+	if err := json.Unmarshal(workflowBytes, &workflow); err != nil {
+		a.failItem(itemID, taskID, fmt.Sprintf("parse workflow failed: %v", err))
+		return
+	}
+	if _, hasNodes := workflow["nodes"]; hasNodes {
+		workflow, err = uiToAPIFormat(workflow)
+		if err != nil {
+			a.failItem(itemID, taskID, fmt.Sprintf("convert workflow format failed: %v", err))
+			return
+		}
+	}
+	var input map[string]any
+	if err := json.Unmarshal([]byte(parameters), &input); err != nil {
+		a.failItem(itemID, taskID, fmt.Sprintf("parse parameters failed: %v", err))
+		return
+	}
+	input["negative_prompt"] = negativePrompt
+	if err := injectDirectPrompt(workflow, mappingJSON, input); err != nil {
+		a.failItem(itemID, taskID, fmt.Sprintf("inject prompt failed: %v", err))
+		return
+	}
+	comfyPromptID, err := submitComfy(ctx, baseURL, workflow, fmt.Sprintf("comfyui-server-task-%d", taskID))
+	if err != nil {
+		a.failItem(itemID, taskID, fmt.Sprintf("submit to ComfyUI failed: %v", err))
+		return
+	}
+	_, _ = a.db.Exec(`UPDATE generation_items SET status='submitted', comfy_prompt_id=? WHERE id=?`, comfyPromptID, itemID)
+	a.log.Printf("item %d submitted to ComfyUI (prompt_id=%s)", itemID, comfyPromptID)
+}
+
+// failItem 标记 item 失败
+func (a *app) failItem(itemID, taskID int64, errMsg string) {
+	a.log.Printf("item %d failed: %s", itemID, errMsg)
+	_, _ = a.db.Exec(`UPDATE generation_items SET status='failed', error_message=? WHERE id=?`, errMsg, itemID)
+	_, _ = a.db.Exec(`UPDATE prompts SET status='failed', updated_at=CURRENT_TIMESTAMP WHERE id=(SELECT prompt_id FROM generation_items WHERE id=?)`, itemID)
+	_, _ = a.db.Exec(`UPDATE generation_tasks SET status='failed', failed_count=failed_count+1, completed_at=? WHERE id=?`, time.Now(), taskID)
+	a.publish(taskID, map[string]any{"task_id": taskID, "item_id": itemID, "status": "failed", "error": errMsg})
+}
+
+// downloader 轮询下载阶段（每5秒检查 submitted items 是否完成）
+func (a *app) downloader() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		rows, err := a.db.Query(`SELECT i.id, i.task_id, i.comfy_prompt_id, t.comfyui_url
+			FROM generation_items i
+			JOIN generation_tasks t ON t.id=i.task_id
+			WHERE i.status='submitted' AND i.comfy_prompt_id!=''
+			ORDER BY i.id LIMIT 20`)
+		if err != nil {
+			a.log.Printf("downloader query error: %v", err)
+			continue
+		}
+		type submittedItem struct {
+			ItemID        int64
+			TaskID        int64
+			ComfyPromptID string
+			BaseURL       string
+		}
+		var items []submittedItem
+		for rows.Next() {
+			var s submittedItem
+			if err := rows.Scan(&s.ItemID, &s.TaskID, &s.ComfyPromptID, &s.BaseURL); err == nil {
+				items = append(items, s)
+			}
+		}
+		rows.Close()
+		for _, s := range items {
+			a.checkAndDownload(s.ItemID, s.TaskID, s.ComfyPromptID, s.BaseURL)
+		}
+	}
+}
+
+// checkAndDownload 检查单个 item 是否完成并下载图片
+func (a *app) checkAndDownload(itemID, taskID int64, comfyPromptID, baseURL string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	// 检查任务是否被取消
+	var taskStatus string
+	_ = a.db.QueryRow(`SELECT status FROM generation_tasks WHERE id=?`, taskID).Scan(&taskStatus)
+	if taskStatus == "cancelled" {
+		return
+	}
+
+	// 查询 ComfyUI /history
+	history, err := pollComfyHistory(ctx, baseURL, comfyPromptID)
+	if err != nil {
+		return // 还没完成或查询出错，下次再试
+	}
+
+	// 提取输出图片
+	outputs, _ := history["outputs"].(map[string]any)
+	if outputs == nil {
+		a.failItem(itemID, taskID, "ComfyUI response missing outputs")
+		return
+	}
+	found := false
+	for _, nodeOutput := range outputs {
+		nodeMap, _ := nodeOutput.(map[string]any)
+		if nodeMap == nil {
+			continue
+		}
+		images, _ := nodeMap["images"].([]any)
+		for _, img := range images {
+			imgMap, _ := img.(map[string]any)
+			if imgMap == nil {
+				continue
+			}
+			filename, _ := imgMap["filename"].(string)
+			subfolder, _ := imgMap["subfolder"].(string)
+			imgType, _ := imgMap["type"].(string)
+			if filename == "" {
+				continue
+			}
+			imgData, dlErr := downloadComfyImage(ctx, baseURL, filename, subfolder, imgType)
+			if dlErr != nil {
+				a.log.Printf("download image failed: %v", dlErr)
+				continue
+			}
+			res, insertErr := a.db.Exec(`INSERT INTO images(generation_item_id, filename, storage_path, created_at) VALUES(?,?,'',?)`, itemID, filename, time.Now())
+			if insertErr != nil {
+				a.log.Printf("insert image record failed: %v", insertErr)
+				continue
+			}
+			imageID, _ := res.LastInsertId()
+			imgFilename := fmt.Sprintf("%s_%d.png", time.Now().Format("20060102_150405"), imageID)
+			target := filepath.Join(a.dataDir, "images", imgFilename)
+			if writeErr := os.WriteFile(target, imgData, 0o644); writeErr != nil {
+				a.log.Printf("write image file failed: %v", writeErr)
+				continue
+			}
+			_, _ = a.db.Exec(`UPDATE images SET storage_path=? WHERE id=?`, target, imageID)
+			found = true
+		}
+	}
+	if !found {
+		a.failItem(itemID, taskID, "no images in ComfyUI output")
+		return
+	}
+	// 成功
 	_, _ = a.db.Exec(`UPDATE generation_items SET status='success' WHERE id=?`, itemID)
-	_, _ = a.db.Exec(`UPDATE generation_tasks SET status='completed', success_count=1, completed_at=? WHERE id=?`, time.Now(), taskID)
+	_, _ = a.db.Exec(`UPDATE prompts SET status='done', completed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=(SELECT prompt_id FROM generation_items WHERE id=?)`, itemID)
+	// 检查 task 下所有 items 是否都完成了
+	var pending int
+	_ = a.db.QueryRow(`SELECT COUNT(*) FROM generation_items WHERE task_id=? AND status NOT IN ('success','failed')`, taskID).Scan(&pending)
+	if pending == 0 {
+		var successCt, failedCt int
+		_ = a.db.QueryRow(`SELECT COUNT(*) FROM generation_items WHERE task_id=? AND status='success'`, taskID).Scan(&successCt)
+		_ = a.db.QueryRow(`SELECT COUNT(*) FROM generation_items WHERE task_id=? AND status='failed'`, taskID).Scan(&failedCt)
+		taskStatus := "completed"
+		if failedCt > 0 && successCt == 0 {
+			taskStatus = "failed"
+		} else if failedCt > 0 {
+			taskStatus = "completed" // 部分成功也算完成
+		}
+		_, _ = a.db.Exec(`UPDATE generation_tasks SET status=?, success_count=?, failed_count=?, completed_at=? WHERE id=?`, taskStatus, successCt, failedCt, time.Now(), taskID)
+	}
 	a.publish(taskID, map[string]any{"task_id": taskID, "item_id": itemID, "status": "success"})
+}
+
+// pollComfyHistory 查询 /history/{prompt_id} 来检查任务是否完成
+func pollComfyHistory(ctx context.Context, baseURL, promptID string) (map[string]any, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/history/"+promptID, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == 204 || resp.StatusCode == 404 {
+		return nil, fmt.Errorf("not ready")
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("history HTTP %d", resp.StatusCode)
+	}
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	if _, ok := result[promptID]; !ok {
+		return nil, fmt.Errorf("prompt not found in history")
+	}
+	promptResult, _ := result[promptID].(map[string]any)
+	if promptResult == nil {
+		return nil, fmt.Errorf("invalid prompt result")
+	}
+	return promptResult, nil
+}
+
+func downloadComfyImage(ctx context.Context, baseURL, filename, subfolder, imgType string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/view?filename=%s&subfolder=%s&type=%s", baseURL, filename, subfolder, imgType), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ComfyUI view HTTP %d", resp.StatusCode)
+	}
+	var buf bytes.Buffer
+	if _, err := buf.ReadFrom(resp.Body); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func injectDirectPrompt(workflow map[string]any, mappingJSON string, input map[string]any) error {
 	var mapping struct {
-		Positive   map[string]string `json:"positive_prompt"`
-		Negative   map[string]string `json:"negative_prompt"`
-		Parameters map[string]struct {
-			NodeID string `json:"node_id"`
-			Field  string `json:"field"`
+		Positive     map[string]string `json:"positive_prompt"`
+		Negative     map[string]string `json:"negative_prompt"`
+		Seed         map[string]string `json:"seed"`
+		OutputPrefix map[string]string `json:"output_prefix"`
+		Parameters   map[string]struct {
+			NodeID  string `json:"node_id"`
+			Field   string `json:"field"`
+			Default any    `json:"default"`
 		} `json:"parameters"`
 	}
 	if err := json.Unmarshal([]byte(mappingJSON), &mapping); err != nil {
@@ -171,21 +323,119 @@ func injectDirectPrompt(workflow map[string]any, mappingJSON string, input map[s
 	}
 	positive, _ := input["positive_prompt"].(string)
 	negative, _ := input["negative_prompt"].(string)
-	if err := setWorkflowField(workflow, mapping.Positive, positive); err != nil {
-		return err
+	// 优先使用 mapping 注入
+	if mapping.Positive["node_id"] != "" {
+		if err := setWorkflowField(workflow, mapping.Positive, positive); err != nil {
+			return err
+		}
 	}
-	if err := setWorkflowField(workflow, mapping.Negative, negative); err != nil {
-		return err
+	if mapping.Negative["node_id"] != "" {
+		if err := setWorkflowField(workflow, mapping.Negative, negative); err != nil {
+			return err
+		}
 	}
+	// mapping 为空时，自动查找 CLIPTextEncode 节点注入
+	if mapping.Positive["node_id"] == "" && positive != "" {
+		autoInjectText(workflow, positive, negative)
+	}
+	// Inject seed (random if not provided)
 	params, _ := input["parameters"].(map[string]any)
+	seedValue, hasSeed := input["seed"]
+	if !hasSeed {
+		seedValue, hasSeed = params["seed"]
+	}
+	if !hasSeed || seedValue == nil || seedValue == float64(0) {
+		seedValue = rand.Int63n(999999999999999)
+	}
+	if mapping.Seed["node_id"] != "" {
+		if err := setWorkflowField(workflow, mapping.Seed, seedValue); err != nil {
+			return err
+		}
+	} else {
+		// mapping 为空时，自动注入随机种子到 KSampler
+		autoInjectSeed(workflow, seedValue)
+	}
+	// Inject output prefix with task ID for uniqueness
+	if mapping.OutputPrefix["node_id"] != "" {
+		prefix := fmt.Sprintf("comfyui-server/task-%d", time.Now().UnixMilli())
+		if userPrefix, ok := input["output_prefix"].(string); ok && userPrefix != "" {
+			prefix = userPrefix
+		} else if userPrefix, ok := params["output_prefix"].(string); ok && userPrefix != "" {
+			prefix = userPrefix
+		}
+		if err := setWorkflowField(workflow, mapping.OutputPrefix, prefix); err != nil {
+			return err
+		}
+	}
 	for name, location := range mapping.Parameters {
-		if value, ok := params[name]; ok {
+		value, ok := params[name]
+		if !ok && location.Default != nil {
+			value, ok = location.Default, true
+		}
+		if ok {
 			if err := setWorkflowField(workflow, map[string]string{"node_id": location.NodeID, "field": location.Field}, value); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+// autoInjectText 当没有 mapping 时，自动查找 CLIPTextEncode 节点注入提示词
+// 通过启发式判断：文本中包含负面关键词的是负面提示词节点
+func autoInjectText(workflow map[string]any, positive, negative string) {
+	type textNode struct {
+		id   string
+		text string
+	}
+	var nodes []textNode
+	for nodeID, raw := range workflow {
+		node, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		ct, _ := node["class_type"].(string)
+		if ct != "CLIPTextEncode" {
+			continue
+		}
+		inputs, _ := node["inputs"].(map[string]any)
+		text, _ := inputs["text"].(string)
+		nodes = append(nodes, textNode{id: nodeID, text: text})
+	}
+	negKeywords := []string{"nsfw", "bad", "worst", "low quality", "低质量", "模糊", "畸形", "错误", "多余", "丑陋", "崩坏", "变形", "水印", "logo"}
+	for _, n := range nodes {
+		lower := strings.ToLower(n.text)
+		isNeg := false
+		for _, kw := range negKeywords {
+			if strings.Contains(lower, kw) {
+				isNeg = true
+				break
+			}
+		}
+		if isNeg && negative != "" {
+			setWorkflowField(workflow, map[string]string{"node_id": n.id, "field": "inputs.text"}, negative)
+		} else if !isNeg && positive != "" {
+			setWorkflowField(workflow, map[string]string{"node_id": n.id, "field": "inputs.text"}, positive)
+		}
+	}
+}
+
+// autoInjectSeed 自动查找 KSampler 节点注入种子
+func autoInjectSeed(workflow map[string]any, seed any) {
+	for _, raw := range workflow {
+		node, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		ct, _ := node["class_type"].(string)
+		if ct != "KSampler" && ct != "KSamplerAdvanced" {
+			continue
+		}
+		inputs, _ := node["inputs"].(map[string]any)
+		if inputs != nil {
+			inputs["seed"] = seed
+		}
+	}
 }
 
 func setWorkflowField(workflow map[string]any, location map[string]string, value any) error {
@@ -209,23 +459,172 @@ func setWorkflowField(workflow map[string]any, location map[string]string, value
 	return nil
 }
 
+// uiToAPIFormat 将 ComfyUI UI 导出格式转换为 /prompt API 要求的格式
+// UI格式: {nodes:[{id,type,widgets_values,inputs}], links:[...]}
+// API格式: {"node_id": {class_type, inputs: {name: value_or_link}}}
+func uiToAPIFormat(ui map[string]any) (map[string]any, error) {
+	rawNodes, ok := ui["nodes"].([]any)
+	if !ok {
+		return nil, fmt.Errorf("workflow missing nodes array")
+	}
+	// 构建 link 查找表: link_id → [source_node_id, source_output_slot]
+	links, _ := ui["links"].([]any)
+	linkMap := map[int][]any{}
+	for _, l := range links {
+		if arr, ok := l.([]any); ok && len(arr) >= 3 {
+			if id, ok := arr[0].(float64); ok {
+				linkMap[int(id)] = arr
+			}
+		}
+	}
+	result := map[string]any{}
+	for _, raw := range rawNodes {
+		node, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		nodeID := fmt.Sprintf("%v", node["id"])
+		classType, _ := node["type"].(string)
+		widgetsValues, _ := node["widgets_values"].([]any)
+		inputDefs, _ := node["inputs"].([]any)
+		apiInputs := map[string]any{}
+		// 先处理 link 类型的输入（非 widget）
+		for _, inp := range inputDefs {
+			def, ok := inp.(map[string]any)
+			if !ok {
+				continue
+			}
+			name, _ := def["name"].(string)
+			if _, isWidget := def["widget"]; isWidget {
+				continue
+			}
+			linkID, ok := def["link"].(float64)
+			if !ok || linkID == 0 {
+				continue
+			}
+			linkData, exists := linkMap[int(linkID)]
+			if !exists || len(linkData) < 3 {
+				continue
+			}
+			srcNode, _ := linkData[1].(float64)
+			srcSlot, _ := linkData[2].(float64)
+			apiInputs[name] = []any{fmt.Sprintf("%v", int(srcNode)), int(srcSlot)}
+		}
+		// 处理 widget 类型的输入，优先使用 widgets_values_named（含精确字段名映射）
+		namedValues, _ := node["widgets_values_named"].(map[string]any)
+		if len(namedValues) > 0 {
+			for _, inp := range inputDefs {
+				def, ok := inp.(map[string]any)
+				if !ok {
+					continue
+				}
+				if _, isWidget := def["widget"]; !isWidget {
+					continue
+				}
+				name, _ := def["name"].(string)
+				if v, exists := namedValues[name]; exists {
+					if s, ok := v.(string); ok {
+						v = resolveDateTemplate(s)
+					}
+					apiInputs[name] = v
+				}
+			}
+		} else {
+			// 回退到按顺序映射 widgets_values
+			widgetIdx := 0
+			for _, inp := range inputDefs {
+				def, ok := inp.(map[string]any)
+				if !ok {
+					continue
+				}
+				if _, isWidget := def["widget"]; !isWidget {
+					continue
+				}
+				name, _ := def["name"].(string)
+				if widgetIdx < len(widgetsValues) {
+					v := widgetsValues[widgetIdx]
+					if s, ok := v.(string); ok {
+						v = resolveDateTemplate(s)
+					}
+					apiInputs[name] = v
+					widgetIdx++
+				}
+			}
+		}
+		result[nodeID] = map[string]any{
+			"class_type": classType,
+			"inputs":     apiInputs,
+		}
+	}
+	return result, nil
+}
+
+// resolveDateTemplate 将 ComfyUI 的 %date:...% 模板替换为实际时间字符串
+func resolveDateTemplate(s string) string {
+	replacements := map[string]string{
+		"%date:yyyy-MM-dd%": time.Now().Format("2006-01-02"),
+		"%date:hhmmss%":     time.Now().Format("150405"),
+		"%date:yyyyMMdd%":   time.Now().Format("20060102"),
+		"%date:yyyy%":       time.Now().Format("2006"),
+		"%date:MM%":         time.Now().Format("01"),
+		"%date:dd%":         time.Now().Format("02"),
+	}
+	for k, v := range replacements {
+		s = strings.ReplaceAll(s, k, v)
+	}
+	return s
+}
+
 func (a *app) waitAndDownload(ctx context.Context, baseURL, promptID string, taskID, itemID int64) error {
 	for attempt := 0; attempt < 720; attempt++ {
-		history, err := getHistory(ctx, baseURL, promptID)
+		history, err := pollComfyHistory(ctx, baseURL, promptID)
 		if err != nil {
 			return err
 		}
-		if history.Status.StatusStr == "error" {
-			return fmt.Errorf("ComfyUI task failed")
+		statusMap, _ := history["status"].(map[string]any)
+		if statusMap != nil {
+			if statusStr, _ := statusMap["status_str"].(string); statusStr == "error" {
+				return fmt.Errorf("ComfyUI task failed")
+			}
 		}
-		for _, output := range history.Outputs {
-			for index, image := range output.Images {
-				target := filepath.Join(a.dataDir, "images", fmt.Sprint(taskID), fmt.Sprint(itemID), fmt.Sprintf("result-%d.png", index+1))
-				if err := downloadComfyImage(ctx, baseURL, image, target); err != nil {
+		outputs, _ := history["outputs"].(map[string]any)
+		for _, nodeOutput := range outputs {
+			nodeMap, _ := nodeOutput.(map[string]any)
+			if nodeMap == nil {
+				continue
+			}
+			images, _ := nodeMap["images"].([]any)
+			for _, img := range images {
+				imgMap, _ := img.(map[string]any)
+				if imgMap == nil {
+					continue
+				}
+				filename, _ := imgMap["filename"].(string)
+				subfolder, _ := imgMap["subfolder"].(string)
+				imgType, _ := imgMap["type"].(string)
+				if filename == "" {
+					continue
+				}
+				res, err := a.db.Exec(`INSERT INTO images(generation_item_id, filename, storage_path, created_at) VALUES(?,?,?,?)`, itemID, "pending", "", time.Now())
+				if err != nil {
 					return err
 				}
-				_, err := a.db.Exec(`INSERT INTO images(generation_item_id, filename, storage_path, created_at) VALUES(?,?,?,?)`, itemID, filepath.Base(target), target, time.Now())
-				return err
+				imageID, _ := res.LastInsertId()
+				outFilename := fmt.Sprintf("%s_%d.png", time.Now().Format("20060102_150405"), imageID)
+				target := filepath.Join(a.dataDir, "images", outFilename)
+				imgData, dlErr := downloadComfyImage(ctx, baseURL, filename, subfolder, imgType)
+				if dlErr != nil {
+					return dlErr
+				}
+				if writeErr := os.WriteFile(target, imgData, 0o644); writeErr != nil {
+					return writeErr
+				}
+				if _, err := a.db.Exec(`UPDATE images SET filename=?, storage_path=? WHERE id=?`, filepath.Base(target), target, imageID); err != nil {
+					return err
+				}
+			}
+			if len(images) > 0 {
+				return nil
 			}
 		}
 		select {
@@ -235,4 +634,22 @@ func (a *app) waitAndDownload(ctx context.Context, baseURL, promptID string, tas
 		}
 	}
 	return fmt.Errorf("ComfyUI task timed out")
+}
+
+// deleteComfyQueueItem 通知 ComfyUI 从队列中删除指定 prompt
+func (a *app) deleteComfyQueueItem(baseURL, promptID string) {
+	payload, _ := json.Marshal(map[string]any{
+		"delete": []string{promptID},
+	})
+	req, err := http.NewRequest("POST", baseURL+"/queue", bytes.NewReader(payload))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	if err != nil {
+		a.log.Printf("deleteComfyQueueItem failed: %v", err)
+		return
+	}
+	resp.Body.Close()
 }

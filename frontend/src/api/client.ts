@@ -1,9 +1,50 @@
-export async function api<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(path, options)
-  const data = await response.json()
-  if (!response.ok) throw new Error(data.error || '请求失败')
-  return data as T
+const BASE = ''
+
+export async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  const url = path.startsWith('http') ? path : BASE + path
+  const response = await fetch(url, init)
+  if (!response.ok) {
+    let message = response.statusText
+    try {
+      const body = await response.json()
+      if (body?.error) message = body.error
+    } catch {
+      // 非 JSON 响应，使用 statusText
+    }
+    throw new Error(message)
+  }
+  try {
+    return await response.json() as T
+  } catch {
+    throw new Error('服务器返回了无效的响应格式')
+  }
 }
 
-export type Workflow = { id: number; name: string; description: string; enabled: boolean }
-export type Task = { id: number; source_type: string; workflow_id: number; status: string; total_count: number; success_count: number; failed_count: number; created_at: string }
+export type Workflow = {
+  id: number
+  name: string
+  description: string
+  workflow_path?: string
+  workflow_json?: any
+  mapping?: any
+  negative_prompt?: string
+  params_schema?: any
+  enabled: boolean
+  created_at?: string
+  updated_at?: string
+}
+
+export type Task = {
+  id: number
+  source_type: string
+  workflow_id: number
+  comfyui_url?: string
+  parameters?: any
+  status: string
+  total_count: number
+  success_count: number
+  failed_count: number
+  created_at: string
+  started_at?: string
+  completed_at?: string
+}
