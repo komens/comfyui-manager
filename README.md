@@ -110,27 +110,56 @@ docker compose up -d --build
 
 1. **Stage 1** - `node:18-alpine` 构建前端（Vite build）
 2. **Stage 2** - `golang:1.23` 构建后端（CGO_ENABLED=0 静态编译）
-3. **Stage 3** - `distroless` 最终镜像，包含后端二进制 + 前端静态文件
+3. **Stage 3** - `debian:bookworm-slim` 最终镜像，包含后端二进制 + 前端静态文件
 
 ### 🐳 NAS Docker 部署
 
-如果需要在 NAS 上部署，可以使用以下命令：
+**关键：容器内的数据目录固定为 `/app/data`。**
+
+在 NAS 的 Docker 图形界面（群晖 Container Manager / 威联通 Container Station 等）新增容器时，
+**只需要挂载一个目录**：
+
+| 项目 | 填写 |
+|------|------|
+| 宿主机路径 | 自己建一个，如 `/volume1/docker/comfyui-server/data`（群晖）、`/share/Container/comfyui-server/data`（威联通） |
+| 容器路径 | `/app/data` |
+| 读写权限 | 可读写（不要勾选只读） |
+
+> ⚠️ **不要挂载到 `/app`**。镜像里 `/app` 下放着后端二进制 `comfyui-server` 和前端静态文件 `/app/static`，
+> 挂到 `/app` 会把它们盖掉，容器起不来或前端 404。只能是 `/app/data`。
+
+同时需要确认：
+
+- **端口**：容器内是 `8080`，宿主机端口建议换一个（群晖 DSM 自身占用 8080），例如 `18080`，
+  即映射 `18080 → 8080`，然后访问 `http://<NAS内网IP>:18080`。
+- **`COMFYUI_URL`**：必须是**容器内能访问到**的地址，不能写 `127.0.0.1`（那指的是容器自己）。
+  - ComfyUI 跑在 NAS 宿主机上 → `http://<NAS内网IP>:8188`
+  - ComfyUI 也是容器 → 让两个容器处于同一 Docker 网络，填 ComfyUI 的容器名，如 `http://comfyui:8188`
+- `DATA_DIR`、`DB_PATH`、`STATIC_DIR` 保持默认即可（镜像内已设好，见下方环境变量）。
+- 权限：镜像未声明 `USER`，默认以 root 运行，一般可直接写入；若群晖启用了严格 ACL，请确保该文件夹可写。
+
+命令行等价写法：
 
 ```bash
-# 构建镜像（NAS 部署）
-docker build --platform linux/amd64 -t comfyui-server:1.0.0 .
+# 构建镜像（NAS 部署，x86_64）
+docker build --platform linux/amd64 -t comfyui-server:1.5.0 .
 
-# 运行容器（NAS 部署）
-docker run -p 8080:8080 -v comfyui_server_data:/app/data comfyui-server:1.0.0
+# 运行容器
+docker run -d --name comfyui-server \
+  -p 18080:8080 \
+  -v /volume1/docker/comfyui-server/data:/app/data \
+  -e COMFYUI_URL=http://192.168.1.20:8188 \
+  --restart unless-stopped \
+  comfyui-server:1.5.0
 
-# 导出镜像（用于 NAS 部署）
-docker save comfyui-server:1.0.0 -o comfyui-server.tar
+# 导出镜像（传输到 NAS）
+docker save comfyui-server:1.5.0 -o comfyui-server.tar
 ```
 
 **说明：**
 - `--platform linux/amd64`：指定构建平台为 x86_64 架构（适用于大多数 NAS）
-- `-p 8080:8080`：将容器的 8080 端口映射到主机的 8080 端口
-- `-v comfyui_server_data:/app/data`：使用 Docker 卷挂载数据目录，持久化数据库和图片
+- `-p 18080:8080`：将宿主机的 18080 端口映射到容器的 8080 端口
+- `-v <宿主目录>:/app/data`：挂载数据目录，持久化数据库、图片和工作流
 - `docker save`：导出镜像为 tar 文件，方便传输到 NAS 设备
 
 ### 环境变量
@@ -145,12 +174,17 @@ docker save comfyui-server:1.0.0 -o comfyui-server.tar
 
 ### 数据目录
 
+容器内（`/app/data`）与 `docker-compose`/宿主目录一一对应，**挂载这一个目录即可**：
+
 ```
 data/
 ├── db/comfyui.db      # SQLite 数据库
 ├── images/            # 生成的图片
+├── workflows/         # 工作流 JSON（ComfyUI 导出）
 └── json/              # 上传的 JSON 文件备份
 ```
+
+首次启动时这些子目录会自动创建。
 
 ### 常用命令
 

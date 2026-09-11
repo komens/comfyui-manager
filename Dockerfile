@@ -12,12 +12,12 @@ WORKDIR /src
 COPY backend/go.mod backend/go.sum* ./
 RUN go mod download
 COPY backend/ ./
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w -X main.version=1.1.0" -o /out/comfyui-server ./cmd/server
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w -X main.version=1.5.0" -o /out/comfyui-server ./cmd/server
 
 # Stage 3: Final image
 FROM debian:bookworm-slim
 LABEL org.opencontainers.image.title="comfyui-server" \
-      org.opencontainers.image.version="1.1.0" \
+      org.opencontainers.image.version="1.5.0" \
       org.opencontainers.image.description="ComfyUI workflow management and prompt library"
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \

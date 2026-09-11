@@ -1,6 +1,6 @@
 services:
   comfyui-server:
-    image: comfyui-server:1.1.0
+    image: comfyui-server:1.5.0
     build:
       context: .
       dockerfile: Dockerfile
