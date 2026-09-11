@@ -41,6 +41,8 @@ type urlRequest struct {
 	URL string `json:"url"`
 }
 
+var version = "dev"
+
 func main() {
 	cfg := loadConfig()
 	if err := os.MkdirAll(filepath.Dir(cfg.DBPath), 0o755); err != nil {
@@ -106,6 +108,9 @@ func main() {
 	mux.HandleFunc("DELETE /api/images/{id}", a.deleteImage)
 	mux.HandleFunc("PATCH /api/images/{id}/favorite", a.toggleImageFavorite)
 	mux.HandleFunc("GET /api/stats", a.getStats)
+	mux.HandleFunc("GET /api/version", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, map[string]string{"version": version})
+	})
 	go a.submitter()
 	go a.downloader()
 	go a.recoverTasks()
@@ -139,7 +144,7 @@ func main() {
 		Handler:           withCORS(mux),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	a.log.Printf("listening on %s, data directory %s", server.Addr, cfg.DataDir)
+	a.log.Printf("comfyui-server %s listening on %s, data directory %s", version, server.Addr, cfg.DataDir)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
