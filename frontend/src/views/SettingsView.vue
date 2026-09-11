@@ -9,10 +9,15 @@ const messageType = ref<'success' | 'error' | 'info'>('info')
 const busy = ref(false)
 const testBusy = ref(false)
 const latency = ref<number | null>(null)
-const exportFavorite = ref(false)
 const exportBusy = ref(false)
 const importBusy = ref(false)
 const importResult = ref('')
+const showExportModal = ref(false)
+const exportFavorite = ref(false)
+const exportGroup = ref('')
+const exportStatus = ref('')
+const exportSearch = ref('')
+const groups = ref<{ group_name: string; count: number }[]>([])
 
 onMounted(async () => {
   try {
@@ -22,6 +27,10 @@ onMounted(async () => {
     message.value = e instanceof Error ? e.message : '加载设置失败'
     messageType.value = 'error'
   }
+  try {
+    const g = await api<{ group_name: string; count: number }[]>('/api/prompts/groups')
+    groups.value = g
+  } catch { /* ignore */ }
 })
 
 async function save() {
@@ -59,19 +68,35 @@ function triggerImport() {
   fileInput.value?.click()
 }
 
+function openExportModal() {
+  showExportModal.value = true
+}
+
+function resetExportFilters() {
+  exportFavorite.value = false
+  exportGroup.value = ''
+  exportStatus.value = ''
+  exportSearch.value = ''
+}
+
 async function exportData() {
   exportBusy.value = true
   try {
     const params = new URLSearchParams()
     if (exportFavorite.value) params.set('favorite', '1')
+    if (exportGroup.value) params.set('group', exportGroup.value)
+    if (exportStatus.value) params.set('status', exportStatus.value)
+    if (exportSearch.value) params.set('search', exportSearch.value)
     const query = params.toString()
-    const url = '/api/export' + (query ? '?' + query : '')
+    const exportUrl = '/api/export' + (query ? '?' + query : '')
     const a = document.createElement('a')
-    a.href = url
+    a.href = exportUrl
     a.download = ''
     document.body.appendChild(a)
     a.click()
     document.body.removeChild(a)
+    showExportModal.value = false
+    resetExportFilters()
   } finally {
     setTimeout(() => { exportBusy.value = false }, 1000)
   }
@@ -169,16 +194,7 @@ async function test() {
       <div class="data-section">
         <h3>导出数据</h3>
         <p class="muted">按条件导出提示词和图片为 ZIP 包，可用于迁移到其他设备。</p>
-        <div class="export-options">
-          <label class="checkbox-label">
-            <input type="checkbox" v-model="exportFavorite" />
-            仅导出收藏
-          </label>
-        </div>
-        <button class="btn btn-primary" :disabled="exportBusy" @click="exportData">
-          <span v-if="exportBusy" class="spinner"></span>
-          {{ exportBusy ? '导出中...' : '&#8681; 导出数据' }}
-        </button>
+        <button class="btn btn-primary" @click="openExportModal">&#8681; 导出数据</button>
       </div>
 
       <div class="data-divider"></div>
@@ -198,6 +214,53 @@ async function test() {
       </div>
     </div>
   </div>
+  <!-- 导出弹窗 -->
+  <Teleport to="body">
+    <div v-if="showExportModal" class="modal-overlay" @click.self="showExportModal = false">
+      <div class="modal">
+        <h3 style="margin-top:0;">导出数据</h3>
+        <p class="muted" style="margin:0 0 16px;">设置筛选条件，不设置则导出全部数据。</p>
+
+        <div class="form-group">
+          <label>关键词搜索</label>
+          <input v-model="exportSearch" type="text" placeholder="搜索标题、提示词内容..." />
+        </div>
+
+        <div class="form-row">
+          <div class="form-group" style="flex:1">
+            <label>分组</label>
+            <select v-model="exportGroup" class="input">
+              <option value="">全部分组</option>
+              <option v-for="g in groups" :key="g.group_name" :value="g.group_name">{{ g.group_name }} ({{ g.count }})</option>
+            </select>
+          </div>
+          <div class="form-group" style="flex:1">
+            <label>状态</label>
+            <select v-model="exportStatus" class="input">
+              <option value="">全部状态</option>
+              <option value="pending">待生成</option>
+              <option value="running">生成中</option>
+              <option value="done">已完成</option>
+              <option value="failed">失败</option>
+            </select>
+          </div>
+        </div>
+
+        <label class="checkbox-label" style="margin-bottom:20px;">
+          <input type="checkbox" v-model="exportFavorite" />
+          仅导出收藏
+        </label>
+
+        <div style="display:flex; gap:8px; justify-content:flex-end;">
+          <button class="btn btn-ghost" @click="showExportModal = false">取消</button>
+          <button class="btn btn-primary" :disabled="exportBusy" @click="exportData">
+            <span v-if="exportBusy" class="spinner"></span>
+            {{ exportBusy ? '导出中...' : '开始导出' }}
+          </button>
+        </div>
+      </div>
+    </div>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -230,5 +293,27 @@ async function test() {
 .import-wrap {
   display: flex;
   gap: 8px;
+}
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 20px;
+}
+.modal {
+  background: var(--c-card);
+  border-radius: 12px;
+  padding: 24px;
+  width: 100%;
+  max-width: 500px;
+  box-shadow: var(--shadow-lg);
+}
+.form-row {
+  display: flex;
+  gap: 12px;
 }
 </style>

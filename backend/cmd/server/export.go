@@ -58,6 +58,11 @@ func (a *app) exportData(w http.ResponseWriter, r *http.Request) {
 		promptWhere = append(promptWhere, "p.status=?")
 		promptArgs = append(promptArgs, status)
 	}
+	if search := q.Get("search"); search != "" {
+		promptWhere = append(promptWhere, "(p.title LIKE ? OR p.positive_prompt LIKE ? OR p.description LIKE ?)")
+		s := "%" + search + "%"
+		promptArgs = append(promptArgs, s, s, s)
+	}
 	promptCond := ""
 	if len(promptWhere) > 0 {
 		promptCond = " WHERE " + strings.Join(promptWhere, " AND ")
