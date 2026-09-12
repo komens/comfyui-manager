@@ -40,11 +40,19 @@ func submitComfy(ctx context.Context, baseURL string, workflow map[string]any, c
 }
 
 // submitter 提交阶段（每3秒扫描 pending items 提交到 ComfyUI）
+//
+// ComfyUI 地址一律取当前设置（settings.comfyui_url），不使用 task 上的「提交时快照」：
+// 地址会因 DHCP 续约或换机而变，若沿用快照，改完配置旧任务还会一直拿废弃地址重试。
 func (a *app) submitter() {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 	for range ticker.C {
-		rows, err := a.db.Query(`SELECT i.id, i.task_id, i.positive_prompt, t.comfyui_url, t.parameters_json, w.workflow_path, w.mapping_json, COALESCE(w.negative_prompt,'')
+		comfyURL, err := a.setting(context.Background(), "comfyui_url")
+		if err != nil || comfyURL == "" {
+			a.log.Printf("submitter: read comfyui_url failed, skip this round: %v", err)
+			continue
+		}
+		rows, err := a.db.Query(`SELECT i.id, i.task_id, i.positive_prompt, t.parameters_json, w.workflow_path, w.mapping_json, COALESCE(w.negative_prompt,'')
 			FROM generation_items i
 			JOIN generation_tasks t ON t.id=i.task_id
 			JOIN workflows w ON w.id=t.workflow_id
@@ -58,7 +66,6 @@ func (a *app) submitter() {
 			ItemID         int64
 			TaskID         int64
 			Positive       string
-			BaseURL        string
 			Parameters     string
 			WorkflowPath   string
 			MappingJSON    string
@@ -67,13 +74,13 @@ func (a *app) submitter() {
 		var items []pendingItem
 		for rows.Next() {
 			var p pendingItem
-			if err := rows.Scan(&p.ItemID, &p.TaskID, &p.Positive, &p.BaseURL, &p.Parameters, &p.WorkflowPath, &p.MappingJSON, &p.NegativePrompt); err == nil {
+			if err := rows.Scan(&p.ItemID, &p.TaskID, &p.Positive, &p.Parameters, &p.WorkflowPath, &p.MappingJSON, &p.NegativePrompt); err == nil {
 				items = append(items, p)
 			}
 		}
 		rows.Close()
 		for _, p := range items {
-			a.submitItem(p.ItemID, p.TaskID, p.Positive, p.BaseURL, p.Parameters, p.WorkflowPath, p.MappingJSON, p.NegativePrompt)
+			a.submitItem(p.ItemID, p.TaskID, p.Positive, comfyURL, p.Parameters, p.WorkflowPath, p.MappingJSON, p.NegativePrompt)
 		}
 	}
 }
@@ -156,11 +163,20 @@ func (a *app) resetSaveFailure(itemID int64) {
 }
 
 // downloader 轮询下载阶段（每5秒检查 submitted items 是否完成）
+// downloader 下载阶段（每5秒扫描 submitted items 拉取结果）
+//
+// 与 submitter 同理，ComfyUI 地址取当前设置，不用 task 快照——
+// 否则改完配置，卡在 submitted 的旧任务会一直拿废弃地址查 history，永久静默卡住。
 func (a *app) downloader() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for range ticker.C {
-		rows, err := a.db.Query(`SELECT i.id, i.task_id, i.comfy_prompt_id, t.comfyui_url
+		comfyURL, err := a.setting(context.Background(), "comfyui_url")
+		if err != nil || comfyURL == "" {
+			a.log.Printf("downloader: read comfyui_url failed, skip this round: %v", err)
+			continue
+		}
+		rows, err := a.db.Query(`SELECT i.id, i.task_id, i.comfy_prompt_id
 			FROM generation_items i
 			JOIN generation_tasks t ON t.id=i.task_id
 			WHERE i.status='submitted' AND i.comfy_prompt_id!=''
@@ -173,18 +189,17 @@ func (a *app) downloader() {
 			ItemID        int64
 			TaskID        int64
 			ComfyPromptID string
-			BaseURL       string
 		}
 		var items []submittedItem
 		for rows.Next() {
 			var s submittedItem
-			if err := rows.Scan(&s.ItemID, &s.TaskID, &s.ComfyPromptID, &s.BaseURL); err == nil {
+			if err := rows.Scan(&s.ItemID, &s.TaskID, &s.ComfyPromptID); err == nil {
 				items = append(items, s)
 			}
 		}
 		rows.Close()
 		for _, s := range items {
-			a.checkAndDownload(s.ItemID, s.TaskID, s.ComfyPromptID, s.BaseURL)
+			a.checkAndDownload(s.ItemID, s.TaskID, s.ComfyPromptID, comfyURL)
 		}
 	}
 }

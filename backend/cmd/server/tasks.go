@@ -256,9 +256,9 @@ func (a *app) cancelTaskByID(ctx context.Context, id int64) error {
 		}
 		rows.Close()
 	}
-	// 提交时用的是 task 上的地址快照，优先用它，settings 仅作兜底
-	var taskURL string
-	_ = a.db.QueryRowContext(ctx, `SELECT comfyui_url FROM generation_tasks WHERE id=?`, id).Scan(&taskURL)
+	// 地址取当前设置（同 submitter/downloader：task 快照会因地址变更而失效，
+	// 拿废弃地址去删队列只会静默失败，ComfyUI 里排队的任务就撤不掉了）
+	comfyURL, _ := a.setting(ctx, "comfyui_url")
 
 	result, err := a.db.ExecContext(ctx, `UPDATE generation_tasks SET status='cancelled', completed_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('pending','running')`, id)
 	if err != nil {
@@ -269,15 +269,9 @@ func (a *app) cancelTaskByID(ctx context.Context, id int64) error {
 		return errTaskNotCancellable
 	}
 	// 通知 ComfyUI 从队列中删除（只删排队项；正在执行的不能靠 /interrupt，那会影响同实例的其它任务）
-	if len(comfyPromptIDs) > 0 {
-		comfyURL := taskURL
-		if comfyURL == "" {
-			comfyURL, _ = a.setting(ctx, "comfyui_url")
-		}
-		if comfyURL != "" {
-			for _, pid := range comfyPromptIDs {
-				go a.deleteComfyQueueItem(comfyURL, pid)
-			}
+	if len(comfyPromptIDs) > 0 && comfyURL != "" {
+		for _, pid := range comfyPromptIDs {
+			go a.deleteComfyQueueItem(comfyURL, pid)
 		}
 	}
 	a.publish(id, map[string]any{"task_id": id, "status": "cancelled"})
