@@ -191,26 +191,34 @@ func batchResult(applied, skipped int) map[string]any {
 	return map[string]any{"applied": applied, "skipped": skipped}
 }
 
-// runTaskBatch 对一组任务逐个执行 op，统一处理参数校验与结果计数。
-// op 返回 errTask* 系列错误时计入 skipped，其它错误视为服务端错误直接中断。
-func (a *app) runTaskBatch(w http.ResponseWriter, r *http.Request, op func(ctx context.Context, id int64) error) {
+// maxBatchIDs 批量接口单次允许的 id 上限。
+const maxBatchIDs = 500
+
+// runIDBatch 解析请求体里的 ids，再交给 execIDBatch 逐条执行。
+func (a *app) runIDBatch(w http.ResponseWriter, r *http.Request, op func(ctx context.Context, id int64) error, skippable func(error) bool) {
 	var input batchTaskInput
 	if err := decodeJSON(r, &input); err != nil || len(input.IDs) == 0 {
 		writeError(w, 400, "ids is required")
 		return
 	}
-	if len(input.IDs) > 500 {
+	a.execIDBatch(w, r.Context(), input.IDs, op, skippable)
+}
+
+// execIDBatch 对一组 id 逐个执行 op，统一做上限校验与结果计数。
+// skippable 判定"这条跳过"（如不存在、状态不允许），其它错误视为服务端故障直接中断。
+// 抽出它是为了给 body 结构不同的批量接口（如带 favorite 字段的批量收藏）复用同一套计数语义。
+func (a *app) execIDBatch(w http.ResponseWriter, ctx context.Context, ids []int64, op func(ctx context.Context, id int64) error, skippable func(error) bool) {
+	if len(ids) > maxBatchIDs {
 		writeError(w, 400, "too many ids, max 500 per request")
 		return
 	}
 	applied, skipped := 0, 0
-	for _, id := range input.IDs {
-		err := op(r.Context(), id)
+	for _, id := range ids {
+		err := op(ctx, id)
 		switch {
 		case err == nil:
 			applied++
-		case errors.Is(err, errTaskNotFound), errors.Is(err, errTaskRunning),
-			errors.Is(err, errTaskNotCancellable), errors.Is(err, errTaskNotFailed):
+		case skippable(err):
 			skipped++
 		default:
 			writeError(w, 500, "batch operation failed")
@@ -220,16 +228,47 @@ func (a *app) runTaskBatch(w http.ResponseWriter, r *http.Request, op func(ctx c
 	writeJSON(w, 200, batchResult(applied, skipped))
 }
 
+// isTaskSkippable 任务批量操作中可跳过的错误（不存在 / 状态不允许）。
+func isTaskSkippable(err error) bool {
+	return errors.Is(err, errTaskNotFound) || errors.Is(err, errTaskRunning) ||
+		errors.Is(err, errTaskNotCancellable) || errors.Is(err, errTaskNotFailed)
+}
+
 func (a *app) batchCancelTasks(w http.ResponseWriter, r *http.Request) {
-	a.runTaskBatch(w, r, a.cancelTaskByID)
+	a.runIDBatch(w, r, a.cancelTaskByID, isTaskSkippable)
 }
 
 func (a *app) batchRetryTasks(w http.ResponseWriter, r *http.Request) {
-	a.runTaskBatch(w, r, a.retryTaskByID)
+	a.runIDBatch(w, r, a.retryTaskByID, isTaskSkippable)
 }
 
 func (a *app) batchDeleteTasks(w http.ResponseWriter, r *http.Request) {
-	a.runTaskBatch(w, r, a.deleteTaskByID)
+	a.runIDBatch(w, r, a.deleteTaskByID, isTaskSkippable)
+}
+
+// forgetSaveFailures 丢弃该 task 下所有 item 的保存失败计数。
+// 任务被取消/删除后这些 item 不会再被 downloader 处理，计数留着只是让 map 无界增长。
+func (a *app) forgetSaveFailures(ctx context.Context, taskID int64) {
+	rows, err := a.db.QueryContext(ctx, `SELECT id FROM generation_items WHERE task_id=?`, taskID)
+	if err != nil {
+		return
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	rows.Close()
+	if len(ids) == 0 {
+		return
+	}
+	a.saveFailMu.Lock()
+	for _, id := range ids {
+		delete(a.saveFailures, id)
+	}
+	a.saveFailMu.Unlock()
 }
 
 // cancelTaskByID 取消单个任务：更新 task 状态、通知 ComfyUI 清队列、推送事件。
@@ -274,12 +313,25 @@ func (a *app) cancelTaskByID(ctx context.Context, id int64) error {
 			go a.deleteComfyQueueItem(comfyURL, pid)
 		}
 	}
+	a.forgetSaveFailures(ctx, id)
 	a.publish(id, map[string]any{"task_id": id, "status": "cancelled"})
 	return nil
 }
 
 // retryTaskByID 重跑失败任务：重置 task 与失败 item，成功的 item 保持不动，避免重复出图。
 func (a *app) retryTaskByID(ctx context.Context, id int64) error {
+	// 先查一次是否存在：只靠下面带 status='failed' 条件的 UPDATE，
+	// 「任务不存在」和「任务不是 failed」都只会得到 n==0，接口层没法分别返回 404 / 409。
+	var status string
+	if err := a.db.QueryRowContext(ctx, `SELECT status FROM generation_tasks WHERE id=?`, id).Scan(&status); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return errTaskNotFound
+		}
+		return err
+	}
+	if status != "failed" {
+		return errTaskNotFailed
+	}
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -327,6 +379,8 @@ func (a *app) deleteTaskByID(ctx context.Context, id int64) error {
 	if status == "running" {
 		return errTaskRunning
 	}
+	// 必须在删 items 之前清计数：删完就查不到 item id 了
+	a.forgetSaveFailures(ctx, id)
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err

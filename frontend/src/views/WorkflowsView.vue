@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import PageHeader from '../components/PageHeader.vue'
 import Pagination from '../components/Pagination.vue'
 import { api, type Workflow } from '../api/client'
@@ -82,19 +82,40 @@ async function detectParams() {
   }
 }
 
-// 更新工作流 JSON 中某个参数的默认值（可视化编辑直接写回 JSON）
+// 参数面板编辑的是「默认值」（params_schema[].default）：提示词重跑、直接提交、
+// 批量重跑三处弹窗都用它预填参数表单，所以改这里就等于改下游的默认参数。
+//
+// 旧实现试图把值写回 workflowJSON，但库里存的都是 ComfyUI **UI 导出格式**
+// （顶层是 nodes 数组 + widgets_values），parsed[p.node_id] 取不到节点会直接 return
+// —— 改了等于没改，而输入框的 :value 没变也不会跳回去，看起来像保存成功了；
+// 换成 API 格式又能改，同一件事两种行为。现在统一只维护 default 这一个真源。
 function updateWorkflowParam(p: ParamDef, value: any) {
+  p.default = value
+}
+
+// Workflow JSON 被重新粘贴或手改后，把同名参数的最新值同步进 default，
+// 让「直接改 JSON」和「在面板里改」两条路都落到同一个真源上。
+// 只更新已识别参数里同名的项，不增删——要新增参数仍走「自动识别参数」按钮。
+let syncTimer: ReturnType<typeof setTimeout> | undefined
+watch(workflowJSON, () => {
+  clearTimeout(syncTimer)
+  if (!workflowJSON.value.trim() || !detectedParams.value.length) return
+  syncTimer = setTimeout(syncParamsFromJSON, 600)
+})
+
+async function syncParamsFromJSON() {
   try {
-    const parsed = JSON.parse(workflowJSON.value)
-    const node = parsed[p.node_id]
-    if (!node?.inputs) return
-    const parts = p.field.split('.') // inputs.steps
-    if (parts.length === 2 && parts[0] === 'inputs') {
-      node.inputs[parts[1]] = value
+    const data = await api<{ params: ParamDef[] }>('/api/workflows/detect-params', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workflow_json: JSON.parse(workflowJSON.value) }),
+    })
+    const latest = new Map(data.params.map(p => [p.name, p.default]))
+    for (const p of detectedParams.value) {
+      if (latest.has(p.name)) p.default = latest.get(p.name)
     }
-    workflowJSON.value = JSON.stringify(parsed, null, 2)
   } catch {
-    // ignore parse errors
+    // JSON 还没写完或格式不对：保持原值，等下一次输入
   }
 }
 
@@ -239,9 +260,10 @@ onMounted(load)
         <textarea id="wf-json" v-model="workflowJSON" rows="8" placeholder='粘贴从 ComfyUI 导出的 workflow JSON...' spellcheck="false" style="margin-top:8px;" />
       </div>
 
-      <!-- 可视化参数编辑 -->
+      <!-- 可视化参数编辑：改的是 params_schema 里的默认值。
+           这份默认值是唯一真源——提示词重跑 / 直接提交 / 批量重跑三处弹窗都用它预填参数表单 -->
       <div v-if="detectedParams.length" class="params-panel">
-        <div class="params-panel-title">可编辑参数 <span class="text-xs muted">(修改会同步到 Workflow JSON)</span></div>
+        <div class="params-panel-title">参数默认值 <span class="text-xs muted">(重跑与直接提交都用它预填；改 Workflow JSON 会自动同步)</span></div>
         <div class="params-grid">
           <div v-for="p in detectedParams" :key="p.name" class="param-item">
             <label>{{ p.label }}</label>

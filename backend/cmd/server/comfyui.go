@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -136,6 +137,9 @@ func (a *app) submitItem(itemID, taskID int64, positive, baseURL, parameters, wo
 // failItem 标记 item 失败
 func (a *app) failItem(itemID, taskID int64, errMsg string) {
 	a.log.Printf("item %d failed: %s", itemID, errMsg)
+	// 统一在这里清保存失败计数：item 已进终态，残留的计数只会让 saveFailures 无界增长。
+	// 放在 failItem 内部而不是各调用点，是为了避免以后新增调用点时再次漏掉。
+	a.resetSaveFailure(itemID)
 	_, _ = a.db.Exec(`UPDATE generation_items SET status='failed', error_message=? WHERE id=?`, errMsg, itemID)
 	_, _ = a.db.Exec(`UPDATE prompts SET status='failed', updated_at=CURRENT_TIMESTAMP WHERE id=(SELECT prompt_id FROM generation_items WHERE id=?)`, itemID)
 	_, _ = a.db.Exec(`UPDATE generation_tasks SET status='failed', failed_count=failed_count+1, completed_at=? WHERE id=?`, time.Now(), taskID)
@@ -162,7 +166,18 @@ func (a *app) resetSaveFailure(itemID int64) {
 	delete(a.saveFailures, itemID)
 }
 
-// downloader 轮询下载阶段（每5秒检查 submitted items 是否完成）
+// saveFailureIDs 返回当前处于「保存失败重试」中的 item id。
+// downloader 用它把这些 item 排到取数队列末尾，避免它们长期霸占每轮的名额。
+func (a *app) saveFailureIDs() []int64 {
+	a.saveFailMu.Lock()
+	defer a.saveFailMu.Unlock()
+	ids := make([]int64, 0, len(a.saveFailures))
+	for id := range a.saveFailures {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
 // downloader 下载阶段（每5秒扫描 submitted items 拉取结果）
 //
 // 与 submitter 同理，ComfyUI 地址取当前设置，不用 task 快照——
@@ -176,11 +191,21 @@ func (a *app) downloader() {
 			a.log.Printf("downloader: read comfyui_url failed, skip this round: %v", err)
 			continue
 		}
+		// 正在退避重试的 item 排到最后：它们这一轮大概率还会失败，
+		// 若长期占据 LIMIT 20 的名额，排在后面的 item 即使 ComfyUI 早已出图也轮不到。
+		orderBy := "i.id"
+		if stuck := a.saveFailureIDs(); len(stuck) > 0 {
+			ids := make([]string, len(stuck))
+			for i, id := range stuck {
+				ids[i] = strconv.FormatInt(id, 10)
+			}
+			orderBy = "(CASE WHEN i.id IN (" + strings.Join(ids, ",") + ") THEN 1 ELSE 0 END), i.id"
+		}
 		rows, err := a.db.Query(`SELECT i.id, i.task_id, i.comfy_prompt_id
 			FROM generation_items i
 			JOIN generation_tasks t ON t.id=i.task_id
 			WHERE i.status='submitted' AND i.comfy_prompt_id!=''
-			ORDER BY i.id LIMIT 20`)
+			ORDER BY ` + orderBy + ` LIMIT 20`)
 		if err != nil {
 			a.log.Printf("downloader query error: %v", err)
 			continue
@@ -220,6 +245,16 @@ func (a *app) checkAndDownload(itemID, taskID int64, comfyPromptID, baseURL stri
 	history, err := pollComfyHistory(ctx, baseURL, comfyPromptID)
 	if err != nil {
 		return // 还没完成或查询出错，下次再试
+	}
+
+	// ComfyUI 自己执行报错时 status.status_str == "error"，此时 outputs 往往是空的。
+	// 漏掉这个判断只会报 "no images in ComfyUI output"——那句错误完全不提真实原因，
+	// 曾经把排查方向带偏到下载逻辑上（waitAndDownload 里本来是有这个检查的）。
+	if statusMap, _ := history["status"].(map[string]any); statusMap != nil {
+		if statusStr, _ := statusMap["status_str"].(string); statusStr == "error" {
+			a.failItem(itemID, taskID, "ComfyUI 执行失败(status=error)：通常是工作流某个节点报错，请到 ComfyUI 控制台查看详情")
+			return
+		}
 	}
 
 	// 提取输出图片
@@ -641,67 +676,6 @@ func expandDateTemplate(value any) any {
 		return resolveDateTemplate(s)
 	}
 	return value
-}
-
-func (a *app) waitAndDownload(ctx context.Context, baseURL, promptID string, taskID, itemID int64) error {
-	for attempt := 0; attempt < 720; attempt++ {
-		history, err := pollComfyHistory(ctx, baseURL, promptID)
-		if err != nil {
-			return err
-		}
-		statusMap, _ := history["status"].(map[string]any)
-		if statusMap != nil {
-			if statusStr, _ := statusMap["status_str"].(string); statusStr == "error" {
-				return fmt.Errorf("ComfyUI task failed")
-			}
-		}
-		outputs, _ := history["outputs"].(map[string]any)
-		for _, nodeOutput := range outputs {
-			nodeMap, _ := nodeOutput.(map[string]any)
-			if nodeMap == nil {
-				continue
-			}
-			images, _ := nodeMap["images"].([]any)
-			for _, img := range images {
-				imgMap, _ := img.(map[string]any)
-				if imgMap == nil {
-					continue
-				}
-				filename, _ := imgMap["filename"].(string)
-				subfolder, _ := imgMap["subfolder"].(string)
-				imgType, _ := imgMap["type"].(string)
-				if filename == "" {
-					continue
-				}
-				res, err := a.db.Exec(`INSERT INTO images(generation_item_id, filename, storage_path, created_at) VALUES(?,?,?,?)`, itemID, "pending", "", time.Now())
-				if err != nil {
-					return err
-				}
-				imageID, _ := res.LastInsertId()
-				outFilename := fmt.Sprintf("%s_%d.png", time.Now().Format("20060102_150405"), imageID)
-				target := filepath.Join(a.dataDir, "images", outFilename)
-				imgData, dlErr := downloadComfyImage(ctx, baseURL, filename, subfolder, imgType)
-				if dlErr != nil {
-					return dlErr
-				}
-				if writeErr := os.WriteFile(target, imgData, 0o644); writeErr != nil {
-					return writeErr
-				}
-				if _, err := a.db.Exec(`UPDATE images SET filename=?, storage_path=? WHERE id=?`, filepath.Base(target), target, imageID); err != nil {
-					return err
-				}
-			}
-			if len(images) > 0 {
-				return nil
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(5 * time.Second):
-		}
-	}
-	return fmt.Errorf("ComfyUI task timed out")
 }
 
 // deleteComfyQueueItem 通知 ComfyUI 从队列中删除指定 prompt

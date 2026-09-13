@@ -42,15 +42,7 @@ func (a *app) listPrompts(w http.ResponseWriter, r *http.Request) {
 	_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM prompts p`+where, countArgs...).Scan(&total)
 
 	// 分页参数
-	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-	if page < 1 {
-		page = 1
-	}
-	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
-	if pageSize < 1 || pageSize > 200 {
-		pageSize = 20
-	}
-	offset := (page - 1) * pageSize
+	page, pageSize, offset := parsePagination(r)
 
 	query := `SELECT p.id, p.title, p.description, p.positive_prompt, p.group_name, p.group_id, p.status, p.is_favorite, p.completed_at, p.created_at,
 		(SELECT COUNT(*) FROM generation_items gi WHERE gi.prompt_id=p.id) AS run_count,
@@ -93,7 +85,9 @@ func (a *app) createPrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if input.Title == "" {
-		input.Title = input.PositivePrompt[:min(len(input.PositivePrompt), 50)]
+		// 必须用 rune-safe 的 truncate：直接切片是按字节切，切在多字节字符中间
+		// 会产出非法 UTF-8，入库即乱码（createDirectTask / uploadJSON 都是这么做的）
+		input.Title = truncate(input.PositivePrompt, 50)
 	}
 	groupID := ""
 	if input.GroupName != "" {
@@ -318,8 +312,12 @@ func (a *app) runPrompt(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) listPromptGroups(w http.ResponseWriter, r *http.Request) {
+	// 「手动提交」固定排在最前（界面上仅次于始终第一的「全部提示词」），
+	// 其余按最近创建时间倒序。用 group_id='manual' 判定，同时兼容手建同名分组的情况。
 	rows, err := a.db.QueryContext(r.Context(),
-		`SELECT group_name, group_id, COUNT(*) as count FROM prompts WHERE group_name!='' GROUP BY group_name ORDER BY MAX(created_at) DESC`)
+		`SELECT group_name, group_id, COUNT(*) as count FROM prompts WHERE group_name!=''
+		 GROUP BY group_name
+		 ORDER BY CASE WHEN group_id='manual' OR group_name='手动提交' THEN 0 ELSE 1 END, MAX(created_at) DESC`)
 	if err != nil {
 		writeError(w, 500, "query groups failed")
 		return
@@ -446,7 +444,6 @@ func (a *app) groupRunPrompts(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "query group prompts failed")
 		return
 	}
-	defer rows.Close()
 	type item struct {
 		id       int64
 		positive string
@@ -457,6 +454,14 @@ func (a *app) groupRunPrompts(w http.ResponseWriter, r *http.Request) {
 		if err := rows.Scan(&it.id, &it.positive); err == nil {
 			items = append(items, it)
 		}
+	}
+	readErr := rows.Err()
+	// 先把结果读干净、关掉读游标，再开写事务：游标未关就 BeginTx，
+	// WAL 下能跑，但一旦 journal_mode 退回 delete 就会直接锁死。
+	rows.Close()
+	if readErr != nil {
+		writeError(w, 500, "read group prompts failed")
+		return
 	}
 	created := 0
 	for _, it := range items {
@@ -481,11 +486,4 @@ func (a *app) groupRunPrompts(w http.ResponseWriter, r *http.Request) {
 		created++
 	}
 	writeJSON(w, 200, map[string]any{"created": created})
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

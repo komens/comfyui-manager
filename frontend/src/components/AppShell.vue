@@ -1,9 +1,21 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import { RouterLink, RouterView, useRoute } from 'vue-router'
+import { api } from '../api/client'
 
 const route = useRoute()
 const sidebarOpen = ref(false)
+// 版本号由后端 ldflags 注入，只有 /api/version 拿得到（前端本身不打包版本）
+const version = ref('')
+
+onMounted(async () => {
+  try {
+    const data = await api<{ version: string }>('/api/version')
+    version.value = data.version
+  } catch {
+    // 拿不到就不显示，不影响其它功能
+  }
+})
 
 const navItems = [
   { path: '/', label: '概览', icon: '&#9633;' },
@@ -68,7 +80,7 @@ function closeSidebar() { sidebarOpen.value = false }
       </nav>
 
       <div class="sidebar-footer">
-        ComfyUI Server v0.1
+        ComfyUI Server{{ version ? ` v${version}` : '' }}
       </div>
     </aside>
 

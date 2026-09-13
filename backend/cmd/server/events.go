@@ -90,11 +90,14 @@ func (a *app) retryTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.retryTaskByID(r.Context(), id); err != nil {
-		if errors.Is(err, errTaskNotFailed) {
+		switch {
+		case errors.Is(err, errTaskNotFound):
+			writeError(w, 404, "task not found")
+		case errors.Is(err, errTaskNotFailed):
 			writeError(w, 409, "only failed tasks can be retried")
-			return
+		default:
+			writeError(w, 500, "retry task failed")
 		}
-		writeError(w, 500, "retry task failed")
 		return
 	}
 	writeJSON(w, 202, map[string]any{"id": id, "status": "pending"})

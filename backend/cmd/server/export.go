@@ -118,8 +118,8 @@ func (a *app) exportData(w http.ResponseWriter, r *http.Request) {
 					img.IsFavorite = fav == 1
 					// filename 与磁盘上的实际文件名常常不一致（下载时被重命名为 <时间戳>_<id>.png），
 					// ZIP 条目必须以磁盘文件名为准，否则导入侧按 filename 找不到文件。
-					archive := filepath.Base(storage)
-					if archive != "" && archive != "." && archive != img.Filename {
+					archive := safeArchiveName(storage)
+					if archive != "" && archive != img.Filename {
 						img.ArchiveName = archive
 					}
 					imageStorage[img.ID] = storage
@@ -158,9 +158,14 @@ func (a *app) exportData(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			continue
 		}
-		entryName := img.Filename
-		if img.ArchiveName != "" {
-			entryName = img.ArchiveName
+		entryName := safeArchiveName(img.ArchiveName)
+		if entryName == "" {
+			entryName = safeArchiveName(img.Filename)
+		}
+		if entryName == "" {
+			// 名字不可用（空或含路径分隔符）——宁可少写一个条目，也不往 ZIP 里塞可疑路径
+			srcFile.Close()
+			continue
 		}
 		fw, err := zw.Create("images/" + entryName)
 		if err != nil {
@@ -221,7 +226,9 @@ func (a *app) importData(w http.ResponseWriter, r *http.Request) {
 			json.NewDecoder(rc).Decode(&images)
 			rc.Close()
 		case strings.HasPrefix(f.Name, "images/"):
-			fileMap[filepath.Base(f.Name)] = f
+			if base := safeArchiveName(f.Name); base != "" {
+				fileMap[base] = f
+			}
 		}
 	}
 
@@ -264,16 +271,19 @@ func (a *app) importData(w http.ResponseWriter, r *http.Request) {
 	skippedImages := 0
 
 	for _, img := range images {
-		// ZIP 内的实际文件名：优先 archive_name，兼容旧导出包仅有 filename 的情况
-		archiveName := strings.TrimSpace(img.ArchiveName)
+		// ZIP 内的实际文件名：优先 archive_name，兼容旧导出包仅有 filename 的情况。
+		// 这两个字段都来自 ZIP 内的 images.json，是**不可信输入**，必须收敛成纯文件名——
+		// 否则构造过的包可以用 archive_name: "../../../.ssh/authorized_keys"
+		// 把文件写到 data/images/ 之外的任意路径（zip slip）。
+		archiveName := safeArchiveName(img.ArchiveName)
 		if archiveName == "" {
-			archiveName = strings.TrimSpace(img.Filename)
+			archiveName = safeArchiveName(img.Filename)
 		}
 		if archiveName == "" {
 			skippedImages++
 			continue
 		}
-		displayName := img.Filename
+		displayName := safeArchiveName(img.Filename)
 		if displayName == "" {
 			displayName = archiveName
 		}
@@ -296,6 +306,7 @@ func (a *app) importData(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// 写入图片文件
+		// archiveName 已被 safeArchiveName 收敛成纯文件名，落点必然在 data/images/ 之内
 		target := filepath.Join(a.dataDir, "images", archiveName)
 		if zf, ok := fileMap[archiveName]; ok {
 			rc, err := zf.Open()
@@ -330,6 +341,17 @@ func (a *app) importData(w http.ResponseWriter, r *http.Request) {
 		"imported_images":  importedImages,
 		"skipped_images":   skippedImages,
 	})
+}
+
+// safeArchiveName 把（来自 ZIP 成员的）文件名收敛成纯文件名，防住 zip slip。
+// 返回空串表示这个名字不可用——空值、"." / ".."，或仍残留路径分隔符（含 Windows 的 "\"）。
+// 调用方遇到空串应跳过该条目，而不是退回原值。
+func safeArchiveName(name string) string {
+	base := filepath.Base(strings.TrimSpace(name))
+	if base == "" || base == "." || base == ".." || strings.ContainsAny(base, `/\`) {
+		return ""
+	}
+	return base
 }
 
 func boolToInt(b bool) int {

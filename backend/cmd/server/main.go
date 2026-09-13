@@ -26,6 +26,10 @@ type config struct {
 	InitialComfyUI string
 	Port           string
 	StaticDir      string
+	// AllowedOrigins 是允许跨域访问的来源白名单（逗号分隔）。
+	// 留空表示不输出任何 CORS 头：开发时前端走 vite proxy，生产时前端由本服务同源托管，
+	// 两种场景都不需要跨域。
+	AllowedOrigins string
 }
 
 type app struct {
@@ -86,7 +90,6 @@ func main() {
 	mux.HandleFunc("POST /api/import", a.importData)
 	mux.HandleFunc("PUT /api/settings/comfyui", a.updateComfyUI)
 	mux.HandleFunc("POST /api/settings/comfyui/test", a.testComfyUI)
-	mux.HandleFunc("GET /api/comfyui/status", a.comfyUIStatus)
 	mux.HandleFunc("GET /api/workflows", a.listWorkflows)
 	mux.HandleFunc("POST /api/workflows", a.createWorkflow)
 	mux.HandleFunc("GET /api/workflows/{id}", a.getWorkflow)
@@ -125,6 +128,8 @@ func main() {
 	mux.HandleFunc("GET /api/images/{id}/file", a.imageFile)
 	mux.HandleFunc("GET /api/images/{id}/download", a.downloadImage)
 	mux.HandleFunc("DELETE /api/images/{id}", a.deleteImage)
+	mux.HandleFunc("POST /api/images/batch-delete", a.batchDeleteImages)
+	mux.HandleFunc("POST /api/images/batch-favorite", a.batchFavoriteImages)
 	mux.HandleFunc("PATCH /api/images/{id}/favorite", a.toggleImageFavorite)
 	mux.HandleFunc("GET /api/stats", a.getStats)
 	mux.HandleFunc("GET /api/version", func(w http.ResponseWriter, r *http.Request) {
@@ -160,7 +165,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,
-		Handler:           withCORS(mux),
+		Handler:           withCORS(cfg.AllowedOrigins, mux),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	a.log.Printf("comfyui-server %s listening on %s, data directory %s", version, server.Addr, cfg.DataDir)
@@ -402,15 +407,6 @@ func (a *app) testComfyUI(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusBadGateway, map[string]any{"reachable": false, "url": baseURL, "latency_ms": time.Since(start).Milliseconds(), "error": err.Error()})
 }
 
-func (a *app) comfyUIStatus(w http.ResponseWriter, r *http.Request) {
-	value, err := a.setting(r.Context(), "comfyui_url")
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"url": value, "reachable": false, "message": "call /api/settings/comfyui/test to check"})
-}
-
 func (a *app) backupDatabase(w http.ResponseWriter, r *http.Request) {
 	dbPath := a.dbPath
 	if dbPath == "" {
@@ -473,15 +469,69 @@ func parsePagination(r *http.Request) (int, int, int) {
 	return page, pageSize, offset
 }
 
-func withCORS(next http.Handler) http.Handler {
+// withCORS 只对 ALLOWED_ORIGINS 里显式列出的来源回显跨域头。
+//
+// 之前这里写死 `Access-Control-Allow-Origin: *` 并放行 DELETE/PATCH，
+// 等于让任意网页都能调用 POST /api/images/batch-delete、PUT /api/settings/comfyui
+// 这类破坏性接口。默认（未配置白名单）不再输出任何 CORS 头：开发时前端走 vite proxy、
+// 生产时前端由本服务同源托管，两种场景都不需要跨域。
+func withCORS(allowedOrigins string, next http.Handler) http.Handler {
+	allowed := map[string]bool{}
+	for _, origin := range strings.Split(allowedOrigins, ",") {
+		if origin = strings.TrimSpace(origin); origin != "" {
+			allowed[origin] = true
+		}
+	}
+	if len(allowed) == 0 {
+		return next
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, PUT, POST, PATCH, DELETE, OPTIONS")
+		if origin := r.Header.Get("Origin"); origin != "" && allowed[origin] {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, PUT, POST, PATCH, DELETE, OPTIONS")
+			w.Header().Add("Vary", "Origin")
+		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// dataFilePath 把库里存的 storage_path 解析成当前 DATA_DIR 下的真实路径。
+//
+// 规则只有两条：
+//  1. 先按「当前 DATA_DIR / subdir / basename」拼，命中即用；
+//  2. 拼不到时，只有**绝对路径**才允许作为兜底（绝对路径是明确记录下来的，语义无歧义）。
+//
+// 为什么相对路径不做兜底：storage_path 是写入时按当时的工作目录拼出来的，
+// 拿当前 cwd 去解释它没有意义，而且会命中**别的** data 目录。最典型的坑：
+// 把 data/ 复制成副本、再从 backend/ 起服务连副本库做验证时，旧格式的
+// `../data/images/x.png` 会 stat 命中真实 data/ 下的图片 —— 于是「删副本里的图」
+// 实际删掉的是真实图片。把相对路径一律收敛到 DATA_DIR 之下即可根治。
+//
+// 两边都拿不到时返回空串，调用方应据此返回 404。
+func (a *app) dataFilePath(stored, subdir string) string {
+	stored = strings.TrimSpace(stored)
+	if stored == "" {
+		return ""
+	}
+	base := filepath.Base(stored)
+	if base == "." || base == string(filepath.Separator) {
+		return ""
+	}
+	if candidate := filepath.Join(a.dataDir, subdir, base); fileExists(candidate) {
+		return candidate
+	}
+	if filepath.IsAbs(stored) && fileExists(stored) {
+		return stored
+	}
+	return ""
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }

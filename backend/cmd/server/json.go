@@ -173,7 +173,7 @@ func (a *app) getJSONFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "JSON file not found")
 		return
 	}
-	content, err := os.ReadFile(path)
+	content, err := os.ReadFile(a.dataFilePath(path, "json"))
 	if err != nil {
 		writeError(w, 500, "read JSON file failed")
 		return
@@ -211,7 +211,9 @@ func (a *app) deleteJSONFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "JSON file not found")
 		return
 	}
-	_ = os.Remove(path)
+	if target := a.dataFilePath(path, "json"); target != "" {
+		_ = os.Remove(target)
+	}
 	result, err := a.db.ExecContext(r.Context(), `DELETE FROM json_files WHERE id=?`, id)
 	if err != nil {
 		writeError(w, 500, "delete JSON file failed")

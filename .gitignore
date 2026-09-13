@@ -2,4 +2,15 @@ data/
 backend/tmp/
 backend/*.db
 backend/server
+backend/cmd/server/server
 frontend/dist/
+
+# 构建产物：镜像 tar 包与编译出的二进制（单个 14–98MB，误提交后很难从历史里清掉）
+*.tar
+/server
+
+# 本机工作记录（会话记忆、临时笔记），不进版本库
+.workbuddy/
+
+# 个人调试脚本，不随项目分发
+submit.py
