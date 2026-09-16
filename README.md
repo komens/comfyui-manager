@@ -40,7 +40,14 @@ go run ./cmd/server
 SERVER_PORT=8080        # 监听端口，默认 8080
 DATA_DIR=../data        # 数据目录，默认 ../data（相对启动目录，即项目根目录的 data/）
 COMFYUI_URL=http://127.0.0.1:8188  # ComfyUI 地址
+DEBUG=                  # debug 模式总开关（默认关闭）：1 开启；其它值 = 提交载荷落盘文件路径
 ```
+
+> `DEBUG` 是调试能力的总开关，后续新增的 debug 输出都归它控制。当前能力：把每次发给
+> ComfyUI 的完整请求体落盘为 JSONL（默认 `<DATA_DIR>/debug/submit-payloads.jsonl`，NAS 部署
+> 时对应宿主机 `./data/debug/`，可直接查看）。用于排查「提示词是否注入、种子是否随机」等
+> 实际提交内容问题。每行一条 `{time, url, client_id, payload}`，写盘在请求发出前，
+> 提交失败也能看到载荷。
 
 > `DATA_DIR` 是相对**启动时的工作目录**解析的。请固定从 `backend/` 目录启动；
 > 若必须从其他目录启动，请显式传入绝对路径的 `DATA_DIR`，否则会读写到错误的目录。

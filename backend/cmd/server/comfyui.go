@@ -20,6 +20,7 @@ type comfySubmitResponse struct {
 
 func submitComfy(ctx context.Context, baseURL string, workflow map[string]any, clientID string) (string, error) {
 	body, _ := json.Marshal(map[string]any{"prompt": workflow, "client_id": clientID})
+	dumpSubmitPayload(baseURL+"/prompt", clientID, body) // debug 模式：DEBUG 开启时落盘实际载荷
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/prompt", strings.NewReader(string(body)))
 	if err != nil {
 		return "", err

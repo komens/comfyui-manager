@@ -81,6 +81,7 @@ func main() {
 	if err := os.MkdirAll(filepath.Join(cfg.DataDir, "images"), 0o755); err != nil {
 		log.Fatal(err)
 	}
+	initDebug(cfg.DataDir, a.log)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", a.health)
