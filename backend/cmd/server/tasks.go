@@ -112,6 +112,7 @@ func (a *app) listTasks(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 	items := make([]map[string]any, 0)
+	taskIDs := make([]int64, 0, pageSize)
 	for rows.Next() {
 		var id, workflowID, totalC, success, failed int
 		var source, status, created string
@@ -120,11 +121,85 @@ func (a *app) listTasks(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "read task failed")
 			return
 		}
+		taskIDs = append(taskIDs, int64(id))
 		items = append(items, map[string]any{"id": id, "source_type": source, "workflow_id": workflowID,
 			"workflow_name": workflowName.String, "status": status, "total_count": totalC,
 			"success_count": success, "failed_count": failed, "created_at": created})
 	}
+	a.enrichTaskListItems(r.Context(), items, taskIDs)
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "page": page, "page_size": pageSize})
+}
+
+// enrichTaskListItems 为本页任务批量附加代表结果图与关联提示词，纯追加字段，失败时保持原样降级。
+func (a *app) enrichTaskListItems(ctx context.Context, items []map[string]any, taskIDs []int64) {
+	if len(taskIDs) == 0 {
+		return
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(taskIDs)), ",")
+	args := make([]any, len(taskIDs))
+	for i, id := range taskIDs {
+		args[i] = id
+	}
+	// 每个任务一张代表图
+	if rows, err := a.db.QueryContext(ctx, `SELECT gi.task_id, MIN(i.id) FROM images i
+		JOIN generation_items gi ON gi.id=i.generation_item_id
+		WHERE gi.task_id IN (`+placeholders+`) GROUP BY gi.task_id`, args...); err == nil {
+		imageByTask := map[int64]int64{}
+		for rows.Next() {
+			var taskID, imageID int64
+			if err := rows.Scan(&taskID, &imageID); err == nil {
+				imageByTask[taskID] = imageID
+			}
+		}
+		_ = rows.Close()
+		for _, item := range items {
+			if id, ok := item["id"].(int); ok {
+				if imageID, found := imageByTask[int64(id)]; found {
+					item["image_id"] = imageID
+				}
+			}
+		}
+	}
+	// 每个任务的提示词（按 item 顺序取第一个非空 prompt，统计去重后的提示词数）
+	if rows, err := a.db.QueryContext(ctx, `SELECT gi.task_id, gi.prompt_id, p.title FROM generation_items gi
+		JOIN prompts p ON p.id=gi.prompt_id
+		WHERE gi.task_id IN (`+placeholders+`) ORDER BY gi.task_id, gi.id`, args...); err == nil {
+		type promptInfo struct {
+			id    int64
+			title string
+			count int64
+		}
+		firstByTask := map[int64]promptInfo{}
+		seenPrompt := map[[2]int64]bool{}
+		for rows.Next() {
+			var taskID, promptID int64
+			var title string
+			if err := rows.Scan(&taskID, &promptID, &title); err != nil {
+				continue
+			}
+			key := [2]int64{taskID, promptID}
+			if seenPrompt[key] {
+				continue
+			}
+			seenPrompt[key] = true
+			if info, exists := firstByTask[taskID]; exists {
+				info.count++
+				firstByTask[taskID] = info
+			} else {
+				firstByTask[taskID] = promptInfo{id: promptID, title: title, count: 1}
+			}
+		}
+		_ = rows.Close()
+		for _, item := range items {
+			if id, ok := item["id"].(int); ok {
+				if info, found := firstByTask[int64(id)]; found {
+					item["prompt_id"] = info.id
+					item["prompt_title"] = info.title
+					item["prompt_count"] = info.count
+				}
+			}
+		}
+	}
 }
 
 func (a *app) getTask(w http.ResponseWriter, r *http.Request) {

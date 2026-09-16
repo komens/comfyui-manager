@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +23,15 @@ type jsonEntry struct {
 
 type jsonDocument struct {
 	Entries []jsonEntry `json:"entries"`
+}
+
+// importJSONStats 是 JSON 导入（文件或文本）的统一统计结果。
+type importJSONStats struct {
+	Filename  string `json:"filename"`
+	Total     int    `json:"total"`
+	Inserted  int    `json:"inserted"`
+	Skipped   int    `json:"skipped_duplicates"`
+	GroupName string `json:"group_name"`
 }
 
 // uploadJSON 上传 JSON 文件，解析后入库到 prompts 表，并备份源文件
@@ -49,24 +60,33 @@ func (a *app) uploadJSON(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, err.Error())
 		return
 	}
-	// 生成备份文件名（保留原始名 + 时间戳）
 	originalName := strings.TrimSuffix(header.Filename, filepath.Ext(header.Filename))
-	groupName := originalName
+	stats, err := a.importJSONEntries(r.Context(), content, entries, originalName)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, stats)
+}
+
+// importJSONEntries 是文件上传与文本粘贴导入共用的落库流程：备份源内容 → 记录 json_files → 按 (group_name, positive_prompt) 去重插入 prompts。
+func (a *app) importJSONEntries(ctx context.Context, content []byte, entries []jsonEntry, groupName string) (*importJSONStats, error) {
+	// 生成备份文件名（保留原始名 + 时间戳；名称已带时间戳时不重复追加）
 	timestamp := time.Now().Format("20060102_150405")
-	backupName := fmt.Sprintf("%s_%s.json", originalName, timestamp)
+	backupName := fmt.Sprintf("%s_%s.json", groupName, timestamp)
+	if regexp.MustCompile(`\d{8}_?\d{6}$`).MatchString(groupName) {
+		backupName = groupName + ".json"
+	}
 	backupPath := filepath.Join(a.dataDir, "json", backupName)
 	if err := writeAtomic(backupPath, content); err != nil {
-		writeError(w, 500, "save JSON backup failed")
-		return
+		return nil, fmt.Errorf("save JSON backup failed")
 	}
 	now := time.Now()
 	// 记录文件（仅备份用途）
-	_, err = a.db.ExecContext(r.Context(),
+	if _, err := a.db.ExecContext(ctx,
 		`INSERT INTO json_files(filename, storage_path, created_at) VALUES(?,?,?)`,
-		backupName, backupPath, now)
-	if err != nil {
-		writeError(w, 500, "save JSON record failed")
-		return
+		backupName, backupPath, now); err != nil {
+		return nil, fmt.Errorf("save JSON record failed")
 	}
 	// 去重：按 positive_prompt + group_name 检查
 	groupID := slugify(groupName)
@@ -78,25 +98,76 @@ func (a *app) uploadJSON(w http.ResponseWriter, r *http.Request) {
 		}
 		// 检查同组内是否已存在相同 positive_prompt
 		var exists int
-		_ = a.db.QueryRowContext(r.Context(),
+		_ = a.db.QueryRowContext(ctx,
 			`SELECT COUNT(*) FROM prompts WHERE group_name=? AND positive_prompt=?`, groupName, entry.Positive).Scan(&exists)
 		if exists > 0 {
 			skipped++
 			continue
 		}
-		_, err := a.db.ExecContext(r.Context(),
+		if _, err := a.db.ExecContext(ctx,
 			`INSERT INTO prompts(title, description, positive_prompt, group_name, group_id, status, created_at, updated_at) VALUES(?,?,?,?,?,'pending',?,?)`,
-			title, entry.Desc, entry.Positive, groupName, groupID, now, now)
-		if err != nil {
+			title, entry.Desc, entry.Positive, groupName, groupID, now, now); err != nil {
 			continue
 		}
 		inserted++
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"filename": backupName, "total": len(entries),
-		"inserted": inserted, "skipped_duplicates": skipped,
-		"group_name": groupName,
-	})
+	return &importJSONStats{
+		Filename: backupName, Total: len(entries),
+		Inserted: inserted, Skipped: skipped, GroupName: groupName,
+	}, nil
+}
+
+type jsonTextImportInput struct {
+	Content  string `json:"content"`
+	Filename string `json:"filename"`
+}
+
+// importJSONText 支持直接粘贴一段 JSON 文本导入：按用户输入的文件名（或默认"手动导入-年月日时分秒"）落盘备份后走统一入库流程。
+func (a *app) importJSONText(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
+	if err != nil || len(body) == 0 {
+		writeError(w, 400, "request body is required")
+		return
+	}
+	var input jsonTextImportInput
+	if err := json.Unmarshal(body, &input); err != nil {
+		writeError(w, 400, "invalid request body")
+		return
+	}
+	content := []byte(strings.TrimSpace(input.Content))
+	if len(content) == 0 {
+		writeError(w, 400, "content is required")
+		return
+	}
+	entries, err := parseEntries(content)
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	stats, err := a.importJSONEntries(r.Context(), content, entries, sanitizeJSONGroupName(input.Filename))
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, stats)
+}
+
+// sanitizeJSONGroupName 清洗用户提供的文件名作为分组名：防路径穿越、去扩展名，为空则用默认名。
+func sanitizeJSONGroupName(name string) string {
+	name = strings.TrimSpace(name)
+	name = filepath.Base(name)
+	name = strings.Map(func(r rune) rune {
+		if strings.ContainsRune(`/\:*?"<>|`, r) {
+			return '_'
+		}
+		return r
+	}, name)
+	name = strings.TrimLeft(name, ".")
+	name = strings.TrimSuffix(name, filepath.Ext(name))
+	if strings.TrimSpace(name) == "" {
+		return "手动导入-" + time.Now().Format("20060102150405")
+	}
+	return strings.TrimSpace(name)
 }
 
 func parseEntries(content []byte) ([]jsonEntry, error) {

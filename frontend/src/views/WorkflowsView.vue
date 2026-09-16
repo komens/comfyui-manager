@@ -3,6 +3,7 @@ import { onMounted, ref, watch } from 'vue'
 import PageHeader from '../components/PageHeader.vue'
 import Pagination from '../components/Pagination.vue'
 import { api, type Workflow } from '../api/client'
+import { useUrlState } from '../composables/useUrlState'
 
 type ParamDef = { name: string; label: string; type: string; node_id: string; field: string; default: any }
 type PageResult = { items: Workflow[]; total: number; page: number; page_size: number }
@@ -23,16 +24,22 @@ const editingId = ref<number | null>(null)
 const detecting = ref(false)
 const defaultBusy = ref<number | null>(null)
 
-const page = ref(1)
-const pageSize = ref(20)
 const total = ref(0)
+
+// 分页进 URL query：离开再回来、刷新、分享链接都保持页码
+const state = useUrlState({
+  page: 1,
+  page_size: 20,
+}, {
+  onExternalSync: load,
+})
 
 async function load() {
   loading.value = true
   try {
     const params = new URLSearchParams()
-    params.set('page', String(page.value))
-    params.set('page_size', String(pageSize.value))
+    params.set('page', String(state.page))
+    params.set('page_size', String(state.page_size))
     const result = await api<PageResult>(`/api/workflows?${params}`)
     workflows.value = result.items
     total.value = result.total
@@ -45,12 +52,12 @@ async function load() {
 }
 
 function onPageChange(p: number) {
-  page.value = p
+  state.page = p
   load()
 }
 
 function onPageSizeChange() {
-  page.value = 1
+  state.page = 1
   load()
 }
 
@@ -339,13 +346,13 @@ onMounted(load)
   <div v-if="!showForm && total > 0" class="pagination-footer">
     <Pagination
       :total="total"
-      :page="page"
-      :page-size="pageSize"
+      :page="state.page"
+      :page-size="state.page_size"
       @update:page="onPageChange"
     />
     <div class="page-size-wrap">
       <span class="text-xs muted">每页</span>
-      <select v-model.number="pageSize" class="input page-size-select" @change="onPageSizeChange">
+      <select v-model.number="state.page_size" class="input page-size-select" @change="onPageSizeChange">
         <option :value="10">10</option>
         <option :value="20">20</option>
         <option :value="50">50</option>

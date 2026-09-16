@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { useRoute, useRouter, RouterLink } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import { api } from '../api/client'
+import { backToListOr } from '../utils/nav'
 
 const route = useRoute()
 const router = useRouter()
@@ -60,12 +61,17 @@ async function save() {
         body,
       })
     }
-    router.push('/prompts')
+    // 返回时优先走历史（保留列表页的分页/筛选 query），直链进入则回列表第一页
+    backToList()
   } catch (e) {
     showMessage(e instanceof Error ? e.message : '保存失败', 'error')
   } finally {
     busy.value = false
   }
+}
+
+function backToList() {
+  backToListOr(router, '/prompts')
 }
 
 onMounted(() => {
@@ -102,7 +108,7 @@ onMounted(() => {
         <button class="btn btn-primary" :disabled="busy || !positive.trim()" @click="save">
           {{ busy ? '保存中...' : '保存' }}
         </button>
-        <RouterLink to="/prompts" class="btn btn-ghost">取消</RouterLink>
+        <button class="btn btn-ghost" @click="backToList">取消</button>
       </div>
     </div>
   </div>

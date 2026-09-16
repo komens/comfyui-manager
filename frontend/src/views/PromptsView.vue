@@ -5,6 +5,7 @@ import PageHeader from '../components/PageHeader.vue'
 import Pagination from '../components/Pagination.vue'
 import { api, type Workflow } from '../api/client'
 import { pickDefaultWorkflow } from '../utils/workflowParams'
+import { useUrlState } from '../composables/useUrlState'
 
 type Prompt = {
   id: number
@@ -27,17 +28,26 @@ type Workflow = { id: number; name: string; enabled: boolean }
 const prompts = ref<Prompt[]>([])
 const groups = ref<Group[]>([])
 const workflows = ref<Workflow[]>([])
-const selectedGroup = ref('')
-const statusFilter = ref('')
-const search = ref('')
-const favOnly = ref(false)
 const message = ref('')
 const messageType = ref<'success' | 'error'>('success')
 const loading = ref(false)
-
-const page = ref(1)
-const pageSize = ref(20)
 const total = ref(0)
+
+// 分页与筛选统一进 URL query：从详情页返回、刷新、分享链接都保持当前页码与筛选条件
+const state = useUrlState({
+  page: 1,
+  page_size: 20,
+  group: '',
+  status: '',
+  q: '',
+  favorite: false,
+}, {
+  onExternalSync: () => {
+    // 侧边栏重新点击进入等外部导航：state 已按 URL 重置，清掉勾选并重新加载
+    selectedIds.value.clear()
+    load()
+  },
+})
 
 // 多选
 const selectedIds = ref<Set<number>>(new Set())
@@ -54,12 +64,12 @@ async function load() {
   loading.value = true
   try {
     const params = new URLSearchParams()
-    if (selectedGroup.value) params.set('group', selectedGroup.value)
-    if (statusFilter.value) params.set('status', statusFilter.value)
-    if (search.value) params.set('q', search.value)
-    if (favOnly.value) params.set('favorite', '1')
-    params.set('page', String(page.value))
-    params.set('page_size', String(pageSize.value))
+    if (state.group) params.set('group', state.group)
+    if (state.status) params.set('status', state.status)
+    if (state.q) params.set('q', state.q)
+    if (state.favorite) params.set('favorite', '1')
+    params.set('page', String(state.page))
+    params.set('page_size', String(state.page_size))
     const result = await api<PageResult>(`/api/prompts?${params}`)
     prompts.value = result.items
     total.value = result.total
@@ -79,23 +89,23 @@ async function loadWorkflows() {
 
 function resetAndLoad() {
   selectedIds.value.clear()
-  page.value = 1
+  state.page = 1
   load()
 }
 
 function selectGroup(name: string) {
-  selectedGroup.value = name
+  state.group = name
   resetAndLoad()
 }
 
 function onPageChange(p: number) {
-  page.value = p
+  state.page = p
   selectedIds.value.clear()
   load()
 }
 
 function onPageSizeChange() {
-  page.value = 1
+  state.page = 1
   selectedIds.value.clear()
   load()
 }
@@ -123,7 +133,7 @@ async function deletePrompt(p: Prompt) {
     await api(`/api/prompts/${p.id}`, { method: 'DELETE' })
     message.value = '已删除'
     messageType.value = 'success'
-    if (prompts.value.length === 1 && page.value > 1) page.value--
+    if (prompts.value.length === 1 && state.page > 1) state.page--
     selectedIds.value.delete(p.id)
     await Promise.all([load(), loadGroups()])
   } catch (e) {
@@ -144,7 +154,7 @@ async function batchDelete() {
     message.value = `已删除 ${result.deleted} 条`
     messageType.value = 'success'
     selectedIds.value.clear()
-    if (prompts.value.length <= result.deleted && page.value > 1) page.value--
+    if (prompts.value.length <= result.deleted && state.page > 1) state.page--
     await Promise.all([load(), loadGroups()])
   } catch (e) {
     message.value = e instanceof Error ? e.message : '批量删除失败'
@@ -176,7 +186,7 @@ async function confirmBatchRun() {
     } else {
       const result = await api<{ created: number }>('/api/prompts/group-run', {
         method: 'POST',
-        body: JSON.stringify({ group_name: selectedGroup.value, workflow_id: batchRunWorkflow.value })
+        body: JSON.stringify({ group_name: state.group, workflow_id: batchRunWorkflow.value })
       })
       message.value = `已提交 ${result.created} 个分组任务`
     }
@@ -230,7 +240,7 @@ onMounted(() => {
       <div class="groups-list">
         <button
           class="group-item"
-          :class="{ active: selectedGroup === '' }"
+          :class="{ active: state.group === '' }"
           @click="selectGroup('')"
         >
           <span>全部提示词</span>
@@ -239,7 +249,7 @@ onMounted(() => {
           v-for="g in groups"
           :key="g.group_name"
           class="group-item"
-          :class="{ active: selectedGroup === g.group_name }"
+          :class="{ active: state.group === g.group_name }"
           @click="selectGroup(g.group_name)"
         >
           <span class="group-name">{{ g.group_name }}</span>
@@ -247,7 +257,7 @@ onMounted(() => {
         </button>
       </div>
       <!-- 分组全部重跑按钮 -->
-      <div v-if="selectedGroup" style="padding: 8px 4px 0; flex-shrink: 0;">
+      <div v-if="state.group" style="padding: 8px 4px 0; flex-shrink: 0;">
         <button class="btn btn-secondary btn-sm" style="width:100%;" @click="openBatchRun('group')">
           &#9654; 重跑此分组待生成项
         </button>
@@ -258,22 +268,22 @@ onMounted(() => {
     <div class="prompts-main">
       <div class="toolbar" style="flex-wrap:wrap; gap:10px;">
         <input
-          v-model="search"
+          v-model="state.q"
           class="input"
           type="text"
           placeholder="搜索标题或提示词内容..."
           style="flex:1; min-width:200px;"
           @input="onSearch"
         />
-        <select v-model="statusFilter" class="input" style="width:auto;" @change="resetAndLoad">
+        <select v-model="state.status" class="input" style="width:auto;" @change="resetAndLoad">
           <option value="">全部状态</option>
           <option value="pending">待生成</option>
           <option value="running">生成中</option>
           <option value="done">已完成</option>
           <option value="failed">失败</option>
         </select>
-        <button class="btn btn-sm" :class="{ 'btn-primary': favOnly }" @click="favOnly = !favOnly; resetAndLoad()">
-          {{ favOnly ? '★ 仅收藏' : '☆ 仅收藏' }}
+        <button class="btn btn-sm" :class="{ 'btn-primary': state.favorite }" @click="state.favorite = !state.favorite; resetAndLoad()">
+          {{ state.favorite ? '★ 仅收藏' : '☆ 仅收藏' }}
         </button>
         <RouterLink to="/prompts/new" class="btn btn-primary">+ 新建提示词</RouterLink>
       </div>
@@ -328,13 +338,13 @@ onMounted(() => {
       <div v-if="total > 0" class="pagination-footer">
         <Pagination
           :total="total"
-          :page="page"
-          :page-size="pageSize"
+          :page="state.page"
+          :page-size="state.page_size"
           @update:page="onPageChange"
         />
         <div class="page-size-wrap">
           <span class="text-xs muted">每页</span>
-          <select v-model.number="pageSize" class="input page-size-select" @change="onPageSizeChange">
+          <select v-model.number="state.page_size" class="input page-size-select" @change="onPageSizeChange">
             <option :value="10">10</option>
             <option :value="20">20</option>
             <option :value="50">50</option>
@@ -351,7 +361,7 @@ onMounted(() => {
   <div v-if="showBatchRunModal" class="modal-overlay" @click.self="showBatchRunModal = false">
     <div class="modal">
       <h3 style="margin-top:0;">
-        {{ batchRunMode === 'group' ? `重跑分组「${selectedGroup}」` : `批量重跑 ${selectedCount} 条` }}
+        {{ batchRunMode === 'group' ? `重跑分组「${state.group}」` : `批量重跑 ${selectedCount} 条` }}
       </h3>
       <label class="form-label">选择工作流</label>
       <select v-model.number="batchRunWorkflow" class="input">
@@ -399,7 +409,7 @@ onMounted(() => {
 .select-row { padding: 6px 12px; border-bottom: 1px solid var(--c-border-light); display: flex; align-items: center; gap: 8px; }
 .checkbox-wrap { display: flex; align-items: center; gap: 6px; cursor: pointer; flex-shrink: 0; }
 .checkbox-wrap input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--c-primary); cursor: pointer; }
-.batch-bar { display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: var(--c-primary-light); border: 1px solid var(--c-primary-border); border-radius: 8px; margin-bottom: 8px; }
+.batch-bar { display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: var(--c-primary-light); border: 1px solid var(--c-primary-border); border-radius: 8px; margin-bottom: 8px; flex-wrap: wrap; }
 .batch-info { font-size: 13px; font-weight: 600; color: var(--c-primary); margin-right: 4px; }
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 100; padding: 20px; }
 .modal { background: var(--c-card); border-radius: 12px; padding: 24px; width: 100%; max-width: 480px; max-height: 85vh; overflow-y: auto; box-shadow: var(--shadow-lg); }

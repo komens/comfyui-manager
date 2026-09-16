@@ -53,7 +53,7 @@ npm install
 npm run dev
 ```
 
-前端开发服务运行在 `http://localhost:5173`，已配置 Vite 代理将 `/api` 请求转发到后端 `localhost:8080`。
+前端开发服务运行在 `http://localhost:5173`，已配置 Vite 代理将 `/api` 请求转发到后端 `localhost:8080`（跟随 `SERVER_PORT` 环境变量）。
 
 ### 3. 访问应用
 
@@ -102,7 +102,7 @@ export COMFYUI_URL=http://192.168.1.20:8188
 docker compose up -d --build
 ```
 
-访问 `http://localhost:8080` 即可使用。
+访问 `http://localhost:8080` 即可使用（可通过 `SERVER_PORT` 环境变量修改端口）。
 
 ### 构建说明
 
@@ -130,7 +130,7 @@ docker compose up -d --build
 
 同时需要确认：
 
-- **端口**：容器内是 `8080`，宿主机端口建议换一个（群晖 DSM 自身占用 8080），例如 `18080`，
+- **端口**：容器内默认是 `8080`（由 `SERVER_PORT` 控制），宿主机端口建议换一个（群晖 DSM 自身占用 8080），例如 `18080`，
   即映射 `18080 → 8080`，然后访问 `http://<NAS内网IP>:18080`。
 - **`COMFYUI_URL`**：必须是**容器内能访问到**的地址，不能写 `127.0.0.1`（那指的是容器自己）。
   - ComfyUI 跑在 NAS 宿主机上 → `http://<NAS内网IP>:8188`

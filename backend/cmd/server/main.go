@@ -120,6 +120,7 @@ func main() {
 	mux.HandleFunc("POST /api/prompts/{id}/run", a.runPrompt)
 	mux.HandleFunc("GET /api/json-files", a.listJSONFiles)
 	mux.HandleFunc("POST /api/json-files/upload", a.uploadJSON)
+	mux.HandleFunc("POST /api/json-files/import-text", a.importJSONText)
 	mux.HandleFunc("GET /api/json-files/{id}", a.getJSONFile)
 	mux.HandleFunc("GET /api/json-files/{id}/download", a.downloadJSON)
 	mux.HandleFunc("DELETE /api/json-files/{id}", a.deleteJSONFile)

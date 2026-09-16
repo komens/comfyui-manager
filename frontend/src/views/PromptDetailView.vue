@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { onMounted, ref, computed } from 'vue'
+import { onMounted, onUnmounted, ref, computed, watch } from 'vue'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import ParamForm from '../components/ParamForm.vue'
 import { api, type Workflow } from '../api/client'
 import { buildRunMapping, pickDefaultWorkflow } from '../utils/workflowParams'
+import { openImageViewer } from '../utils/imageViewer'
+import { backToListOr } from '../utils/nav'
 
 type Run = {
   item_id: number
@@ -36,10 +38,10 @@ const showRunModal = ref(false)
 const selectedWorkflow = ref<number>(0)
 const params = ref<Record<string, any>>({})
 const running = ref(false)
-const lightboxImage = ref<number | null>(null)
 const loadingError = ref('')
 const message = ref('')
 const messageType = ref<'success' | 'error'>('success')
+let pollTimer: ReturnType<typeof setInterval> | null = null
 
 function showMessage(text: string, type: 'success' | 'error' = 'success') {
   message.value = text
@@ -47,17 +49,38 @@ function showMessage(text: string, type: 'success' | 'error' = 'success') {
   setTimeout(() => { message.value = '' }, 5000)
 }
 
-async function load() {
-  loading.value = true
-  loadingError.value = ''
+async function load(silent = false) {
+  if (!silent) {
+    loading.value = true
+    loadingError.value = ''
+  }
   try {
     prompt.value = await api<PromptDetail>(`/api/prompts/${route.params.id}`)
   } catch (e) {
-    loadingError.value = e instanceof Error ? e.message : '加载失败'
+    if (!silent) loadingError.value = e instanceof Error ? e.message : '加载失败'
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
 }
+
+// 有进行中的生成时轮询静默刷新；重跑弹窗打开时暂停，避免打断操作
+const busy = computed(() => {
+  const p = prompt.value
+  if (!p) return false
+  return p.status === 'running' || p.runs.some(r => ['pending', 'running', 'queued', 'submitted'].includes(r.status))
+})
+const paused = computed(() => showRunModal.value || running.value)
+
+function setPolling(on: boolean) {
+  if (on && !pollTimer) {
+    pollTimer = setInterval(() => { if (!paused.value) load(true) }, 4000)
+  } else if (!on && pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+}
+
+watch(busy, v => setPolling(v), { immediate: true })
 async function loadWorkflows() {
   const result = await api<{ items: Workflow[] }>('/api/workflows?page_size=200')
   workflows.value = result.items
@@ -105,13 +128,26 @@ function statusBadge(s: string) {
 async function deletePrompt() {
   if (!confirm('确定删除该提示词？')) return
   await api(`/api/prompts/${route.params.id}`, { method: 'DELETE' })
-  router.push('/prompts')
+  backToList()
+}
+
+// 返回时优先走历史（保留列表页的分页/筛选 query），直链进入则回列表第一页
+function backToList() {
+  backToListOr(router, '/prompts')
+}
+
+function openRunImages(run: Run, index: number) {
+  openImageViewer(run.images.map(i => i.id), index, {
+    goToPrompt: id => router.push(`/prompts/${id}`),
+    mutated: () => load(true),
+  })
 }
 
 onMounted(() => {
   load()
   loadWorkflows()
 })
+onUnmounted(() => setPolling(false))
 </script>
 
 <template>
@@ -131,7 +167,7 @@ onMounted(() => {
   </div>
 
   <div v-else-if="prompt">
-    <RouterLink to="/prompts" class="btn btn-ghost btn-sm" style="margin-bottom:12px;">&larr; 返回列表</RouterLink>
+    <button class="btn btn-ghost btn-sm" style="margin-bottom:12px;" @click="backToList">&larr; 返回列表</button>
 
     <div class="card detail-card">
       <div class="card-body">
@@ -169,12 +205,12 @@ onMounted(() => {
         <div v-if="run.error_message" class="text-sm" style="color:var(--c-danger); margin-top:6px;">{{ run.error_message }}</div>
         <div v-if="run.images.length" class="run-images">
           <img
-            v-for="img in run.images"
+            v-for="(img, idx) in run.images"
             :key="img.id"
             :src="`/api/images/${img.id}/file`"
             :alt="img.filename"
             class="run-thumb"
-            @click="lightboxImage = img.id"
+            @click="openRunImages(run, idx)"
           />
         </div>
       </div>
@@ -211,11 +247,6 @@ onMounted(() => {
     </div>
   </div>
 
-  <!-- 图片灯箱 -->
-  <div v-if="lightboxImage" class="lightbox" @click.self="lightboxImage = null">
-    <img :src="`/api/images/${lightboxImage}/file`" alt="preview" />
-  </div>
-
   <!-- Toast 消息 -->
   <Teleport to="body">
     <div v-if="message" class="toast-msg" :class="messageType">{{ message }}</div>
@@ -232,7 +263,7 @@ onMounted(() => {
 .detail-desc { margin-bottom: 12px; }
 .prompt-box { background: var(--c-bg-subtle); border: 1px solid var(--c-border); border-radius: 8px; padding: 14px; font-size: 14px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; }
 .btn-danger { color: var(--c-danger); }
-.run-item { padding: 14px; }
+.run-item { padding: 14px; margin-bottom: 12px; }
 .run-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .run-images { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
 .run-thumb { width: 140px; height: 140px; object-fit: cover; border-radius: 8px; border: 1px solid var(--c-border); cursor: zoom-in; transition: transform 0.15s; }
@@ -241,8 +272,6 @@ onMounted(() => {
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 100; padding: 20px; }
 .modal { background: var(--c-card); border-radius: 12px; padding: 24px; width: 100%; max-width: 520px; max-height: 85vh; overflow-y: auto; box-shadow: var(--shadow-lg); }
 .modal .collapse-panel { margin-top: 16px; }
-.lightbox { position: fixed; inset: 0; background: rgba(0,0,0,0.85); display: flex; align-items: center; justify-content: center; z-index: 200; padding: 24px; cursor: zoom-out; }
-.lightbox img { max-width: 90vw; max-height: 90vh; border-radius: 8px; }
 @media (max-width: 640px) {
   .detail-head { flex-direction: column; gap: 12px; }
   .detail-actions { width: 100%; justify-content: stretch; }

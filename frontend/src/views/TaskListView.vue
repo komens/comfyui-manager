@@ -4,6 +4,8 @@ import { RouterLink } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import Pagination from '../components/Pagination.vue'
 import { api } from '../api/client'
+import { openImageViewer } from '../utils/imageViewer'
+import { useUrlState } from '../composables/useUrlState'
 
 type Task = {
   id: number
@@ -15,21 +17,37 @@ type Task = {
   success_count: number
   failed_count: number
   created_at: string
+  image_id?: number
+  prompt_id?: number
+  prompt_title?: string
+  prompt_count?: number
 }
 type PageResult = { items: Task[]; total: number; page: number; page_size: number }
 type BatchResult = { applied: number; skipped: number }
 
+function openTaskImage(t: Task) {
+  if (t.image_id) openImageViewer([t.image_id], 0)
+}
+
 const tasks = ref<Task[]>([])
-const statusFilter = ref('')
 const loading = ref(false)
 const message = ref('')
 const messageType = ref<'success' | 'error'>('success')
 const batchBusy = ref(false)
+const total = ref(0)
 let timer: ReturnType<typeof setInterval> | null = null
 
-const page = ref(1)
-const pageSize = ref(20)
-const total = ref(0)
+// 分页与筛选进 URL query：从任务详情返回、刷新、分享链接都保持页码与筛选
+const state = useUrlState({
+  page: 1,
+  page_size: 20,
+  status: '',
+}, {
+  onExternalSync: () => {
+    selectedIds.value = new Set()
+    load()
+  },
+})
 
 // 多选（仅作用于当前页；翻页/改筛选时清空）
 const selectedIds = ref<Set<number>>(new Set())
@@ -44,9 +62,9 @@ async function load() {
   loading.value = true
   try {
     const params = new URLSearchParams()
-    if (statusFilter.value) params.set('status', statusFilter.value)
-    params.set('page', String(page.value))
-    params.set('page_size', String(pageSize.value))
+    if (state.status) params.set('status', state.status)
+    params.set('page', String(state.page))
+    params.set('page_size', String(state.page_size))
     const result = await api<PageResult>(`/api/tasks?${params}`)
     tasks.value = result.items
     total.value = result.total
@@ -59,19 +77,19 @@ async function load() {
 }
 
 function onFilterChange() {
-  page.value = 1
+  state.page = 1
   selectedIds.value = new Set()
   load()
 }
 
 function onPageChange(p: number) {
-  page.value = p
+  state.page = p
   selectedIds.value = new Set()
   load()
 }
 
 function onPageSizeChange() {
-  page.value = 1
+  state.page = 1
   selectedIds.value = new Set()
   load()
 }
@@ -105,6 +123,12 @@ function canDelete(s: string) {
 
 function canRetry(s: string) {
   return s === 'failed'
+}
+
+function formatTime(t: string) {
+  if (!t) return ''
+  const d = new Date(t)
+  return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
 }
 
 // 批量操作：后端逐条执行并返回 applied/skipped，skipped 为状态不允许或不存在的数量
@@ -201,7 +225,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
   <PageHeader eyebrow="TASKS" title="任务列表" description="查看所有生成任务状态，支持多选批量取消、重跑、删除。" />
 
   <div class="toolbar" style="flex-wrap:wrap; gap:10px; margin-bottom:16px;">
-    <select v-model="statusFilter" class="input" style="width:auto;" @change="onFilterChange">
+    <select v-model="state.status" class="input" style="width:auto;" @change="onFilterChange">
       <option value="">全部状态</option>
       <option value="pending">排队中</option>
       <option value="running">生成中</option>
@@ -240,24 +264,32 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
         <label class="checkbox-wrap" @click.stop>
           <input type="checkbox" :checked="selectedIds.has(t.id)" @change="toggleSelect(t.id)" />
         </label>
-        <RouterLink :to="`/tasks/${t.id}`" class="task-info" style="min-width:0; flex:1;">
+        <img v-if="t.image_id" class="task-thumb" :src="`/api/images/${t.image_id}/file`" alt="结果图" loading="lazy" @click.stop="openTaskImage(t)" />
+        <div v-else class="task-thumb task-thumb-empty">无图</div>
+        <div class="task-main">
           <div class="task-head">
-            <span class="task-id">#{{ t.id }}</span>
+            <RouterLink :to="`/tasks/${t.id}`" class="task-id">#{{ t.id }}</RouterLink>
             <span class="badge" :class="'badge-' + t.status">{{ statusLabel(t.status) }}</span>
             <span class="badge badge-muted">{{ t.source_type }}</span>
-            <span v-if="t.workflow_name" class="badge badge-muted">{{ t.workflow_name }}</span>
+            <span v-if="t.workflow_name" class="badge badge-muted" :title="t.workflow_name">{{ t.workflow_name }}</span>
+            <div class="task-actions">
+              <!-- <RouterLink :to="`/tasks/${t.id}`" class="btn btn-ghost btn-sm">详情</RouterLink> -->
+              <button v-if="canRetry(t.status)" class="btn btn-ghost btn-sm" @click="retryTask(t)">重跑</button>
+              <button v-if="canCancel(t.status)" class="btn btn-ghost btn-sm btn-warn" @click="cancelTask(t)">取消</button>
+              <button v-if="canDelete(t.status)" class="btn btn-ghost btn-sm btn-danger" @click="deleteTask(t)">&#10005;</button>
+            </div>
           </div>
+          <RouterLink v-if="t.prompt_id" :to="`/prompts/${t.prompt_id}`" class="task-prompt" :title="`提示词 #${t.prompt_id}`">
+            <span class="prompt-label">提示词</span>
+            <span class="prompt-title">{{ t.prompt_title || '未命名提示词' }}</span>
+            <span v-if="(t.prompt_count || 0) > 1" class="prompt-more">等 {{ t.prompt_count }} 个</span>
+            <span class="prompt-link">查看 →</span>
+          </RouterLink>
           <div class="task-meta text-xs muted">
-            <span>{{ t.created_at }}</span>
+            <span>{{ formatTime(t.created_at) }}</span>
             <span v-if="t.total_count > 0"> · {{ t.success_count }}/{{ t.total_count }} 成功</span>
             <span v-if="t.failed_count > 0" style="color:var(--c-danger);"> · {{ t.failed_count }} 失败</span>
           </div>
-        </RouterLink>
-        <div class="task-actions">
-          <RouterLink :to="`/tasks/${t.id}`" class="btn btn-ghost btn-sm">详情</RouterLink>
-          <button v-if="canRetry(t.status)" class="btn btn-ghost btn-sm" @click="retryTask(t)">重跑</button>
-          <button v-if="canCancel(t.status)" class="btn btn-ghost btn-sm btn-warn" @click="cancelTask(t)">取消</button>
-          <button v-if="canDelete(t.status)" class="btn btn-ghost btn-sm btn-danger" @click="deleteTask(t)">&#10005;</button>
         </div>
       </div>
     </div>
@@ -266,13 +298,13 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
   <div v-if="total > 0" class="pagination-footer">
     <Pagination
       :total="total"
-      :page="page"
-      :page-size="pageSize"
+      :page="state.page"
+      :page-size="state.page_size"
       @update:page="onPageChange"
     />
     <div class="page-size-wrap">
       <span class="text-xs muted">每页</span>
-      <select v-model.number="pageSize" class="input page-size-select" @change="onPageSizeChange">
+      <select v-model.number="state.page_size" class="input page-size-select" @change="onPageSizeChange">
         <option :value="10">10</option>
         <option :value="20">20</option>
         <option :value="50">50</option>
@@ -286,11 +318,19 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 <style scoped>
 .task-row { align-items: flex-start; }
 .task-row.selected { background: var(--c-primary-light); }
-.task-info { text-decoration: none; color: inherit; display: block; }
-.task-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; flex-wrap: wrap; }
-.task-id { font-weight: 700; font-size: 14px; color: var(--c-primary); }
-.task-meta { line-height: 1.5; }
-.task-actions { display: flex; gap: 4px; flex-shrink: 0; }
+.task-thumb { width: 56px; height: 56px; object-fit: cover; border-radius: 8px; flex-shrink: 0; cursor: zoom-in; border: 1px solid var(--c-border); }
+.task-thumb-empty { display: grid; place-items: center; font-size: 10px; color: var(--c-muted); background: var(--c-bg-subtle); cursor: default; }
+.task-main { flex: 1; min-width: 0; overflow: hidden; display: flex; flex-direction: column; gap: 4px; }
+.task-prompt { display: flex; align-items: center; gap: 6px; font-size: 12px; min-width: 0; text-decoration: none; color: inherit; }
+.task-prompt:hover .prompt-link { opacity: 1; }
+.prompt-label { flex-shrink: 0; color: var(--c-muted); }
+.prompt-title { color: var(--c-primary); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.prompt-more { flex-shrink: 0; color: var(--c-muted); }
+.prompt-link { flex-shrink: 0; color: var(--c-primary); opacity: 0.6; }
+.task-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.task-id { font-weight: 700; font-size: 14px; color: var(--c-primary); text-decoration: none; }
+.task-meta { line-height: 1.5; overflow-wrap: anywhere; }
+.task-actions { display: flex; gap: 4px; flex-shrink: 0; margin-left: auto; }
 .checkbox-wrap { display: flex; align-items: center; gap: 6px; cursor: pointer; flex-shrink: 0; padding-top: 4px; }
 .checkbox-wrap input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--c-primary); cursor: pointer; }
 .batch-bar { display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: var(--c-primary-light); border: 1px solid var(--c-primary-border); border-radius: 8px; margin-bottom: 8px; flex-wrap: wrap; }

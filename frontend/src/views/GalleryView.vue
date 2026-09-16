@@ -4,9 +4,10 @@ import { useRouter } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import Pagination from '../components/Pagination.vue'
 import { api } from '../api/client'
+import { openImageViewer } from '../utils/imageViewer'
+import { useUrlState } from '../composables/useUrlState'
 
 type ImageItem = { id: number; filename: string; created_at: string; is_favorite: boolean; prompt_id: number; prompt_title: string }
-type ImageDetail = { id: number; positive_prompt: string; negative_prompt: string; created_at: string; is_favorite: boolean; prompt_id: number; prompt_title: string }
 type PageResult = { items: ImageItem[]; total: number; page: number; page_size: number }
 type BatchResult = { applied: number; skipped: number }
 
@@ -14,15 +15,21 @@ const router = useRouter()
 
 const images = ref<ImageItem[]>([])
 const loading = ref(true)
-const favOnly = ref(false)
-const lightbox = ref<ImageDetail | null>(null)
-const lightboxLoading = ref(false)
 const batchBusy = ref(false)
 const message = ref('')
-
-const page = ref(1)
-const pageSize = ref(20)
 const total = ref(0)
+
+// 分页与收藏筛选进 URL query：从详情页返回、刷新、分享链接都保持当前位置
+const state = useUrlState({
+  page: 1,
+  page_size: 20,
+  favorite: false,
+}, {
+  onExternalSync: () => {
+    clearSelection()
+    load()
+  },
+})
 
 const selectedIds = ref<Set<number>>(new Set())
 const selectedCount = computed(() => selectedIds.value.size)
@@ -32,9 +39,9 @@ async function load() {
   loading.value = true
   try {
     const params = new URLSearchParams()
-    if (favOnly.value) params.set('favorite', '1')
-    params.set('page', String(page.value))
-    params.set('page_size', String(pageSize.value))
+    if (state.favorite) params.set('favorite', '1')
+    params.set('page', String(state.page))
+    params.set('page_size', String(state.page_size))
     const result = await api<PageResult>(`/api/images?${params}`)
     images.value = result.items
     total.value = result.total
@@ -53,20 +60,20 @@ function clearSelection() {
 }
 
 function onPageChange(p: number) {
-  page.value = p
+  state.page = p
   clearSelection()
   load()
 }
 
 function onPageSizeChange() {
-  page.value = 1
+  state.page = 1
   clearSelection()
   load()
 }
 
 function onFavOnlyChange() {
-  favOnly.value = !favOnly.value
-  page.value = 1
+  state.favorite = !state.favorite
+  state.page = 1
   clearSelection()
   load()
 }
@@ -128,44 +135,12 @@ async function batchDelete() {
   }
 }
 
-async function openLightbox(id: number) {
-  lightboxLoading.value = true
-  try {
-    lightbox.value = await api<ImageDetail>(`/api/images/${id}`)
-  } catch {
-    lightbox.value = { id, positive_prompt: '无法加载', negative_prompt: '', created_at: '', is_favorite: false, prompt_id: 0, prompt_title: '' }
-  } finally {
-    lightboxLoading.value = false
-  }
-}
-
-function closeLightbox() {
-  lightbox.value = null
-}
-
-function goToPrompt(id: number) {
-  closeLightbox()
-  router.push(`/prompts/${id}`)
-}
-
-function downloadImage(id: number) {
-  window.open(`/api/images/${id}/download`, '_blank')
-}
-
-async function deleteImage() {
-  if (!lightbox.value) return
-  const id = lightbox.value.id
-  if (!confirm(`确定删除这张图片？\n\n这会同时删除磁盘上的图片文件，且不可恢复。`)) return
-  lightboxLoading.value = true
-  try {
-    await api(`/api/images/${id}`, { method: 'DELETE' })
-    lightbox.value = null
-    await load()  // 重新加载以更新 total 和分页
-  } catch (e) {
-    alert(e instanceof Error ? e.message : '删除失败')
-  } finally {
-    lightboxLoading.value = false
-  }
+function openViewer(index: number) {
+  const ids = images.value.map(i => i.id)
+  openImageViewer(ids, index, {
+    goToPrompt: id => router.push(`/prompts/${id}`),
+    mutated: () => load(),
+  })
 }
 
 async function toggleFavorite(image: ImageItem) {
@@ -177,22 +152,6 @@ async function toggleFavorite(image: ImageItem) {
   }
 }
 
-async function toggleFavLightbox() {
-  if (!lightbox.value) return
-  try {
-    const result = await api<{ is_favorite: boolean }>(`/api/images/${lightbox.value.id}/favorite`, { method: 'PATCH' })
-    lightbox.value.is_favorite = result.is_favorite
-    const idx = images.value.findIndex(i => i.id === lightbox.value!.id)
-    if (idx >= 0) images.value[idx].is_favorite = result.is_favorite
-  } catch {
-    // ignore
-  }
-}
-
-function handleKeydown(e: KeyboardEvent) {
-  if (e.key === 'Escape' && lightbox.value) closeLightbox()
-}
-
 onMounted(load)
 </script>
 
@@ -200,8 +159,8 @@ onMounted(load)
   <PageHeader eyebrow="IMAGE LIBRARY" title="图片库" description="查看已生成的图片，支持预览、下载、提示词查看与批量管理。" />
 
   <div class="toolbar">
-    <button class="btn btn-sm" :class="{ 'btn-primary': favOnly }" @click="onFavOnlyChange">
-      {{ favOnly ? '★ 仅收藏' : '☆ 仅收藏' }}
+    <button class="btn btn-sm" :class="{ 'btn-primary': state.favorite }" @click="onFavOnlyChange">
+      {{ state.favorite ? '★ 仅收藏' : '☆ 仅收藏' }}
     </button>
   </div>
 
@@ -240,11 +199,11 @@ onMounted(load)
   <!-- Image Grid -->
   <div v-if="images.length" class="image-grid">
     <div
-      v-for="image in images"
+      v-for="(image, index) in images"
       :key="image.id"
       class="image-card"
       :class="{ selected: selectedIds.has(image.id) }"
-      @click="openLightbox(image.id)"
+      @click="openViewer(index)"
     >
       <label class="checkbox-wrap image-check" @click.stop>
         <input type="checkbox" :checked="selectedIds.has(image.id)" @change="toggleSelect(image.id)" />
@@ -264,13 +223,13 @@ onMounted(load)
   <div v-if="total > 0" class="pagination-footer">
     <Pagination
       :total="total"
-      :page="page"
-      :page-size="pageSize"
+      :page="state.page"
+      :page-size="state.page_size"
       @update:page="onPageChange"
     />
     <div class="page-size-wrap">
       <span class="text-xs muted">每页</span>
-      <select v-model.number="pageSize" class="input page-size-select" @change="onPageSizeChange">
+      <select v-model.number="state.page_size" class="input page-size-select" @change="onPageSizeChange">
         <option :value="10">10</option>
         <option :value="20">20</option>
         <option :value="50">50</option>
@@ -279,83 +238,6 @@ onMounted(load)
       <span class="text-xs muted">条</span>
     </div>
   </div>
-
-  <!-- Lightbox -->
-  <Teleport to="body">
-    <div v-if="lightbox" class="lightbox-overlay" @click.self="closeLightbox" @keydown="handleKeydown" tabindex="0">
-      <div class="lightbox-dialog">
-        <!-- Close button -->
-        <button class="lightbox-close" @click="closeLightbox">&times;</button>
-
-        <div class="lightbox-body">
-          <!-- Left: Image -->
-          <div class="lightbox-image-wrap">
-            <img class="lightbox-image" :src="`/api/images/${lightbox.id}/file`" :alt="`Image #${lightbox.id}`" />
-          </div>
-
-          <!-- Right: Details -->
-          <div class="lightbox-sidebar">
-            <div class="lightbox-sidebar-header">
-              <span class="lightbox-id">#{{ lightbox.id }}</span>
-              <span class="lightbox-date" v-if="lightbox.created_at">{{ new Date(lightbox.created_at).toLocaleString('zh-CN') }}</span>
-            </div>
-
-            <div v-if="lightboxLoading" class="lightbox-loading">
-              <span class="spinner"></span>
-              <span class="muted">加载中...</span>
-            </div>
-
-            <template v-else>
-              <!-- 来源提示词：有则可跳转，无则是手动提交 -->
-              <div v-if="lightbox.prompt_id" class="lightbox-section">
-                <div class="lightbox-section-label">
-                  <span class="label-dot source"></span>来源提示词
-                </div>
-                <div class="lightbox-prompt">{{ lightbox.prompt_title || '未命名提示词' }}</div>
-                <button class="btn btn-sm source-link" @click="goToPrompt(lightbox!.prompt_id)">
-                  查看提示词 #{{ lightbox.prompt_id }} &rarr;
-                </button>
-              </div>
-              <div v-else class="lightbox-section">
-                <div class="lightbox-section-label">
-                  <span class="label-dot source"></span>来源提示词
-                </div>
-                <div class="lightbox-empty">手动提交（未关联提示词）</div>
-              </div>
-
-              <div v-if="lightbox.positive_prompt" class="lightbox-section">
-                <div class="lightbox-section-label">
-                  <span class="label-dot positive"></span>正向提示词
-                </div>
-                <div class="lightbox-prompt">{{ lightbox.positive_prompt }}</div>
-              </div>
-
-              <div v-if="lightbox.negative_prompt" class="lightbox-section">
-                <div class="lightbox-section-label">
-                  <span class="label-dot negative"></span>负向提示词
-                </div>
-                <div class="lightbox-prompt">{{ lightbox.negative_prompt }}</div>
-              </div>
-
-              <div v-if="!lightbox.positive_prompt && !lightbox.negative_prompt" class="lightbox-empty">
-                暂无提示词信息
-              </div>
-            </template>
-
-            <div class="lightbox-footer">
-              <button class="btn btn-primary btn-sm" @click="downloadImage(lightbox!.id)">
-                <span class="dl-icon">&#8615;</span> 下载原图
-              </button>
-              <button class="btn btn-sm fav-btn" :class="{ 'fav-active': lightbox?.is_favorite }" @click="toggleFavLightbox" :disabled="lightboxLoading">
-                {{ lightbox?.is_favorite ? '★ 已收藏' : '☆ 收藏' }}
-              </button>
-              <button class="btn btn-danger btn-sm" @click="deleteImage()">删除</button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </Teleport>
 </template>
 
 <style scoped>
@@ -430,8 +312,4 @@ onMounted(load)
   overflow: hidden;
   text-overflow: ellipsis;
 }
-
-/* 来源提示词区块 */
-.label-dot.source { background: var(--c-primary, #6366f1); }
-.source-link { margin-top: 8px; }
 </style>

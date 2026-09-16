@@ -39,6 +39,7 @@ export type Task = {
   id: number
   source_type: string
   workflow_id: number
+  workflow_name?: string
   comfyui_url?: string
   parameters?: any
   status: string
@@ -48,4 +49,9 @@ export type Task = {
   created_at: string
   started_at?: string
   completed_at?: string
+  /** 列表接口附加：代表结果图 / 关联提示词 */
+  image_id?: number
+  prompt_id?: number
+  prompt_title?: string
+  prompt_count?: number
 }

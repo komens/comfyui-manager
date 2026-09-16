@@ -61,7 +61,7 @@ function go(p: number) {
 <style scoped>
 .pagination { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
 .page-info { font-size: 13px; color: var(--c-muted); }
-.page-btns { display: flex; align-items: center; gap: 4px; }
+.page-btns { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 .page-btn { min-width: 32px; height: 32px; padding: 0 8px; border: 1px solid var(--c-border); background: var(--c-surface); border-radius: 8px; cursor: pointer; font-size: 14px; color: var(--c-text); display: inline-flex; align-items: center; justify-content: center; transition: all var(--transition); }
 .page-btn:hover:not(:disabled):not(.active) { background: var(--c-surface-hover); border-color: var(--c-primary); }
 .page-btn.active { background: var(--c-primary); border-color: var(--c-primary); color: #fff; font-weight: 600; }
