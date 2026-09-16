@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { RouterLink, useRouter } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import Pagination from '../components/Pagination.vue'
 import { api } from '../api/client'
@@ -57,6 +57,66 @@ async function load() {
 
 function clearSelection() {
   selectedIds.value = new Set()
+}
+
+// —— 图片信息弹窗：点击卡片底部标题文案唤起，展示提示词等生成数据 ——
+type ImageDetail = { id: number; filename: string; created_at: string; is_favorite: boolean; prompt_id: number; prompt_title: string; positive_prompt: string; negative_prompt: string }
+
+const detailOpen = ref(false)
+const detailLoading = ref(false)
+const detail = ref<ImageDetail | null>(null)
+const detailImage = ref<ImageItem | null>(null)
+const copiedKey = ref('')
+
+async function openDetail(image: ImageItem) {
+  detailOpen.value = true
+  detailLoading.value = true
+  detail.value = null
+  detailImage.value = image
+  try {
+    detail.value = await api<ImageDetail>(`/api/images/${image.id}`)
+  } catch {
+    flash('加载图片信息失败')
+    closeDetail()
+  } finally {
+    detailLoading.value = false
+  }
+}
+
+function closeDetail() {
+  detailOpen.value = false
+  detailImage.value = null
+  detail.value = null
+}
+
+async function copyPrompt(key: 'positive' | 'negative') {
+  const text = key === 'positive' ? detail.value?.positive_prompt : detail.value?.negative_prompt
+  if (!text) return
+  let ok = false
+  try {
+    await navigator.clipboard.writeText(text)
+    ok = true
+  } catch {
+    // 非安全上下文（局域网 IP 访问）没有 clipboard API，退回 execCommand
+    try {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.select()
+      ok = document.execCommand('copy')
+      document.body.removeChild(ta)
+    } catch {
+      ok = false
+    }
+  }
+  if (ok) {
+    copiedKey.value = key
+    setTimeout(() => { if (copiedKey.value === key) copiedKey.value = '' }, 1500)
+  } else {
+    flash('复制失败，请手动选择文本')
+  }
 }
 
 function onPageChange(p: number) {
@@ -214,8 +274,9 @@ onMounted(load)
         <span class="text-xs">#{{ image.id }}</span>
         <span class="text-xs">{{ new Date(image.created_at).toLocaleDateString('zh-CN') }}</span>
       </div>
-      <div class="image-title" :title="image.prompt_id ? (image.prompt_title || '未命名提示词') : '手动提交'">
+      <div class="image-title image-title-btn" :title="image.prompt_id ? (image.prompt_title || '未命名提示词') : '手动提交'" @click.stop="openDetail(image)">
         {{ image.prompt_id ? (image.prompt_title || '未命名提示词') : '手动提交' }}
+        <span class="title-info-hint">&#9432;</span>
       </div>
     </div>
   </div>
@@ -236,6 +297,56 @@ onMounted(load)
         <option :value="100">100</option>
       </select>
       <span class="text-xs muted">条</span>
+    </div>
+  </div>
+
+  <!-- 图片信息弹窗 -->
+  <div v-if="detailOpen" class="modal-overlay" @click.self="closeDetail">
+    <div class="modal detail-modal">
+      <div class="detail-head">
+        <img v-if="detailImage" class="detail-thumb" :src="`/api/images/${detailImage.id}/file`" :alt="detailImage.filename" />
+        <div class="detail-meta">
+          <div class="detail-title-row">
+            <span class="detail-id">#{{ detailImage?.id }}</span>
+            <span v-if="detail?.is_favorite" class="detail-fav">★ 已收藏</span>
+          </div>
+          <div class="detail-filename" :title="detail?.filename">{{ detail?.filename || '…' }}</div>
+          <div v-if="detail" class="text-xs muted">{{ new Date(detail.created_at).toLocaleString('zh-CN') }}</div>
+          <RouterLink v-if="detail && detail.prompt_id" :to="`/prompts/${detail.prompt_id}`" class="detail-prompt-link">
+            查看关联提示词 &rarr;
+          </RouterLink>
+          <div v-else-if="detail" class="text-xs muted">手动提交，未入库</div>
+        </div>
+      </div>
+
+      <div v-if="detailLoading" class="detail-loading">
+        <span class="spinner"></span><span class="text-xs muted">加载图片信息…</span>
+      </div>
+      <template v-else-if="detail">
+        <section class="detail-prompt">
+          <div class="detail-prompt-head">
+            <span class="dp-label"><span class="label-dot positive"></span>正面提示词</span>
+            <button v-if="detail.positive_prompt" class="btn btn-ghost btn-sm" @click="copyPrompt('positive')">
+              {{ copiedKey === 'positive' ? '已复制 ✓' : '复制' }}
+            </button>
+          </div>
+          <p class="detail-prompt-body">{{ detail.positive_prompt || '（无）' }}</p>
+        </section>
+        <section v-if="detail.negative_prompt" class="detail-prompt">
+          <div class="detail-prompt-head">
+            <span class="dp-label"><span class="label-dot negative"></span>负面提示词</span>
+            <button class="btn btn-ghost btn-sm" @click="copyPrompt('negative')">
+              {{ copiedKey === 'negative' ? '已复制 ✓' : '复制' }}
+            </button>
+          </div>
+          <p class="detail-prompt-body">{{ detail.negative_prompt }}</p>
+        </section>
+      </template>
+
+      <div class="detail-footer">
+        <a v-if="detailImage" :href="`/api/images/${detailImage.id}/download`" class="btn btn-secondary btn-sm">&#8681; 下载</a>
+        <button class="btn btn-ghost" @click="closeDetail">关闭</button>
+      </div>
     </div>
   </div>
 </template>
@@ -312,4 +423,30 @@ onMounted(load)
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* 标题文案行：点击查看图片信息 */
+.image-title-btn { cursor: pointer; }
+.image-title-btn:hover { color: var(--c-primary); background: var(--c-surface-hover); }
+.image-title-btn:hover .title-info-hint { opacity: 1; }
+.title-info-hint { float: right; opacity: 0; color: var(--c-primary); transition: opacity 0.15s; }
+
+/* 图片信息弹窗 */
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 100; padding: 20px; }
+.modal { background: var(--c-card); border-radius: 12px; padding: 24px; width: 100%; max-height: 85vh; overflow-y: auto; box-shadow: var(--shadow-lg); }
+.detail-modal { max-width: 560px; }
+.detail-head { display: flex; gap: 14px; margin-bottom: 16px; }
+.detail-thumb { width: 120px; height: 120px; object-fit: cover; border-radius: 10px; border: 1px solid var(--c-border); flex-shrink: 0; background: var(--c-bg-subtle); }
+.detail-meta { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.detail-title-row { display: flex; align-items: center; gap: 8px; }
+.detail-id { font-weight: 700; color: var(--c-primary); }
+.detail-fav { font-size: 12px; color: #d97706; }
+.detail-filename { font-size: 13px; word-break: break-all; }
+.detail-prompt-link { font-size: 13px; color: var(--c-primary); font-weight: 600; margin-top: 2px; }
+.detail-prompt-link:hover { text-decoration: underline; }
+.detail-loading { display: flex; align-items: center; gap: 8px; padding: 14px 0; }
+.detail-prompt { border: 1px solid var(--c-border); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; background: var(--c-bg-subtle); }
+.detail-prompt-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.dp-label { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: var(--c-muted); }
+/* 不单独限高滚动：长文本完整展开，由弹窗外层统一滚动，避免双滚动条 */
+.detail-prompt-body { font-size: 13px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+.detail-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 </style>
