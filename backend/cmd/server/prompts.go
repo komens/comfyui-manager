@@ -302,8 +302,8 @@ func (a *app) runPrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := tx.ExecContext(r.Context(),
-		`INSERT INTO generation_tasks(source_type, workflow_id, comfyui_url, parameters_json, created_at) VALUES('prompt',?,?,?,?)`,
-		input.WorkflowID, comfyURL, string(parameters), now)
+		`INSERT INTO generation_tasks(source_type, workflow_id, comfyui_url, parameters_json, workflow_name, created_at) VALUES('prompt',?,?,?,(SELECT name FROM workflows WHERE id=?),?)`,
+		input.WorkflowID, comfyURL, string(parameters), input.WorkflowID, now)
 	if err != nil {
 		_ = tx.Rollback()
 		writeError(w, 500, "create task failed")

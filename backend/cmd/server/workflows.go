@@ -43,7 +43,10 @@ func (a *app) listWorkflows(w http.ResponseWriter, r *http.Request) {
 	_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM workflows`).Scan(&total)
 	// 分页
 	page, pageSize, offset := parsePagination(r)
-	rows, err := a.db.QueryContext(r.Context(), `SELECT id, name, description, workflow_path, mapping_json, COALESCE(negative_prompt,''), params_schema, enabled, is_default, created_at, updated_at FROM workflows ORDER BY id DESC LIMIT ? OFFSET ?`, pageSize, offset)
+	rows, err := a.db.QueryContext(r.Context(), `SELECT id, name, description, workflow_path, mapping_json, COALESCE(negative_prompt,''), params_schema, enabled, is_default, created_at, updated_at,
+		(SELECT COUNT(*) FROM generation_tasks t WHERE t.workflow_id=workflows.id),
+		(SELECT COUNT(*) FROM generation_tasks t WHERE t.workflow_id=workflows.id AND t.status IN ('pending','running'))
+		FROM workflows ORDER BY id DESC LIMIT ? OFFSET ?`, pageSize, offset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "query workflows failed")
 		return
@@ -53,14 +56,16 @@ func (a *app) listWorkflows(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var id, enabled, isDefault int
 		var name, description, path, mapping, negative, schema, created, updated string
-		if err := rows.Scan(&id, &name, &description, &path, &mapping, &negative, &schema, &enabled, &isDefault, &created, &updated); err != nil {
+		var taskCount, inFlight int
+		if err := rows.Scan(&id, &name, &description, &path, &mapping, &negative, &schema, &enabled, &isDefault, &created, &updated, &taskCount, &inFlight); err != nil {
 			writeError(w, http.StatusInternalServerError, "read workflow failed")
 			return
 		}
 		items = append(items, map[string]any{"id": id, "name": name, "description": description,
 			"workflow_path": path, "mapping": json.RawMessage(mapping),
 			"negative_prompt": negative, "params_schema": json.RawMessage(schema),
-			"enabled": enabled == 1, "is_default": isDefault == 1, "created_at": created, "updated_at": updated})
+			"enabled": enabled == 1, "is_default": isDefault == 1, "created_at": created, "updated_at": updated,
+			"task_count": taskCount, "in_flight": inFlight})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "page": page, "page_size": pageSize})
 }
@@ -371,32 +376,55 @@ func (a *app) deleteWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid workflow id")
 		return
 	}
-	var taskCount int
-	_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM generation_tasks WHERE workflow_id=?`, id).Scan(&taskCount)
-	if taskCount > 0 {
-		writeError(w, http.StatusConflict, "workflow is referenced by existing tasks and cannot be deleted")
+	// 只拦「在途」任务：submitter 的查询 JOIN workflows，删掉被 pending/running
+	// 任务引用的工作流会让那些任务永远卡在队列里。历史完成任务不受影响——
+	// 任务表已冗余 workflow_name，展示不依赖 workflows 表；重试会在
+	// retryTaskByID 里给出明确报错。检查与删除放同一事务，避免
+	// 「检查通过后、删除前恰好有新任务引用该工作流」的竞态。
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "delete workflow failed")
+		return
+	}
+	var inFlight int
+	if err := tx.QueryRowContext(r.Context(),
+		`SELECT COUNT(*) FROM generation_tasks WHERE workflow_id=? AND status IN ('pending','running')`, id).Scan(&inFlight); err != nil {
+		_ = tx.Rollback()
+		writeError(w, http.StatusInternalServerError, "delete workflow failed")
+		return
+	}
+	if inFlight > 0 {
+		_ = tx.Rollback()
+		writeError(w, http.StatusConflict, fmt.Sprintf("该工作流还有 %d 个排队中/生成中的任务，请等待完成或先取消这些任务", inFlight))
 		return
 	}
 	var path string
-	if err := a.db.QueryRowContext(r.Context(), `SELECT workflow_path FROM workflows WHERE id=?`, id).Scan(&path); err != nil {
+	if err := tx.QueryRowContext(r.Context(), `SELECT workflow_path FROM workflows WHERE id=?`, id).Scan(&path); err != nil {
+		_ = tx.Rollback()
 		writeError(w, http.StatusNotFound, "workflow not found")
 		return
 	}
-	// 先删文件、再删库（和删图片同一顺序）：反过来的话，删文件失败就会在
-	// data/workflows/ 里留下界面上再也清不掉的孤儿 JSON。
-	// newPath 传空串表示「这个记录要消失了」——复用同一个引用检查，
-	// 历史数据里两个工作流可能指向同一文件，不能盲目删。
-	a.removeOrphanWorkflowFile(r.Context(), id, path, "")
-	result, err := a.db.ExecContext(r.Context(), `DELETE FROM workflows WHERE id=?`, id)
+	result, err := tx.ExecContext(r.Context(), `DELETE FROM workflows WHERE id=?`, id)
 	if err != nil {
+		_ = tx.Rollback()
 		writeError(w, http.StatusInternalServerError, "delete workflow failed")
 		return
 	}
 	n, _ := result.RowsAffected()
 	if n == 0 {
+		_ = tx.Rollback()
 		writeError(w, http.StatusNotFound, "workflow not found")
 		return
 	}
+	if err := tx.Commit(); err != nil {
+		writeError(w, http.StatusInternalServerError, "delete workflow failed")
+		return
+	}
+	// 文件删除放在事务提交后：库里已无引用，即使删文件失败也只是留下
+	// 可人工清理的孤儿 JSON，不会反过来让界面出现删不掉的记录。
+	// newPath 传空串表示「这个记录要消失了」——复用同一个引用检查，
+	// 历史数据里两个工作流可能指向同一文件，不能盲目删。
+	a.removeOrphanWorkflowFile(r.Context(), id, path, "")
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "deleted": true})
 }
 

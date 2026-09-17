@@ -31,6 +31,10 @@ export type Workflow = {
   params_schema?: any
   enabled: boolean
   is_default?: boolean
+  /** 历史任务数（含已完成），删除前用于提示影响范围 */
+  task_count?: number
+  /** 排队中/生成中的任务数，>0 时后端禁止删除 */
+  in_flight?: number
   created_at?: string
   updated_at?: string
 }

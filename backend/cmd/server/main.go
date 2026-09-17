@@ -287,6 +287,9 @@ VALUES ('comfyui_url', ?, CURRENT_TIMESTAMP);
 		`ALTER TABLE prompts ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE images ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0`,
 		`UPDATE generation_items SET status='pending' WHERE status='queued'`,
+		// 任务表冗余工作流名：删除工作流后历史任务仍能显示名字（配合 deleteWorkflow 放宽）
+		`ALTER TABLE generation_tasks ADD COLUMN workflow_name TEXT NOT NULL DEFAULT ''`,
+		`UPDATE generation_tasks SET workflow_name=(SELECT w.name FROM workflows w WHERE w.id=generation_tasks.workflow_id) WHERE workflow_name='' AND workflow_id IS NOT NULL`,
 	}
 	for _, stmt := range migrations {
 		if _, err := a.db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {

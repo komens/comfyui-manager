@@ -95,6 +95,8 @@ func (a *app) retryTask(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 404, "task not found")
 		case errors.Is(err, errTaskNotFailed):
 			writeError(w, 409, "only failed tasks can be retried")
+		case errors.Is(err, errTaskWorkflowGone):
+			writeError(w, 409, "工作流已删除，无法重试该任务")
 		default:
 			writeError(w, 500, "retry task failed")
 		}

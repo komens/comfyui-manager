@@ -17,6 +17,7 @@ var (
 	errTaskRunning        = errors.New("cannot delete running task, cancel it first")
 	errTaskNotCancellable = errors.New("task is not cancellable")
 	errTaskNotFailed      = errors.New("only failed tasks can be retried")
+	errTaskWorkflowGone   = errors.New("workflow has been deleted, task cannot be retried")
 )
 
 type directTaskInput struct {
@@ -64,8 +65,8 @@ func (a *app) createDirectTask(w http.ResponseWriter, r *http.Request) {
 	}
 	promptID, _ := promptResult.LastInsertId()
 	result, err := tx.ExecContext(r.Context(),
-		`INSERT INTO generation_tasks(source_type, workflow_id, comfyui_url, parameters_json, created_at) VALUES('direct',?,?,?,?)`,
-		input.WorkflowID, comfyURL, string(parameters), now)
+		`INSERT INTO generation_tasks(source_type, workflow_id, comfyui_url, parameters_json, workflow_name, created_at) VALUES('direct',?,?,?,(SELECT name FROM workflows WHERE id=?),?)`,
+		input.WorkflowID, comfyURL, string(parameters), input.WorkflowID, now)
 	if err != nil {
 		_ = tx.Rollback()
 		writeError(w, http.StatusInternalServerError, "create task failed")
@@ -109,7 +110,7 @@ func (a *app) listTasks(w http.ResponseWriter, r *http.Request) {
 	// 分页
 	page, pageSize, offset := parsePagination(r)
 	queryArgs := append(args, pageSize, offset)
-	rows, err := a.db.QueryContext(r.Context(), `SELECT t.id, t.source_type, t.workflow_id, w.name, t.status, t.total_count, t.success_count, t.failed_count, t.created_at
+	rows, err := a.db.QueryContext(r.Context(), `SELECT t.id, t.source_type, t.workflow_id, COALESCE(NULLIF(t.workflow_name,''), w.name), t.status, t.total_count, t.success_count, t.failed_count, t.created_at
 		FROM generation_tasks t LEFT JOIN workflows w ON w.id=t.workflow_id`+where+` ORDER BY t.id DESC LIMIT ? OFFSET ?`, queryArgs...)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "query tasks failed")
@@ -346,7 +347,8 @@ func (a *app) execIDBatch(w http.ResponseWriter, ctx context.Context, ids []int6
 // isTaskSkippable 任务批量操作中可跳过的错误（不存在 / 状态不允许）。
 func isTaskSkippable(err error) bool {
 	return errors.Is(err, errTaskNotFound) || errors.Is(err, errTaskRunning) ||
-		errors.Is(err, errTaskNotCancellable) || errors.Is(err, errTaskNotFailed)
+		errors.Is(err, errTaskNotCancellable) || errors.Is(err, errTaskNotFailed) ||
+		errors.Is(err, errTaskWorkflowGone)
 }
 
 func (a *app) batchCancelTasks(w http.ResponseWriter, r *http.Request) {
@@ -446,6 +448,15 @@ func (a *app) retryTaskByID(ctx context.Context, id int64) error {
 	}
 	if status != "failed" {
 		return errTaskNotFailed
+	}
+	// 工作流已被删除时禁止重试：submitter 的查询 JOIN workflows，
+	// 重置成 pending 也永远不会被捞起，只会变成"看起来在排队实则卡死"。
+	var workflowID int64
+	if err := a.db.QueryRowContext(ctx, `SELECT workflow_id FROM generation_tasks WHERE id=?`, id).Scan(&workflowID); err == nil {
+		var has int
+		if err := a.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM workflows WHERE id=?`, workflowID).Scan(&has); err == nil && has == 0 {
+			return errTaskWorkflowGone
+		}
 	}
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {

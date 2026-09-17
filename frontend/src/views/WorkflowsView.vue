@@ -166,10 +166,16 @@ async function save() {
   }
 }
 
-async function deleteWorkflow(id: number, wfName: string) {
-  if (!confirm(`确定删除工作流 "${wfName}"？`)) return
+async function deleteWorkflow(wf: Workflow) {
+  let tip = `确定删除工作流「${wf.name}」？`
+  if ((wf.in_flight ?? 0) > 0) {
+    tip = `该工作流还有 ${wf.in_flight} 个排队中/生成中的任务，需等待完成或先取消这些任务。\n\n仍要尝试删除吗？`
+  } else if ((wf.task_count ?? 0) > 0) {
+    tip = `该工作流有 ${wf.task_count} 条历史任务。删除后历史任务与图片记录保留，但无法再重试。\n\n确定删除工作流「${wf.name}」？`
+  }
+  if (!confirm(tip)) return
   try {
-    await api(`/api/workflows/${id}`, { method: 'DELETE' })
+    await api(`/api/workflows/${wf.id}`, { method: 'DELETE' })
     await load()
   } catch (e) {
     message.value = e instanceof Error ? e.message : '删除失败'
@@ -338,7 +344,7 @@ onMounted(load)
           @click="setDefaultWorkflow(wf, !wf.is_default)"
         >{{ wf.is_default ? '★ 默认' : '☆ 设为默认' }}</button>
         <button class="btn btn-ghost btn-sm" @click="editWorkflow(wf)" title="编辑">&#9998;</button>
-        <button class="btn btn-ghost btn-sm" @click="deleteWorkflow(wf.id, wf.name)" title="删除">&#10005;</button>
+        <button class="btn btn-ghost btn-sm" @click="deleteWorkflow(wf)" title="删除">&#10005;</button>
       </div>
     </div>
   </div>
