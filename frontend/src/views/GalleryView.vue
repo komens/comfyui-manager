@@ -19,17 +19,30 @@ const batchBusy = ref(false)
 const message = ref('')
 const total = ref(0)
 
-// 分页与收藏筛选进 URL query：从详情页返回、刷新、分享链接都保持当前位置
+// 分页与筛选进 URL query：从详情页返回、刷新、分享链接都保持当前位置
 const state = useUrlState({
   page: 1,
   page_size: 20,
   favorite: false,
+  q: '',
+  group: '',
 }, {
   onExternalSync: () => {
     clearSelection()
     load()
   },
 })
+
+type Group = { group_name: string; group_id: string; count: number }
+const groups = ref<Group[]>([])
+
+async function loadGroups() {
+  try {
+    groups.value = await api<Group[]>('/api/prompts/groups')
+  } catch {
+    groups.value = []
+  }
+}
 
 const selectedIds = ref<Set<number>>(new Set())
 const selectedCount = computed(() => selectedIds.value.size)
@@ -40,6 +53,8 @@ async function load() {
   try {
     const params = new URLSearchParams()
     if (state.favorite) params.set('favorite', '1')
+    if (state.q) params.set('q', state.q)
+    if (state.group) params.set('group', state.group)
     params.set('page', String(state.page))
     params.set('page_size', String(state.page_size))
     const result = await api<PageResult>(`/api/images?${params}`)
@@ -138,6 +153,18 @@ function onFavOnlyChange() {
   load()
 }
 
+function onFilterChange() {
+  state.page = 1
+  clearSelection()
+  load()
+}
+
+let searchTimer: ReturnType<typeof setTimeout> | undefined
+function onSearch() {
+  clearTimeout(searchTimer)
+  searchTimer = setTimeout(onFilterChange, 300)
+}
+
 function toggleSelect(id: number) {
   const s = new Set(selectedIds.value)
   if (s.has(id)) s.delete(id)
@@ -206,19 +233,38 @@ function openViewer(index: number) {
 async function toggleFavorite(image: ImageItem) {
   try {
     const result = await api<{ is_favorite: boolean }>(`/api/images/${image.id}/favorite`, { method: 'PATCH' })
-    image.is_favorite = result.is_favorite
+    // 后端以提示词为主体级联收藏：同提示词的所有图片共享收藏态，本地同步刷新
+    for (const img of images.value) {
+      if (image.prompt_id && img.prompt_id === image.prompt_id) img.is_favorite = result.is_favorite
+      else if (!image.prompt_id && img.id === image.id) img.is_favorite = result.is_favorite
+    }
   } catch {
     // ignore
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  loadGroups()
+})
 </script>
 
 <template>
   <PageHeader eyebrow="IMAGE LIBRARY" title="图片库" description="查看已生成的图片，支持预览、下载、提示词查看与批量管理。" />
 
-  <div class="toolbar">
+  <div class="toolbar" style="flex-wrap:wrap; gap:10px;">
+    <input
+      v-model="state.q"
+      class="input"
+      type="text"
+      placeholder="搜索提示词或文件名..."
+      style="flex:1; min-width:200px;"
+      @input="onSearch"
+    />
+    <select v-model="state.group" class="input" style="width:auto;max-width:180px;" @change="onFilterChange">
+      <option value="">全部分组</option>
+      <option v-for="g in groups" :key="g.group_name" :value="g.group_name">{{ g.group_name }}（{{ g.count }}）</option>
+    </select>
     <button class="btn btn-sm" :class="{ 'btn-primary': state.favorite }" @click="onFavOnlyChange">
       {{ state.favorite ? '★ 仅收藏' : '☆ 仅收藏' }}
     </button>

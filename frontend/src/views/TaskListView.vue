@@ -42,12 +42,24 @@ const state = useUrlState({
   page: 1,
   page_size: 20,
   status: '',
+  group: '',
 }, {
   onExternalSync: () => {
     selectedIds.value = new Set()
     load()
   },
 })
+
+type Group = { group_name: string; group_id: string; count: number }
+const groups = ref<Group[]>([])
+
+async function loadGroups() {
+  try {
+    groups.value = await api<Group[]>('/api/prompts/groups')
+  } catch {
+    groups.value = []
+  }
+}
 
 // 多选（仅作用于当前页；翻页/改筛选时清空）
 const selectedIds = ref<Set<number>>(new Set())
@@ -63,6 +75,7 @@ async function load() {
   try {
     const params = new URLSearchParams()
     if (state.status) params.set('status', state.status)
+    if (state.group) params.set('group', state.group)
     params.set('page', String(state.page))
     params.set('page_size', String(state.page_size))
     const result = await api<PageResult>(`/api/tasks?${params}`)
@@ -216,6 +229,7 @@ async function deleteTask(task: Task) {
 
 onMounted(() => {
   load()
+  loadGroups()
   timer = setInterval(load, 5000)
 })
 onUnmounted(() => { if (timer) clearInterval(timer) })
@@ -232,6 +246,10 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
       <option value="completed">已完成</option>
       <option value="failed">失败</option>
       <option value="cancelled">已取消</option>
+    </select>
+    <select v-model="state.group" class="input" style="width:auto;max-width:180px;" @change="onFilterChange">
+      <option value="">全部分组</option>
+      <option v-for="g in groups" :key="g.group_name" :value="g.group_name">{{ g.group_name }}（{{ g.count }}）</option>
     </select>
     <button class="btn btn-ghost" @click="load()">&#8635; 刷新</button>
   </div>
@@ -273,7 +291,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
             <span class="badge badge-muted">{{ t.source_type }}</span>
             <span v-if="t.workflow_name" class="badge badge-muted" :title="t.workflow_name">{{ t.workflow_name }}</span>
             <div class="task-actions">
-              <!-- <RouterLink :to="`/tasks/${t.id}`" class="btn btn-ghost btn-sm">详情</RouterLink> -->
+              <RouterLink :to="`/tasks/${t.id}`" class="btn btn-ghost btn-sm">详情</RouterLink>
               <button v-if="canRetry(t.status)" class="btn btn-ghost btn-sm" @click="retryTask(t)">重跑</button>
               <button v-if="canCancel(t.status)" class="btn btn-ghost btn-sm btn-warn" @click="cancelTask(t)">取消</button>
               <button v-if="canDelete(t.status)" class="btn btn-ghost btn-sm btn-danger" @click="deleteTask(t)">&#10005;</button>

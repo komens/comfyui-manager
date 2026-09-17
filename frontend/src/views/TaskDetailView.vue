@@ -3,8 +3,20 @@ import { onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import { api, type Task } from '../api/client'
+import { openImageViewer } from '../utils/imageViewer'
+import { backToListOr } from '../utils/nav'
 
-type TaskItem = { id: number; status: string; positive_prompt: string; negative_prompt: string; error_message: string }
+// 返回时优先走历史（保留任务列表的分页/筛选 query），直链进入则回列表第一页
+function backToList() {
+  backToListOr(router, '/tasks')
+}
+
+type TaskItem = { id: number; status: string; positive_prompt: string; negative_prompt: string; error_message: string; images?: { id: number; filename: string }[] }
+
+function openItemImages(item: TaskItem, index: number) {
+  const ids = (item.images || []).map(i => i.id)
+  if (ids.length) openImageViewer(ids, index)
+}
 
 const route = useRoute()
 const router = useRouter()
@@ -87,6 +99,8 @@ onUnmounted(() => stream?.close())
 <template>
   <PageHeader eyebrow="TASK DETAIL" :title="`任务 #${route.params.id}`" description="查看任务进度和详情。" />
 
+  <button class="btn btn-ghost btn-sm" style="margin-bottom:12px;" @click="backToList">&larr; 返回任务列表</button>
+
   <div v-if="task" class="card">
     <div class="card-header">
       <div class="flex items-center gap-3">
@@ -140,6 +154,17 @@ onUnmounted(() => stream?.close())
           <span class="badge" :class="statusClass(item.status)">{{ item.status }}</span>
           <div class="flex-1" style="min-width:0;">
             <div class="prompt-block">{{ item.positive_prompt }}</div>
+            <div v-if="item.images?.length" class="item-images">
+              <img
+                v-for="(img, i) in item.images"
+                :key="img.id"
+                class="item-thumb"
+                :src="`/api/images/${img.id}/file`"
+                :alt="img.filename"
+                loading="lazy"
+                @click="openItemImages(item, i)"
+              />
+            </div>
             <div v-if="item.error_message" class="text-xs" style="color:var(--c-danger);margin-top:4px;">{{ item.error_message }}</div>
           </div>
         </div>
@@ -160,3 +185,9 @@ onUnmounted(() => stream?.close())
     </div>
   </div>
 </template>
+
+<style scoped>
+.item-images { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.item-thumb { width: 72px; height: 72px; object-fit: cover; border-radius: 8px; border: 1px solid var(--c-border); cursor: zoom-in; background: var(--c-bg-subtle); }
+.item-thumb:hover { border-color: var(--c-primary); }
+</style>

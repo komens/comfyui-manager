@@ -25,6 +25,7 @@ type PromptDetail = {
   positive_prompt: string
   group_name: string
   status: string
+  is_favorite: boolean
   created_at: string
   runs: Run[]
 }
@@ -131,6 +132,18 @@ async function deletePrompt() {
   backToList()
 }
 
+// 收藏以提示词为主体，后端会级联同步其名下所有结果图
+async function toggleFavorite() {
+  if (!prompt.value) return
+  try {
+    const result = await api<{ is_favorite: boolean }>(`/api/prompts/${prompt.value.id}/favorite`, { method: 'PATCH' })
+    prompt.value.is_favorite = result.is_favorite
+    showMessage(result.is_favorite ? '已收藏（含关联图片）' : '已取消收藏（含关联图片）')
+  } catch (e) {
+    showMessage(e instanceof Error ? e.message : '操作失败', 'error')
+  }
+}
+
 // 返回时优先走历史（保留列表页的分页/筛选 query），直链进入则回列表第一页
 function backToList() {
   backToListOr(router, '/prompts')
@@ -180,6 +193,9 @@ onUnmounted(() => setPolling(false))
             </div>
           </div>
           <div class="detail-actions">
+            <button class="btn btn-ghost" :class="{ 'fav-active': prompt.is_favorite }" @click="toggleFavorite">
+              {{ prompt.is_favorite ? '★ 已收藏' : '☆ 收藏' }}
+            </button>
             <button class="btn btn-primary" @click="openRunModal">&#9654; 重跑</button>
             <RouterLink :to="`/prompts/${prompt.id}/edit`" class="btn btn-secondary">编辑</RouterLink>
             <button class="btn btn-ghost btn-danger" @click="deletePrompt">删除</button>
@@ -255,6 +271,7 @@ onUnmounted(() => setPolling(false))
 
 <style scoped>
 .detail-card { margin-bottom: 16px; }
+.detail-actions .fav-active { color: #d97706; border-color: #fbbf24; background: #fff7ed; }
 .detail-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 12px; }
 .detail-title-wrap { min-width: 0; flex: 1; }
 .detail-title { margin: 0 0 8px; font-size: 22px; line-height: 1.3; word-break: break-word; }

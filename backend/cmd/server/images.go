@@ -62,22 +62,36 @@ func (a *app) listImages(w http.ResponseWriter, r *http.Request) {
 	// 收藏过滤。必须带 i. 前缀：链上的 prompts 表同样有 is_favorite 列，
 	// 不加前缀会变成 ambiguous column，整个 /api/images?favorite=1 直接 500。
 	where := ` WHERE 1=1`
+	args := []any{}
 	if r.URL.Query().Get("favorite") == "1" {
 		where += ` AND i.is_favorite=1`
 	}
+	// 关键字：匹配提示词标题/正文，也匹配图片文件名（手动提交的图没有提示词）
+	if q := r.URL.Query().Get("q"); q != "" {
+		where += ` AND (p.title LIKE ? OR p.positive_prompt LIKE ? OR i.filename LIKE ?)`
+		like := "%" + q + "%"
+		args = append(args, like, like, like)
+	}
+	// 提示词分组
+	if group := r.URL.Query().Get("group"); group != "" {
+		where += ` AND p.group_name=?`
+		args = append(args, group)
+	}
+	// 左连接出来源提示词：直接提交(manual)的图没有 prompt_id，此时 title 为空；
+	// 连接同时服务于上面的 q/group 筛选（LEFT JOIN 不会丢手动提交的行）。
+	const joins = ` FROM images i
+	 LEFT JOIN generation_items gi ON gi.id = i.generation_item_id
+	 LEFT JOIN prompts p ON p.id = gi.prompt_id`
 	// 统计总数
 	var total int
-	_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM images i`+where).Scan(&total)
+	_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(*)`+joins+where, args...).Scan(&total)
 	// 分页
 	page, pageSize, offset := parsePagination(r)
-	// 左连接出来源提示词：直接提交(manual)的图没有 prompt_id，此时 title 为空
+	pageArgs := append(args, pageSize, offset)
 	rows, err := a.db.QueryContext(r.Context(),
 		`SELECT i.id, i.generation_item_id, i.filename, i.storage_path, i.is_favorite, i.created_at,
-		        COALESCE(gi.prompt_id, 0), COALESCE(p.title, '')
-		 FROM images i
-		 LEFT JOIN generation_items gi ON gi.id = i.generation_item_id
-		 LEFT JOIN prompts p ON p.id = gi.prompt_id`+where+`
-		 ORDER BY i.id DESC LIMIT ? OFFSET ?`, pageSize, offset)
+		        COALESCE(gi.prompt_id, 0), COALESCE(p.title, '')`+joins+where+`
+		 ORDER BY i.id DESC LIMIT ? OFFSET ?`, pageArgs...)
 	if err != nil {
 		writeError(w, 500, "query images failed")
 		return
@@ -206,7 +220,7 @@ func (a *app) batchFavoriteImages(w http.ResponseWriter, r *http.Request) {
 		fav = 1
 	}
 	a.execIDBatch(w, r.Context(), input.IDs, func(ctx context.Context, id int64) error {
-		return a.setImageFavoriteByID(ctx, id, fav)
+		return a.setImageFavoriteLinked(ctx, id, fav)
 	}, isImageSkippable)
 }
 
@@ -227,7 +241,7 @@ func (a *app) toggleImageFavorite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fav := 1 - cur
-	if err := a.setImageFavoriteByID(r.Context(), id, fav); err != nil {
+	if err := a.setImageFavoriteLinked(r.Context(), id, fav); err != nil {
 		if errors.Is(err, errImageNotFound) {
 			writeError(w, http.StatusNotFound, "image not found")
 			return

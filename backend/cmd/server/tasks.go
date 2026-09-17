@@ -96,6 +96,11 @@ func (a *app) listTasks(w http.ResponseWriter, r *http.Request) {
 		where += ` AND t.status=?`
 		args = append(args, status)
 	}
+	// 按提示词分组筛选：任务名下任一 item 的提示词属于该分组即命中
+	if group := r.URL.Query().Get("group"); group != "" {
+		where += ` AND EXISTS (SELECT 1 FROM generation_items gi JOIN prompts p ON p.id=gi.prompt_id WHERE gi.task_id=t.id AND p.group_name=?)`
+		args = append(args, group)
+	}
 	// 统计总数
 	var total int
 	countArgs := make([]any, len(args))
@@ -230,10 +235,45 @@ func (a *app) getTask(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	a.attachItemImages(r.Context(), items)
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "source_type": source, "workflow_id": workflowID,
 		"comfyui_url": comfyURL, "parameters": json.RawMessage(parameters), "status": status,
 		"total_count": total, "success_count": success, "failed_count": failed,
 		"created_at": created, "items": items})
+}
+
+// attachItemImages 给任务详情的 items 附加各自的结果图列表（一个 item 可能出多张图）。
+// 查询失败时静默降级：items 不带 images 字段，前端按无图处理。
+func (a *app) attachItemImages(ctx context.Context, items []map[string]any) {
+	if len(items) == 0 {
+		return
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(items)), ",")
+	args := make([]any, len(items))
+	for i, item := range items {
+		args[i] = item["id"]
+	}
+	rows, err := a.db.QueryContext(ctx, `SELECT generation_item_id, id, filename FROM images
+		WHERE generation_item_id IN (`+placeholders+`) ORDER BY id`, args...)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	imgsByItem := map[int64][]map[string]any{}
+	for rows.Next() {
+		var itemID, imageID int64
+		var filename string
+		if err := rows.Scan(&itemID, &imageID, &filename); err == nil {
+			imgsByItem[itemID] = append(imgsByItem[itemID], map[string]any{"id": imageID, "filename": filename})
+		}
+	}
+	for _, item := range items {
+		if id, ok := item["id"].(int); ok {
+			if imgs, found := imgsByItem[int64(id)]; found {
+				item["images"] = imgs
+			}
+		}
+	}
 }
 
 func (a *app) deleteTask(w http.ResponseWriter, r *http.Request) {

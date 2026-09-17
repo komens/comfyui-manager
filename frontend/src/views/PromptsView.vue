@@ -5,6 +5,7 @@ import PageHeader from '../components/PageHeader.vue'
 import Pagination from '../components/Pagination.vue'
 import { api, type Workflow } from '../api/client'
 import { pickDefaultWorkflow } from '../utils/workflowParams'
+import { openImageViewer } from '../utils/imageViewer'
 import { useUrlState } from '../composables/useUrlState'
 
 type Prompt = {
@@ -19,6 +20,7 @@ type Prompt = {
   created_at: string
   run_count: number
   image_count: number
+  cover_image_id: number
   is_favorite: boolean
 }
 type Group = { group_name: string; group_id: string; count: number }
@@ -217,6 +219,16 @@ function statusBadge(status: string) {
   return map[status] || status
 }
 
+function formatTime(t: string) {
+  if (!t) return ''
+  return new Date(t).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
+
+// 封面（最新一张结果图）点击打开大图查看器
+function openCover(p: Prompt) {
+  if (p.cover_image_id) openImageViewer([p.cover_image_id], 0, { mutated: () => load() })
+}
+
 let searchTimer: any
 function onSearch() {
   clearTimeout(searchTimer)
@@ -310,27 +322,38 @@ onMounted(() => {
           <div class="empty-icon">&#128221;</div>
           <p>暂无提示词。可通过「直接提交」或「JSON 文件」导入。</p>
         </div>
-        <div v-else>
-          <div class="list-row prompt-row" v-for="p in prompts" :key="p.id" :class="{ selected: selectedIds.has(p.id) }">
-            <label class="checkbox-wrap" @click.stop>
-              <input type="checkbox" :checked="selectedIds.has(p.id)" @change="toggleSelect(p.id)" />
-            </label>
-            <RouterLink :to="`/prompts/${p.id}`" class="prompt-content" style="min-width:0; flex:1; display:block;">
-              <div class="prompt-head">
-                <span class="prompt-title">{{ p.title }}</span>
-                <span class="badge" :class="'badge-' + p.status">{{ statusBadge(p.status) }}</span>
-                <span v-if="p.image_count" class="badge badge-info">&#128247; {{ p.image_count }}</span>
-                <span v-if="p.group_name" class="badge badge-muted">{{ p.group_name }}</span>
+        <div v-else class="prompt-list">
+          <div class="prompt-card" v-for="p in prompts" :key="p.id" :class="{ selected: selectedIds.has(p.id) }">
+            <div class="pc-head">
+              <label class="checkbox-wrap" @click.stop>
+                <input type="checkbox" :checked="selectedIds.has(p.id)" @change="toggleSelect(p.id)" />
+              </label>
+              <RouterLink :to="`/prompts/${p.id}`" class="pc-title" :title="p.title">{{ p.title }}</RouterLink>
+              <span class="badge" :class="'badge-' + p.status">{{ statusBadge(p.status) }}</span>
+              <span v-if="p.group_name" class="badge badge-muted">{{ p.group_name }}</span>
+              <div class="pc-actions">
+                <button class="btn-icon" :class="{ 'fav-active': p.is_favorite }" @click.stop="toggleFavorite(p)" :title="p.is_favorite ? '取消收藏' : '收藏'">
+                  {{ p.is_favorite ? '★' : '☆' }}
+                </button>
+                <RouterLink :to="`/prompts/${p.id}`" class="btn btn-ghost btn-sm">查看</RouterLink>
+                <RouterLink :to="`/prompts/${p.id}/edit`" class="btn btn-ghost btn-sm">&#9998;</RouterLink>
+                <button class="btn btn-ghost btn-sm btn-danger" @click="deletePrompt(p)">&#10005;</button>
               </div>
-              <div class="prompt-text">{{ p.positive_prompt }}</div>
-            </RouterLink>
-            <div class="prompt-actions">
-              <button class="btn-icon" :class="{ 'fav-active': p.is_favorite }" @click.stop="toggleFavorite(p)" :title="p.is_favorite ? '取消收藏' : '收藏'">
-                {{ p.is_favorite ? '★' : '☆' }}
-              </button>
-              <RouterLink :to="`/prompts/${p.id}`" class="btn btn-ghost btn-sm">查看</RouterLink>
-              <RouterLink :to="`/prompts/${p.id}/edit`" class="btn btn-ghost btn-sm">&#9998;</RouterLink>
-              <button class="btn btn-ghost btn-sm btn-danger" @click="deletePrompt(p)">&#10005;</button>
+            </div>
+            <div class="pc-body">
+              <div class="pc-cover" :class="{ clickable: p.cover_image_id }" @click.stop="openCover(p)" :title="p.cover_image_id ? '查看最新结果图' : ''">
+                <img v-if="p.cover_image_id" :src="`/api/images/${p.cover_image_id}/file`" loading="lazy" :alt="p.title" />
+                <div v-else class="pc-cover-empty">无图</div>
+              </div>
+              <div class="pc-meta">
+                <div class="pc-meta-line">
+                  <span>创建 {{ formatTime(p.created_at) }}</span>
+                  <span v-if="p.completed_at"> · 完成 {{ formatTime(p.completed_at) }}</span>
+                  <span> · 执行 {{ p.run_count }} 次</span>
+                  <span> · 图片 {{ p.image_count }} 张</span>
+                </div>
+                <div class="pc-prompt">{{ p.positive_prompt }}</div>
+              </div>
             </div>
           </div>
         </div>
@@ -392,13 +415,23 @@ onMounted(() => {
 .group-item.active .group-count { background: rgba(255,255,255,0.25); color: #fff; }
 .group-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .group-count { font-size: 12px; background: var(--c-bg-subtle); color: var(--c-muted); padding: 1px 8px; border-radius: 10px; flex-shrink: 0; margin-left: 8px; }
-.prompt-row { align-items: flex-start; }
-.prompt-row.selected { background: var(--c-primary-light); }
-.prompt-content { text-decoration: none; color: inherit; }
-.prompt-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; flex-wrap: wrap; }
-.prompt-title { font-weight: 600; }
-.prompt-text { font-size: 13px; color: var(--c-muted); overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.5; }
-.prompt-actions { display: flex; gap: 4px; flex-shrink: 0; }
+.prompt-list { display: flex; flex-direction: column; }
+.prompt-card { padding: 12px 14px; border-bottom: 1px solid var(--c-border-light); }
+.prompt-card:last-child { border-bottom: none; }
+.prompt-card.selected { background: var(--c-primary-light); }
+.pc-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.pc-title { font-weight: 600; font-size: 15px; text-decoration: none; color: var(--c-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.pc-title:hover { color: var(--c-primary); }
+.pc-actions { display: flex; gap: 4px; flex-shrink: 0; margin-left: auto; }
+.pc-body { display: flex; gap: 12px; margin-top: 10px; min-width: 0; }
+.pc-cover { width: 88px; height: 88px; border-radius: 8px; border: 1px solid var(--c-border); overflow: hidden; flex-shrink: 0; background: var(--c-bg-subtle); }
+.pc-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.pc-cover.clickable { cursor: zoom-in; }
+.pc-cover.clickable:hover { border-color: var(--c-primary); }
+.pc-cover-empty { width: 100%; height: 100%; display: grid; place-items: center; font-size: 11px; color: var(--c-muted); }
+.pc-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.pc-meta-line { display: flex; gap: 4px; flex-wrap: wrap; font-size: 12px; color: var(--c-muted); }
+.pc-prompt { font-size: 13px; color: var(--c-text-secondary, var(--c-muted)); line-height: 1.5; white-space: pre-wrap; word-break: break-word; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
 .btn-icon { background: none; border: none; cursor: pointer; font-size: 16px; padding: 4px; color: var(--c-muted); transition: color 0.2s; }
 .btn-icon:hover { color: #f59e0b; }
 .btn-icon.fav-active { color: #d97706; }

@@ -3,11 +3,15 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// errPromptNotFound 表示提示词不存在。收藏级联等写操作据此返回 404 而非 500。
+var errPromptNotFound = errors.New("prompt not found")
 
 type promptInput struct {
 	Title          string `json:"title"`
@@ -46,7 +50,8 @@ func (a *app) listPrompts(w http.ResponseWriter, r *http.Request) {
 
 	query := `SELECT p.id, p.title, p.description, p.positive_prompt, p.group_name, p.group_id, p.status, p.is_favorite, p.completed_at, p.created_at,
 		(SELECT COUNT(*) FROM generation_items gi WHERE gi.prompt_id=p.id) AS run_count,
-		(SELECT COUNT(*) FROM images img JOIN generation_items gi ON img.generation_item_id=gi.id WHERE gi.prompt_id=p.id) AS image_count
+		(SELECT COUNT(*) FROM images img JOIN generation_items gi ON img.generation_item_id=gi.id WHERE gi.prompt_id=p.id) AS image_count,
+		(SELECT img2.id FROM images img2 JOIN generation_items gi2 ON img2.generation_item_id=gi2.id WHERE gi2.prompt_id=p.id ORDER BY img2.id DESC LIMIT 1) AS cover_image_id
 		FROM prompts p` + where + ` ORDER BY p.id DESC LIMIT ? OFFSET ?`
 	queryArgs := append(args, pageSize, offset)
 	rows, err := a.db.QueryContext(r.Context(), query, queryArgs...)
@@ -61,7 +66,8 @@ func (a *app) listPrompts(w http.ResponseWriter, r *http.Request) {
 		var title, desc, positive, groupName, groupID, status string
 		var completedAt sql.NullString
 		var createdAt string
-		if err := rows.Scan(&id, &title, &desc, &positive, &groupName, &groupID, &status, &isFav, &completedAt, &createdAt, &runCount, &imageCount); err != nil {
+		var coverImageID sql.NullInt64
+		if err := rows.Scan(&id, &title, &desc, &positive, &groupName, &groupID, &status, &isFav, &completedAt, &createdAt, &runCount, &imageCount, &coverImageID); err != nil {
 			writeError(w, 500, "read prompt failed")
 			return
 		}
@@ -70,7 +76,7 @@ func (a *app) listPrompts(w http.ResponseWriter, r *http.Request) {
 			"group_name": groupName, "group_id": groupID, "status": status,
 			"is_favorite":  isFav == 1,
 			"completed_at": completedAt.String, "created_at": createdAt,
-			"run_count": runCount, "image_count": imageCount,
+			"run_count": runCount, "image_count": imageCount, "cover_image_id": coverImageID.Int64,
 		})
 	}
 	writeJSON(w, 200, map[string]any{
@@ -112,11 +118,12 @@ func (a *app) getPrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var title, desc, positive, groupName, groupID, status string
+	var isFav int
 	var completedAt sql.NullString
 	var createdAt, updatedAt string
 	err = a.db.QueryRowContext(r.Context(),
-		`SELECT title, description, positive_prompt, group_name, group_id, status, completed_at, created_at, updated_at FROM prompts WHERE id=?`, id).
-		Scan(&title, &desc, &positive, &groupName, &groupID, &status, &completedAt, &createdAt, &updatedAt)
+		`SELECT title, description, positive_prompt, group_name, group_id, status, is_favorite, completed_at, created_at, updated_at FROM prompts WHERE id=?`, id).
+		Scan(&title, &desc, &positive, &groupName, &groupID, &status, &isFav, &completedAt, &createdAt, &updatedAt)
 	if err != nil {
 		writeError(w, 404, "prompt not found")
 		return
@@ -159,7 +166,7 @@ func (a *app) getPrompt(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, map[string]any{
 		"id": id, "title": title, "description": desc, "positive_prompt": positive,
-		"group_name": groupName, "group_id": groupID, "status": status,
+		"group_name": groupName, "group_id": groupID, "status": status, "is_favorite": isFav == 1,
 		"completed_at": completedAt.String, "created_at": createdAt, "updated_at": updatedAt, "runs": runs,
 	})
 }
@@ -241,18 +248,25 @@ func (a *app) togglePromptFavorite(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid prompt id")
 		return
 	}
-	result, err := a.db.ExecContext(r.Context(), `UPDATE prompts SET is_favorite = 1 - is_favorite, updated_at=CURRENT_TIMESTAMP WHERE id=?`, id)
-	if err != nil {
+	var cur int
+	if err := a.db.QueryRowContext(r.Context(), `SELECT is_favorite FROM prompts WHERE id=?`, id).Scan(&cur); err != nil {
+		if err == sql.ErrNoRows {
+			writeError(w, http.StatusNotFound, "prompt not found")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "toggle favorite failed")
 		return
 	}
-	n, _ := result.RowsAffected()
-	if n == 0 {
-		writeError(w, http.StatusNotFound, "prompt not found")
+	fav := 1 - cur
+	// 收藏以提示词为主体，级联到其名下所有图片（图片↔提示词共享收藏态）
+	if err := a.setPromptFavorite(r.Context(), id, fav); err != nil {
+		if errors.Is(err, errPromptNotFound) {
+			writeError(w, http.StatusNotFound, "prompt not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "toggle favorite failed")
 		return
 	}
-	var fav int
-	_ = a.db.QueryRowContext(r.Context(), `SELECT is_favorite FROM prompts WHERE id=?`, id).Scan(&fav)
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "is_favorite": fav == 1})
 }
 
