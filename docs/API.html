@@ -1,0 +1,5870 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>comfyui-server 接口文档</title>
+<style>
+:root {
+  --bg: #ffffff;
+  --bg-side: #f7f8fa;
+  --bg-code: #f5f6f8;
+  --bg-hover: #eef0f4;
+  --text: #1a1d21;
+  --text-2: #5c636e;
+  --text-3: #8b919c;
+  --border: #e3e6ea;
+  --accent: #2f6feb;
+  --accent-bg: #eaf1fe;
+  --get: #1d9e75;
+  --post: #2f6feb;
+  --put: #ba7517;
+  --patch: #7f77dd;
+  --del: #d85a30;
+  --radius: 8px;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB",
+               "Microsoft YaHei", "Segoe UI", Roboto, sans-serif;
+  font-size: 14px;
+  line-height: 1.7;
+  display: flex;
+}
+#sidebar {
+  width: 290px;
+  flex: 0 0 290px;
+  height: 100vh;
+  position: sticky;
+  top: 0;
+  overflow-y: auto;
+  background: var(--bg-side);
+  border-right: 1px solid var(--border);
+  padding: 20px 0 40px;
+}
+#sidebar .brand {
+  padding: 0 20px 14px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 12px;
+}
+#sidebar .brand h1 {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0 0 4px;
+  letter-spacing: .2px;
+}
+#sidebar .brand p {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--text-3);
+  line-height: 1.5;
+}
+#search-wrap { padding: 0 16px 12px; }
+#search {
+  width: 100%;
+  padding: 7px 10px;
+  font-size: 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: #fff;
+  color: var(--text);
+  outline: none;
+  font-family: inherit;
+}
+#search:focus { border-color: var(--accent); }
+#search-info {
+  font-size: 11.5px;
+  color: var(--text-3);
+  padding: 6px 20px 0;
+  min-height: 16px;
+}
+#toc { list-style: none; margin: 0; padding: 0; }
+#toc ul { list-style: none; margin: 0; padding: 0; }
+#toc .toc > ul > li > a {
+  display: block;
+  padding: 7px 20px;
+  color: var(--text-2);
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 500;
+  border-left: 2px solid transparent;
+}
+#toc .toc > ul > li > a:hover { background: var(--bg-hover); color: var(--text); }
+#toc .toc > ul > li > a.active {
+  color: var(--accent);
+  background: var(--accent-bg);
+  border-left-color: var(--accent);
+}
+#toc .toc ul ul a {
+  display: block;
+  padding: 5px 20px 5px 34px;
+  color: var(--text-3);
+  text-decoration: none;
+  font-size: 12.5px;
+  border-left: 2px solid transparent;
+}
+#toc .toc ul ul a:hover { color: var(--text); background: var(--bg-hover); }
+#toc .toc ul ul a.active {
+  color: var(--accent);
+  background: var(--accent-bg);
+  border-left-color: var(--accent);
+}
+main {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 36px 52px 120px;
+  max-width: 1180px;
+}
+main > h1 {
+  font-size: 26px;
+  font-weight: 600;
+  margin: 0 0 6px;
+  padding-bottom: 14px;
+  border-bottom: 2px solid var(--border);
+}
+h1 { font-size: 26px; font-weight: 600; }
+h2 {
+  font-size: 20px;
+  font-weight: 600;
+  margin: 46px 0 14px;
+  padding: 8px 0 8px 12px;
+  border-left: 3px solid var(--accent);
+  background: linear-gradient(90deg, var(--accent-bg), transparent 60%);
+  scroll-margin-top: 16px;
+}
+h3 {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 32px 0 10px;
+  scroll-margin-top: 16px;
+}
+h4 { font-size: 14px; font-weight: 600; margin: 22px 0 8px; }
+p { margin: 10px 0; }
+a { color: var(--accent); }
+code {
+  font-family: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  background: var(--bg-code);
+  padding: 2px 5px;
+  border-radius: 4px;
+  color: #b5306b;
+}
+pre {
+  position: relative;
+  background: #f7f8fa;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  overflow-x: auto;
+  margin: 12px 0;
+  line-height: 1.55;
+}
+pre code {
+  background: none;
+  padding: 0;
+  color: #24292f;
+  font-size: 12.5px;
+}
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 12px 0 18px;
+  font-size: 13px;
+  display: block;
+  overflow-x: auto;
+}
+th, td {
+  border: 1px solid var(--border);
+  padding: 7px 11px;
+  text-align: left;
+  vertical-align: top;
+}
+th {
+  background: var(--bg-side);
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+tbody tr:nth-child(even) { background: #fcfcfd; }
+tbody tr:hover { background: var(--bg-hover); }
+td code { white-space: nowrap; }
+blockquote {
+  margin: 12px 0;
+  padding: 10px 16px;
+  background: #fffbeb;
+  border-left: 3px solid #ef9f27;
+  border-radius: 0 var(--radius) var(--radius) 0;
+  color: #5b4a1f;
+  font-size: 13px;
+}
+blockquote p { margin: 4px 0; }
+blockquote code { background: #fdf3d7; color: #8a5a00; }
+ul, ol { padding-left: 24px; margin: 10px 0; }
+li { margin: 5px 0; }
+hr { border: none; border-top: 1px solid var(--border); margin: 34px 0; }
+/* 方法徽章：给总览表里的方法列上色 */
+.done { color: var(--get); font-weight: 600; }
+.hidden { display: none !important; }
+mark { background: #fff3a3; color: inherit; padding: 0 2px; border-radius: 2px; }
+#top-btn {
+  position: fixed;
+  right: 26px;
+  bottom: 26px;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--text-2);
+  font-size: 16px;
+  cursor: pointer;
+  display: none;
+  box-shadow: 0 2px 8px rgba(0,0,0,.08);
+}
+#top-btn:hover { color: var(--accent); border-color: var(--accent); }
+@media (max-width: 900px) {
+  #sidebar { display: none; }
+  main { padding: 20px 18px 80px; }
+}
+</style>
+</head>
+<body>
+<nav id="sidebar">
+  <div class="brand">
+    <h1>comfyui-server 接口文档</h1>
+    <p>11 章 · 65 节 · 54 个接口 · 153 张表</p>
+  </div>
+  <div id="search-wrap">
+    <input id="search" type="search" placeholder="搜索接口 / 字段…" autocomplete="off">
+  </div>
+  <div id="search-info"></div>
+  <div id="toc"><div class="toc">
+<ul>
+<li><a href="#1-概述">1. 概述</a><ul>
+<li><a href="#11-基础信息">1.1 基础信息</a></li>
+<li><a href="#12-环境变量">1.2 环境变量</a></li>
+<li><a href="#13-通用约定">1.3 通用约定</a></li>
+</ul>
+</li>
+<li><a href="#2-快速开始">2. 快速开始</a></li>
+<li><a href="#3-接口总览">3. 接口总览</a></li>
+<li><a href="#4-系统类接口">4. 系统类接口</a><ul>
+<li><a href="#41-健康检查">4.1 健康检查</a></li>
+<li><a href="#42-版本号">4.2 版本号</a></li>
+<li><a href="#43-汇总统计">4.3 汇总统计</a></li>
+<li><a href="#44-读取设置">4.4 读取设置</a></li>
+<li><a href="#45-保存-comfyui-地址">4.5 保存 ComfyUI 地址</a></li>
+<li><a href="#46-测试-comfyui-连通性">4.6 测试 ComfyUI 连通性</a></li>
+<li><a href="#47-下载数据库备份">4.7 下载数据库备份</a></li>
+<li><a href="#48-调试状态">4.8 调试状态</a></li>
+<li><a href="#49-下载调试文件">4.9 下载调试文件</a></li>
+<li><a href="#410-清空调试文件">4.10 清空调试文件</a></li>
+<li><a href="#411-debug-模式落盘了什么">4.11 DEBUG 模式落盘了什么</a></li>
+</ul>
+</li>
+<li><a href="#5-工作流接口">5. 工作流接口</a><ul>
+<li><a href="#51-核心概念提示词落点">5.1 核心概念：提示词落点</a></li>
+<li><a href="#52-数据结构">5.2 数据结构</a></li>
+<li><a href="#53-工作流列表">5.3 工作流列表</a></li>
+<li><a href="#54-新建工作流">5.4 新建工作流</a></li>
+<li><a href="#55-工作流详情">5.5 工作流详情</a></li>
+<li><a href="#56-更新工作流">5.6 更新工作流</a></li>
+<li><a href="#57-删除工作流">5.7 删除工作流</a></li>
+<li><a href="#58-设置-取消默认工作流">5.8 设置 / 取消默认工作流</a></li>
+<li><a href="#59-识别落点未保存的工作流">5.9 识别落点（未保存的工作流）</a></li>
+<li><a href="#510-识别落点已保存的工作流">5.10 识别落点（已保存的工作流）</a></li>
+<li><a href="#511-校验工作流">5.11 校验工作流</a></li>
+</ul>
+</li>
+<li><a href="#6-任务接口">6. 任务接口</a><ul>
+<li><a href="#61-状态机">6.1 状态机</a></li>
+<li><a href="#62-直接提交提示词">6.2 直接提交提示词</a></li>
+<li><a href="#63-任务列表">6.3 任务列表</a></li>
+<li><a href="#64-任务详情">6.4 任务详情</a></li>
+<li><a href="#65-任务事件流sse">6.5 任务事件流（SSE）</a></li>
+<li><a href="#66-取消任务">6.6 取消任务</a></li>
+<li><a href="#67-重试任务">6.7 重试任务</a></li>
+<li><a href="#68-删除任务">6.8 删除任务</a></li>
+<li><a href="#69-批量操作">6.9 批量操作</a></li>
+</ul>
+</li>
+<li><a href="#7-提示词接口">7. 提示词接口</a><ul>
+<li><a href="#71-提示词列表">7.1 提示词列表</a></li>
+<li><a href="#72-新建提示词">7.2 新建提示词</a></li>
+<li><a href="#73-分组列表">7.3 分组列表</a></li>
+<li><a href="#74-提示词详情">7.4 提示词详情</a></li>
+<li><a href="#75-更新提示词">7.5 更新提示词</a></li>
+<li><a href="#76-删除提示词">7.6 删除提示词</a></li>
+<li><a href="#77-切换收藏">7.7 切换收藏</a></li>
+<li><a href="#78-批量删除提示词">7.8 批量删除提示词</a></li>
+<li><a href="#79-批量出图">7.9 批量出图</a></li>
+<li><a href="#710-按分组出图">7.10 按分组出图</a></li>
+<li><a href="#711-单条出图">7.11 单条出图</a></li>
+</ul>
+</li>
+<li><a href="#8-json-导入接口">8. JSON 导入接口</a><ul>
+<li><a href="#81-输入格式">8.1 输入格式</a></li>
+<li><a href="#82-备份文件列表">8.2 备份文件列表</a></li>
+<li><a href="#83-上传-json-文件">8.3 上传 JSON 文件</a></li>
+<li><a href="#84-粘贴-json-文本导入">8.4 粘贴 JSON 文本导入</a></li>
+<li><a href="#85-查看备份内容">8.5 查看备份内容</a></li>
+<li><a href="#86-下载备份文件">8.6 下载备份文件</a></li>
+<li><a href="#87-删除备份记录">8.7 删除备份记录</a></li>
+</ul>
+</li>
+<li><a href="#9-图片接口">9. 图片接口</a><ul>
+<li><a href="#91-两个容易混淆的字段">9.1 两个容易混淆的字段</a></li>
+<li><a href="#92-图片列表">9.2 图片列表</a></li>
+<li><a href="#93-图片详情">9.3 图片详情</a></li>
+<li><a href="#94-图片文件内联">9.4 图片文件（内联）</a></li>
+<li><a href="#95-图片下载">9.5 图片下载</a></li>
+<li><a href="#96-删除图片">9.6 删除图片</a></li>
+<li><a href="#97-批量删除图片">9.7 批量删除图片</a></li>
+<li><a href="#98-批量收藏图片">9.8 批量收藏图片</a></li>
+<li><a href="#99-切换图片收藏">9.9 切换图片收藏</a></li>
+</ul>
+</li>
+<li><a href="#10-数据导入导出">10. 数据导入导出</a><ul>
+<li><a href="#101-导出-zip">10.1 导出 ZIP</a></li>
+<li><a href="#102-导入-zip">10.2 导入 ZIP</a></li>
+</ul>
+</li>
+<li><a href="#11-附录错误码与行为细节">11. 附录：错误码与行为细节</a><ul>
+<li><a href="#111-状态码汇总">11.1 状态码汇总</a></li>
+<li><a href="#112-值得注意的行为">11.2 值得注意的行为</a></li>
+</ul>
+</li>
+</ul>
+</div>
+</div>
+</nav>
+<main id="content">
+<h1 id="comfyui-server-接口文档">comfyui-server 接口文档</h1>
+<blockquote>
+<p>后端：Go（<code>net/http</code> + <code>modernc.org/sqlite</code>）｜前端：Vue 3
+文档基于源码逐字段核对（<code>backend/cmd/server/</code>），共 <strong>57 个接口</strong>（54 个常驻 + 3 个仅 <code>DEBUG</code> 开启时注册）。
+最后更新：2026-10-01</p>
+</blockquote>
+<hr />
+<h2 id="1-概述">1. 概述</h2>
+<h3 id="11-基础信息">1.1 基础信息</h3>
+<table>
+<thead>
+<tr>
+<th>项</th>
+<th>值</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>默认端口</td>
+<td><code>8080</code>（环境变量 <code>SERVER_PORT</code>）</td>
+</tr>
+<tr>
+<td>Base URL</td>
+<td><code>http://&lt;host&gt;:8080</code></td>
+</tr>
+<tr>
+<td>路径前缀</td>
+<td><code>/api</code></td>
+</tr>
+<tr>
+<td>数据格式</td>
+<td>JSON（图片 / 备份 / 导出为二进制流）</td>
+</tr>
+<tr>
+<td>字符集</td>
+<td><code>application/json; charset=utf-8</code></td>
+</tr>
+<tr>
+<td>鉴权</td>
+<td><strong>无</strong>。服务本身不做认证，建议只在内网或反向代理后暴露</td>
+</tr>
+</tbody>
+</table>
+<p>前端静态文件由同一个服务托管（设置 <code>STATIC_DIR</code> 时）；非 <code>/api</code> 路径命中不到文件时会回退到 <code>index.html</code>（SPA 路由）。</p>
+<h3 id="12-环境变量">1.2 环境变量</h3>
+<table>
+<thead>
+<tr>
+<th>变量</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>DATA_DIR</code></td>
+<td><code>../data</code></td>
+<td>数据根目录（<strong>按启动时的 cwd 解析</strong>，建议用绝对路径）</td>
+</tr>
+<tr>
+<td><code>DB_PATH</code></td>
+<td><code>&lt;DATA_DIR&gt;/db/comfyui.db</code></td>
+<td>SQLite 数据库路径</td>
+</tr>
+<tr>
+<td><code>COMFYUI_URL</code></td>
+<td><code>http://127.0.0.1:8188</code></td>
+<td>首次初始化时写入 settings 的 ComfyUI 地址</td>
+</tr>
+<tr>
+<td><code>SERVER_PORT</code></td>
+<td><code>8080</code></td>
+<td>监听端口</td>
+</tr>
+<tr>
+<td><code>STATIC_DIR</code></td>
+<td>空</td>
+<td>前端静态目录；空则不启用静态托管</td>
+</tr>
+<tr>
+<td><code>DEBUG</code></td>
+<td>关闭</td>
+<td>调试总开关。开启后把排查线索落盘到 <code>&lt;DATA_DIR&gt;/debug/</code>（4 个文件），并注册 3 个 <code>/api/debug/*</code> 只读接口。取值：<code>1</code> / <code>true</code> / <code>on</code> / <code>yes</code> 开启；<strong>其它任意值也开启，且该值作为 <code>submit-payloads.jsonl</code> 的自定义路径</strong>；空 / <code>off</code> / <code>0</code> / <code>false</code> / <code>no</code> 关闭</td>
+</tr>
+</tbody>
+</table>
+<p>数据目录结构：</p>
+<pre><code>data/
+├── db/comfyui.db          # SQLite
+├── images/                # 生成的图片
+├── workflows/             # 导入的工作流 JSON
+├── json/                  # JSON 导入的原始备份
+└── debug/                 # 仅 DEBUG 开启时存在（见 4.11）
+</code></pre>
+<h3 id="13-通用约定">1.3 通用约定</h3>
+<p><strong>成功响应</strong>：直接返回业务 JSON，无信封结构。</p>
+<p><strong>错误响应</strong>：所有错误统一为</p>
+<pre><code class="language-json">{ &quot;error&quot;: &quot;错误消息&quot; }
+</code></pre>
+<p><strong>分页</strong>：列表类接口统一支持 <code>page</code> / <code>page_size</code> 两个 query 参数。</p>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>类型</th>
+<th>默认</th>
+<th>规则</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>page</code></td>
+<td>int</td>
+<td><code>1</code></td>
+<td>解析失败或 <code>&lt; 1</code> 时按 1 处理</td>
+</tr>
+<tr>
+<td><code>page_size</code></td>
+<td>int</td>
+<td><code>20</code></td>
+<td>解析失败、<code>&lt; 1</code> 或 <code>&gt; 200</code> 时按 20 处理</td>
+</tr>
+</tbody>
+</table>
+<p>响应统一附带 <code>page</code>、<code>page_size</code> 回显。</p>
+<p><strong>请求体限制</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>上限</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>普通 JSON body</td>
+<td>1 MiB</td>
+</tr>
+<tr>
+<td><code>POST /api/json-files/import-text</code></td>
+<td>10 MiB</td>
+</tr>
+<tr>
+<td><code>POST /api/json-files/upload</code>（multipart）</td>
+<td>50 MiB</td>
+</tr>
+<tr>
+<td><code>POST /api/import</code>（multipart）</td>
+<td>500 MiB</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>⚠️ <strong>JSON body 拒绝未知字段</strong>（<code>DisallowUnknownFields</code>）。多传一个结构体里没声明的字段会导致解析失败，
+但 <code>POST /api/tasks/direct</code> 这类接口只会返回 <code>workflow_id and positive_prompt are required</code>，
+容易被误读成「缺必填」。排查时请先确认没有多余字段。</p>
+</blockquote>
+<p><strong>批量接口</strong>：请求体统一为 <code>{"ids": [...]}</code>，返回 <code>{"applied": N, "skipped": M}</code>。</p>
+<table>
+<thead>
+<tr>
+<th>约定</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>单个请求 id 上限</td>
+<td>500（超出 → 400 <code>too many ids, max 500 per request</code>）</td>
+</tr>
+<tr>
+<td>「不存在」与「状态不允许」</td>
+<td>计入 <code>skipped</code>，<strong>不返回 404 / 409</strong></td>
+</tr>
+<tr>
+<td>服务端故障</td>
+<td>立即中断，返回 500 <code>batch operation failed</code></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>⚠️ 例外：<code>POST /api/prompts/batch-delete</code> 与 <code>POST /api/prompts/batch-run</code> 未走统一批量流程，<strong>不校验 500 上限</strong>。</p>
+</blockquote>
+<p><strong>CORS</strong>：中间件只在来源命中白名单时才回显跨域头。当前代码里白名单<strong>始终为空</strong>（配置项未被赋值），因此实际<strong>不输出任何 CORS 头</strong>——跨域访问需要自行加反向代理。任何 <code>OPTIONS</code> 请求返回 <code>204</code>。</p>
+<hr />
+<h2 id="2-快速开始">2. 快速开始</h2>
+<p>一个完整的最小流程：导入工作流 → 确认提示词落点 → 提交 → 查看任务。</p>
+<pre><code class="language-bash">BASE=http://127.0.0.1:8080
+
+# 1) 导入工作流（落点会自动识别，无需手工配置）
+curl -s -X POST $BASE/api/workflows \
+  -H 'Content-Type: application/json' \
+  -d &quot;{\&quot;name\&quot;:\&quot;我的工作流\&quot;,\&quot;workflow_json\&quot;:$(cat my-workflow.json)}&quot;
+# → 201 {&quot;id&quot;:8,&quot;name&quot;:&quot;我的工作流&quot;,&quot;workflow_path&quot;:&quot;我的工作流-8.json&quot;,
+#        &quot;mapping&quot;:{&quot;positive_prompt&quot;:{&quot;node_id&quot;:&quot;6&quot;,&quot;field&quot;:&quot;text&quot;},
+#                   &quot;negative_prompt&quot;:{&quot;node_id&quot;:&quot;7&quot;,&quot;field&quot;:&quot;text&quot;}},
+#        &quot;negative_prompt&quot;:&quot;&quot;}
+# workflow_json 也可以直接给导出文件的原文（外层引号会被自动剥掉），
+# 效果与上面完全一致：
+#   python3 -c 'import json,sys;print(json.dumps({&quot;name&quot;:&quot;我的工作流&quot;,
+#       &quot;workflow_json&quot;:open(sys.argv[1],encoding=&quot;utf-8&quot;).read()}))' my-workflow.json \
+#     | curl -s -X POST $BASE/api/workflows -H 'Content-Type: application/json' -d @-
+
+# 2) 查看自动识别出的提示词落点与候选节点
+curl -s $BASE/api/workflows/8/prompt-targets
+
+# 3) 设置负向提示词（可选，存在 workflow 上）
+curl -s -X PUT $BASE/api/workflows/8 \
+  -H 'Content-Type: application/json' \
+  -d '{&quot;negative_prompt&quot;:&quot;worst quality, blurry&quot;}'
+
+# 4) 直接提交一条提示词
+curl -s -X POST $BASE/api/tasks/direct \
+  -H 'Content-Type: application/json' \
+  -d '{&quot;workflow_id&quot;:8,&quot;positive_prompt&quot;:&quot;a cat, cinematic lighting&quot;}'
+# → 202 {&quot;id&quot;:11,&quot;prompt_id&quot;:9,&quot;status&quot;:&quot;pending&quot;,&quot;comfyui_url&quot;:&quot;http://127.0.0.1:8188&quot;}
+
+# 5) 查询任务（含每个 item 的状态与结果图）
+curl -s $BASE/api/tasks/11
+</code></pre>
+<p>任务创建后由后台协程异步提交给 ComfyUI，<strong>不会立刻出图</strong>。两种跟踪方式：</p>
+<ul>
+<li>轮询 <code>GET /api/tasks/{id}</code>；</li>
+<li>或订阅 <code>GET /api/tasks/{id}/events</code>（SSE 实时推送）。</li>
+</ul>
+<hr />
+<h2 id="3-接口总览">3. 接口总览</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>方法</th>
+<th>路径</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>系统</strong></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>1</td>
+<td>GET</td>
+<td><code>/api/health</code></td>
+<td>健康检查</td>
+</tr>
+<tr>
+<td>2</td>
+<td>GET</td>
+<td><code>/api/version</code></td>
+<td>版本号</td>
+</tr>
+<tr>
+<td>3</td>
+<td>GET</td>
+<td><code>/api/stats</code></td>
+<td>汇总统计</td>
+</tr>
+<tr>
+<td>4</td>
+<td>GET</td>
+<td><code>/api/settings</code></td>
+<td>读取设置</td>
+</tr>
+<tr>
+<td>5</td>
+<td>PUT</td>
+<td><code>/api/settings/comfyui</code></td>
+<td>保存 ComfyUI 地址</td>
+</tr>
+<tr>
+<td>6</td>
+<td>POST</td>
+<td><code>/api/settings/comfyui/test</code></td>
+<td>测试 ComfyUI 连通性</td>
+</tr>
+<tr>
+<td>7</td>
+<td>GET</td>
+<td><code>/api/settings/backup</code></td>
+<td>下载数据库备份</td>
+</tr>
+<tr>
+<td><strong>工作流</strong></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>8</td>
+<td>GET</td>
+<td><code>/api/workflows</code></td>
+<td>工作流列表</td>
+</tr>
+<tr>
+<td>9</td>
+<td>POST</td>
+<td><code>/api/workflows</code></td>
+<td>新建工作流</td>
+</tr>
+<tr>
+<td>10</td>
+<td>GET</td>
+<td><code>/api/workflows/{id}</code></td>
+<td>工作流详情</td>
+</tr>
+<tr>
+<td>11</td>
+<td>PUT</td>
+<td><code>/api/workflows/{id}</code></td>
+<td>更新工作流</td>
+</tr>
+<tr>
+<td>12</td>
+<td>DELETE</td>
+<td><code>/api/workflows/{id}</code></td>
+<td>删除工作流</td>
+</tr>
+<tr>
+<td>13</td>
+<td>PUT</td>
+<td><code>/api/workflows/{id}/default</code></td>
+<td>设置 / 取消默认工作流</td>
+</tr>
+<tr>
+<td>14</td>
+<td>POST</td>
+<td><code>/api/workflows/prompt-targets</code></td>
+<td>识别落点（未保存的工作流）</td>
+</tr>
+<tr>
+<td>15</td>
+<td>GET</td>
+<td><code>/api/workflows/{id}/prompt-targets</code></td>
+<td>识别落点 + 已存映射</td>
+</tr>
+<tr>
+<td>16</td>
+<td>POST</td>
+<td><code>/api/workflows/validate</code></td>
+<td>校验（未保存）</td>
+</tr>
+<tr>
+<td>17</td>
+<td>POST</td>
+<td><code>/api/workflows/{id}/validate</code></td>
+<td>校验（已保存）</td>
+</tr>
+<tr>
+<td><strong>任务</strong></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>18</td>
+<td>POST</td>
+<td><code>/api/tasks/direct</code></td>
+<td>直接提交提示词</td>
+</tr>
+<tr>
+<td>19</td>
+<td>GET</td>
+<td><code>/api/tasks</code></td>
+<td>任务列表</td>
+</tr>
+<tr>
+<td>20</td>
+<td>GET</td>
+<td><code>/api/tasks/{id}</code></td>
+<td>任务详情</td>
+</tr>
+<tr>
+<td>21</td>
+<td>GET</td>
+<td><code>/api/tasks/{id}/events</code></td>
+<td>任务事件（SSE）</td>
+</tr>
+<tr>
+<td>22</td>
+<td>POST</td>
+<td><code>/api/tasks/{id}/cancel</code></td>
+<td>取消任务</td>
+</tr>
+<tr>
+<td>23</td>
+<td>POST</td>
+<td><code>/api/tasks/{id}/retry</code></td>
+<td>重试任务</td>
+</tr>
+<tr>
+<td>24</td>
+<td>DELETE</td>
+<td><code>/api/tasks/{id}</code></td>
+<td>删除任务</td>
+</tr>
+<tr>
+<td>25</td>
+<td>POST</td>
+<td><code>/api/tasks/batch-cancel</code></td>
+<td>批量取消</td>
+</tr>
+<tr>
+<td>26</td>
+<td>POST</td>
+<td><code>/api/tasks/batch-retry</code></td>
+<td>批量重试</td>
+</tr>
+<tr>
+<td>27</td>
+<td>POST</td>
+<td><code>/api/tasks/batch-delete</code></td>
+<td>批量删除</td>
+</tr>
+<tr>
+<td><strong>提示词</strong></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>28</td>
+<td>GET</td>
+<td><code>/api/prompts</code></td>
+<td>提示词列表</td>
+</tr>
+<tr>
+<td>29</td>
+<td>POST</td>
+<td><code>/api/prompts</code></td>
+<td>新建提示词</td>
+</tr>
+<tr>
+<td>30</td>
+<td>GET</td>
+<td><code>/api/prompts/groups</code></td>
+<td>分组列表</td>
+</tr>
+<tr>
+<td>31</td>
+<td>GET</td>
+<td><code>/api/prompts/{id}</code></td>
+<td>提示词详情</td>
+</tr>
+<tr>
+<td>32</td>
+<td>PUT</td>
+<td><code>/api/prompts/{id}</code></td>
+<td>更新提示词</td>
+</tr>
+<tr>
+<td>33</td>
+<td>DELETE</td>
+<td><code>/api/prompts/{id}</code></td>
+<td>删除提示词</td>
+</tr>
+<tr>
+<td>34</td>
+<td>PATCH</td>
+<td><code>/api/prompts/{id}/favorite</code></td>
+<td>切换收藏</td>
+</tr>
+<tr>
+<td>35</td>
+<td>POST</td>
+<td><code>/api/prompts/batch-delete</code></td>
+<td>批量删除</td>
+</tr>
+<tr>
+<td>36</td>
+<td>POST</td>
+<td><code>/api/prompts/batch-run</code></td>
+<td>批量出图</td>
+</tr>
+<tr>
+<td>37</td>
+<td>POST</td>
+<td><code>/api/prompts/group-run</code></td>
+<td>按分组出图</td>
+</tr>
+<tr>
+<td>38</td>
+<td>POST</td>
+<td><code>/api/prompts/{id}/run</code></td>
+<td>单条出图</td>
+</tr>
+<tr>
+<td><strong>JSON 导入</strong></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>39</td>
+<td>GET</td>
+<td><code>/api/json-files</code></td>
+<td>备份文件列表</td>
+</tr>
+<tr>
+<td>40</td>
+<td>POST</td>
+<td><code>/api/json-files/upload</code></td>
+<td>上传 JSON 文件</td>
+</tr>
+<tr>
+<td>41</td>
+<td>POST</td>
+<td><code>/api/json-files/import-text</code></td>
+<td>粘贴 JSON 文本导入</td>
+</tr>
+<tr>
+<td>42</td>
+<td>GET</td>
+<td><code>/api/json-files/{id}</code></td>
+<td>查看备份内容</td>
+</tr>
+<tr>
+<td>43</td>
+<td>GET</td>
+<td><code>/api/json-files/{id}/download</code></td>
+<td>下载备份文件</td>
+</tr>
+<tr>
+<td>44</td>
+<td>DELETE</td>
+<td><code>/api/json-files/{id}</code></td>
+<td>删除备份记录</td>
+</tr>
+<tr>
+<td><strong>图片</strong></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>45</td>
+<td>GET</td>
+<td><code>/api/images</code></td>
+<td>图片列表</td>
+</tr>
+<tr>
+<td>46</td>
+<td>GET</td>
+<td><code>/api/images/{id}</code></td>
+<td>图片详情</td>
+</tr>
+<tr>
+<td>47</td>
+<td>GET</td>
+<td><code>/api/images/{id}/file</code></td>
+<td>图片文件（内联）</td>
+</tr>
+<tr>
+<td>48</td>
+<td>GET</td>
+<td><code>/api/images/{id}/download</code></td>
+<td>图片下载</td>
+</tr>
+<tr>
+<td>49</td>
+<td>DELETE</td>
+<td><code>/api/images/{id}</code></td>
+<td>删除图片</td>
+</tr>
+<tr>
+<td>50</td>
+<td>POST</td>
+<td><code>/api/images/batch-delete</code></td>
+<td>批量删除</td>
+</tr>
+<tr>
+<td>51</td>
+<td>POST</td>
+<td><code>/api/images/batch-favorite</code></td>
+<td>批量收藏</td>
+</tr>
+<tr>
+<td>52</td>
+<td>PATCH</td>
+<td><code>/api/images/{id}/favorite</code></td>
+<td>切换收藏</td>
+</tr>
+<tr>
+<td><strong>导入导出</strong></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>53</td>
+<td>GET</td>
+<td><code>/api/export</code></td>
+<td>导出 ZIP</td>
+</tr>
+<tr>
+<td>54</td>
+<td>POST</td>
+<td><code>/api/import</code></td>
+<td>导入 ZIP</td>
+</tr>
+<tr>
+<td><strong>调试</strong>（<strong>仅 <code>DEBUG</code> 开启时注册</strong>，关闭时均 404）</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>55</td>
+<td>GET</td>
+<td><code>/api/debug/status</code></td>
+<td>调试状态与文件清单</td>
+</tr>
+<tr>
+<td>56</td>
+<td>GET</td>
+<td><code>/api/debug/files/{name}</code></td>
+<td>下载调试文件</td>
+</tr>
+<tr>
+<td>57</td>
+<td>DELETE</td>
+<td><code>/api/debug/files/{name}</code></td>
+<td>清空调试文件</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="4-系统类接口">4. 系统类接口</h2>
+<h3 id="41-健康检查">4.1 健康检查</h3>
+<pre><code>GET /api/health
+</code></pre>
+<p><strong>响应 200</strong></p>
+<pre><code class="language-json">{ &quot;status&quot;: &quot;ok&quot; }
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>数据库 <code>Ping</code> 正常</td>
+<td>—</td>
+</tr>
+<tr>
+<td>503</td>
+<td>数据库不可用</td>
+<td><code>database unavailable</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="42-版本号">4.2 版本号</h3>
+<pre><code>GET /api/version
+</code></pre>
+<p><strong>响应 200</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>version</code></td>
+<td>string</td>
+<td>编译期注入；未注入时为 <code>dev</code></td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-json">{ &quot;version&quot;: &quot;1.1.0&quot; }
+</code></pre>
+<h3 id="43-汇总统计">4.3 汇总统计</h3>
+<pre><code>GET /api/stats
+</code></pre>
+<p><strong>响应 200</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>total_tasks</code></td>
+<td>int</td>
+<td>任务总数</td>
+</tr>
+<tr>
+<td><code>total_images</code></td>
+<td>int</td>
+<td>图片总数</td>
+</tr>
+<tr>
+<td><code>pending_entries</code></td>
+<td>int</td>
+<td>状态为 <code>pending</code> 的提示词数</td>
+</tr>
+<tr>
+<td><code>running_tasks</code></td>
+<td>int</td>
+<td>状态为 <code>running</code> 的任务数</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>各统计项查询失败时静默忽略，计数保持 0，接口始终返回 200。</p>
+</blockquote>
+<h3 id="44-读取设置">4.4 读取设置</h3>
+<pre><code>GET /api/settings
+</code></pre>
+<p><strong>响应 200</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>comfyui_url</code></td>
+<td>string</td>
+<td>当前 ComfyUI 地址</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-json">{ &quot;comfyui_url&quot;: &quot;http://192.168.1.10:8188&quot; }
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>500</td>
+<td>读取失败</td>
+<td>原始数据库错误文本（非固定文案）</td>
+</tr>
+</tbody>
+</table>
+<h3 id="45-保存-comfyui-地址">4.5 保存 ComfyUI 地址</h3>
+<pre><code>PUT /api/settings/comfyui
+</code></pre>
+<p><strong>请求体</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>必填</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>url</code></td>
+<td>string</td>
+<td>是</td>
+<td>ComfyUI 地址</td>
+</tr>
+</tbody>
+</table>
+<p><strong>URL 规范化规则</strong>：去首尾空格、去尾部 <code>/</code>；必须是 <code>http</code> / <code>https</code>；<strong>必须含端口</strong>；不能含路径、查询串、用户信息。</p>
+<p><strong>响应 200</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>comfyui_url</code></td>
+<td>string</td>
+<td>规范化后的地址</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td>body 非法</td>
+<td><code>invalid JSON body</code></td>
+</tr>
+<tr>
+<td>400</td>
+<td>格式不合法</td>
+<td><code>ComfyUI 地址必须是 http(s)://主机:端口，不能包含路径或查询参数</code></td>
+</tr>
+<tr>
+<td>400</td>
+<td>缺端口</td>
+<td><code>ComfyUI 地址必须包含端口</code></td>
+</tr>
+<tr>
+<td>500</td>
+<td>写库失败</td>
+<td><code>save setting failed</code></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>地址变更只影响<strong>后续</strong>提交。已在跑的任务用任务创建时的快照做展示，但实际出站请求一律实时读取当前设置。</p>
+</blockquote>
+<h3 id="46-测试-comfyui-连通性">4.6 测试 ComfyUI 连通性</h3>
+<pre><code>POST /api/settings/comfyui/test?url=http://127.0.0.1:8188
+</code></pre>
+<p><strong>Query 参数</strong></p>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>必填</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>url</code></td>
+<td>否</td>
+<td>指定则临时测试该地址；省略则测试已保存的地址</td>
+</tr>
+</tbody>
+</table>
+<p>请求 <code>GET &lt;url&gt;/system_stats</code>，超时 5 秒，2xx 视为可达。</p>
+<p><strong>响应 200（可达）</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>reachable</code></td>
+<td>bool</td>
+<td><code>true</code></td>
+</tr>
+<tr>
+<td><code>url</code></td>
+<td>string</td>
+<td>实际测试的地址</td>
+</tr>
+<tr>
+<td><code>latency_ms</code></td>
+<td>int</td>
+<td>耗时（毫秒）</td>
+</tr>
+</tbody>
+</table>
+<p><strong>响应 502（不可达）</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>reachable</code></td>
+<td>bool</td>
+<td><code>false</code></td>
+</tr>
+<tr>
+<td><code>url</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>latency_ms</code></td>
+<td>int</td>
+<td></td>
+</tr>
+<tr>
+<td><code>error</code></td>
+<td>string</td>
+<td>错误详情，如 <code>ComfyUI returned HTTP 502</code></td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td><code>url</code> 参数格式不合法</td>
+<td>同 4.5 的中文提示</td>
+</tr>
+<tr>
+<td>500</td>
+<td>读取已保存设置失败</td>
+<td>原始数据库错误文本</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>这是排查「连不上 ComfyUI」的推荐入口。注意区分三类失败：
+- <code>connection refused</code> → 端口无人监听（服务没起）；
+- <code>context deadline exceeded</code> → TCP 通但无响应（服务假死或防火墙丢包）；
+- HTTP 400 → 连得上但载荷校验失败（属于工作流问题，不是网络问题）。</p>
+</blockquote>
+<h3 id="47-下载数据库备份">4.7 下载数据库备份</h3>
+<pre><code>GET /api/settings/backup
+</code></pre>
+<p><strong>响应 200</strong>：直接返回 SQLite 数据库文件流。</p>
+<table>
+<thead>
+<tr>
+<th>响应头</th>
+<th>值</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Content-Type</code></td>
+<td><code>application/octet-stream</code></td>
+</tr>
+<tr>
+<td><code>Content-Disposition</code></td>
+<td><code>attachment; filename="comfyui-backup-&lt;YYYYMMDD_HHMMSS&gt;.db"</code></td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>404</td>
+<td>数据库文件不存在</td>
+<td><code>database file not found</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="48-调试状态">4.8 调试状态</h3>
+<pre><code>GET /api/debug/status
+</code></pre>
+<blockquote>
+<p>⚠️ <strong>仅当 <code>DEBUG</code> 开启时该路由才被注册</strong>。未开启时本请求命中不到任何 handler，返回 404（<code>404 page not found</code> 纯文本）。这不是错误，是正常状态。</p>
+</blockquote>
+<p><strong>响应 200</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>on</code></td>
+<td>bool</td>
+<td>恒为 <code>true</code>（关闭时这个接口不存在）</td>
+</tr>
+<tr>
+<td><code>dir</code></td>
+<td>string</td>
+<td>调试文件落盘目录的<strong>绝对路径</strong></td>
+</tr>
+<tr>
+<td><code>files[]</code></td>
+<td>array</td>
+<td>白名单内每个文件的落盘情况</td>
+</tr>
+</tbody>
+</table>
+<p><code>files[]</code> 每项：</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code></td>
+<td>string</td>
+<td>文件名（滚动副本为 <code>&lt;名字&gt;.1</code>）</td>
+</tr>
+<tr>
+<td><code>exists</code></td>
+<td>bool</td>
+<td>是否已经生成过</td>
+</tr>
+<tr>
+<td><code>bytes</code></td>
+<td>int</td>
+<td>文件大小；不存在时为 0</td>
+</tr>
+<tr>
+<td><code>modified</code></td>
+<td>string</td>
+<td>最近写入时间（RFC3339）；不存在时为空</td>
+</tr>
+<tr>
+<td><code>truncated</code></td>
+<td>bool</td>
+<td>是否已达滚动阈值（16 MiB）</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-json">{
+  &quot;on&quot;: true,
+  &quot;dir&quot;: &quot;/app/data/debug&quot;,
+  &quot;files&quot;: [
+    { &quot;name&quot;: &quot;startup.json&quot;, &quot;bytes&quot;: 2065, &quot;exists&quot;: true, &quot;modified&quot;: &quot;2026-10-01T22:12:41+08:00&quot;, &quot;truncated&quot;: false },
+    { &quot;name&quot;: &quot;events.jsonl&quot;, &quot;bytes&quot;: 1200, &quot;exists&quot;: true, &quot;modified&quot;: &quot;2026-10-01T22:08:49+08:00&quot;, &quot;truncated&quot;: false }
+  ]
+}
+</code></pre>
+<h3 id="49-下载调试文件">4.9 下载调试文件</h3>
+<pre><code>GET /api/debug/files/{name}
+</code></pre>
+<p><code>{name}</code> 只能是白名单里的名字，滚动副本带 <code>.1</code> 后缀：</p>
+<table>
+<thead>
+<tr>
+<th>允许的 <code>name</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>startup.json</code></td>
+</tr>
+<tr>
+<td><code>events.jsonl</code></td>
+</tr>
+<tr>
+<td><code>http.jsonl</code></td>
+</tr>
+<tr>
+<td><code>submit-payloads.jsonl</code></td>
+</tr>
+<tr>
+<td>上述任一 + <code>.1</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>响应 200</strong>：文件流。</p>
+<table>
+<thead>
+<tr>
+<th>响应头</th>
+<th>值</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Content-Type</code></td>
+<td><code>application/octet-stream</code></td>
+</tr>
+<tr>
+<td><code>Content-Disposition</code></td>
+<td><code>attachment; filename="&lt;name&gt;"</code></td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>404</td>
+<td><code>DEBUG</code> 未开启</td>
+<td><code>unknown debug file</code></td>
+</tr>
+<tr>
+<td>404</td>
+<td>文件名不在白名单（含任何带 <code>/</code>、<code>\</code> 的路径）</td>
+<td><code>unknown debug file</code></td>
+</tr>
+<tr>
+<td>404</td>
+<td>文件不在磁盘上</td>
+<td><code>debug file not found</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="410-清空调试文件">4.10 清空调试文件</h3>
+<pre><code>DELETE /api/debug/files/{name}
+</code></pre>
+<p>删除该文件及其滚动副本（<code>.1</code>），下次写入时自动重建。</p>
+<p><strong>响应 200</strong>：</p>
+<pre><code class="language-json">{ &quot;cleared&quot;: [&quot;http.jsonl&quot;, &quot;http.jsonl.1&quot;] }
+</code></pre>
+<p><code>cleared</code> 只列出<strong>确实被删掉</strong>的文件；本来就不存在的不会出现在里面。</p>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>404</td>
+<td><code>DEBUG</code> 未开启，或文件名不在白名单</td>
+<td><code>unknown debug file</code></td>
+</tr>
+<tr>
+<td>500</td>
+<td>删除失败（权限等）</td>
+<td>系统错误原文</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h3 id="411-debug-模式落盘了什么">4.11 DEBUG 模式落盘了什么</h3>
+<p><code>DEBUG</code> 开启后，<code>&lt;DATA_DIR&gt;/debug/</code> 下会有四份文件。之所以一次装这么多，是因为服务部署在云端，加一行日志就要重新 build → save → load → compose up，排查能力必须一次装够。</p>
+<table>
+<thead>
+<tr>
+<th>文件</th>
+<th>内容</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>startup.json</code></td>
+<td>每次启动<strong>覆盖写</strong>的一份快照：版本、监听地址、<code>data_dir</code> / <code>db_path</code> / 各子目录的<strong>绝对路径与可写性</strong>、<code>comfyui_url</code>、<code>journal_mode</code>、各表行数、关键列是否存在</td>
+</tr>
+<tr>
+<td><code>submit-payloads.jsonl</code></td>
+<td>每次 <code>POST /prompt</code> 的完整请求体。<strong>写盘在请求发出之前</strong>，所以被 400 拒掉的载荷同样看得到</td>
+</tr>
+<tr>
+<td><code>http.jsonl</code></td>
+<td>所有出站请求。<strong>非 2xx 与传输错误必然记录</strong>（带响应体，截断 64 KiB）；2xx 默认不记</td>
+</tr>
+<tr>
+<td><code>events.jsonl</code></td>
+<td>语义事件（见下表）</td>
+</tr>
+</tbody>
+</table>
+<p><code>http.jsonl</code> 的每条记录：</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>tag</code></td>
+<td>调用方标签：<code>prompt</code> / <code>history</code> / <code>view</code> / <code>object_info</code> / <code>queue</code> / <code>system_stats</code></td>
+</tr>
+<tr>
+<td><code>method</code> / <code>url</code></td>
+<td>请求方法与完整 URL</td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>HTTP 状态码（传输错误时为 0）</td>
+</tr>
+<tr>
+<td><code>duration_ms</code></td>
+<td>耗时</td>
+</tr>
+<tr>
+<td><code>error</code></td>
+<td>传输错误原文（连不上、超时）</td>
+</tr>
+<tr>
+<td><code>body</code></td>
+<td>非 2xx 的响应体（<code>view</code> 是二进制，不记）</td>
+</tr>
+<tr>
+<td><code>note</code></td>
+<td>成功场景下调用方补的说明，如 <code>prompt_id=...</code>、<code>downloaded</code></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>⚠️ 2xx 默认不记是因为 <code>/history</code> 每 5 秒轮询一次，全记会把真正的问题埋进噪音。成功但需要留痕的场景（下载字节数、拿到的 <code>prompt_id</code>）由调用方显式补一行。</p>
+</blockquote>
+<p><code>events.jsonl</code> 的 <code>event</code> 取值：</p>
+<table>
+<thead>
+<tr>
+<th><code>event</code></th>
+<th>含义</th>
+<th>关键字段</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>item_submitted</code></td>
+<td>提交成功</td>
+<td><code>item_id</code> / <code>task_id</code> / <code>comfy_prompt_id</code> / <code>notes</code></td>
+</tr>
+<tr>
+<td><code>item_failed</code></td>
+<td>item 进入 failed</td>
+<td><code>item_id</code> / <code>task_id</code> / <code>error</code></td>
+</tr>
+<tr>
+<td><code>repair_applied</code></td>
+<td>提交被拒后自动纠正了串位值</td>
+<td><code>rejection</code>（ComfyUI 原话）、<code>repairs[]</code>（每处改动的字段/原值/新值）、<code>retry_ok</code></td>
+</tr>
+<tr>
+<td><code>repair_not_possible</code></td>
+<td>被拒但<strong>无处可修</strong>（值已无归属或有歧义）</td>
+<td><code>rejection</code></td>
+</tr>
+<tr>
+<td><code>comfy_execution_error</code></td>
+<td>ComfyUI 自己报执行错（<code>status_str == "error"</code>）</td>
+<td><code>history</code>（裁剪后的 <code>status</code> + <code>messages</code> 末尾 40 条）</td>
+</tr>
+<tr>
+<td><code>no_outputs</code></td>
+<td>ComfyUI 说做完了但输出里没有图</td>
+<td><code>history</code>（含 <code>outputs</code> 原文）</td>
+</tr>
+<tr>
+<td><code>save_retry</code></td>
+<td>图已产出但本轮没能保存，保留 <code>submitted</code> 重试</td>
+<td><code>item_id</code> / <code>attempt</code> / <code>error</code></td>
+</tr>
+<tr>
+<td><code>waiting_for_output</code></td>
+<td>item 卡在 <code>submitted</code> 的周期心跳（每 60 轮 ≈5 分钟）</td>
+<td><code>item_id</code> / <code>rounds</code> / <code>reason</code></td>
+</tr>
+<tr>
+<td><code>node_def_missing</code></td>
+<td>拉 <code>object_info/&lt;类型&gt;</code> 失败</td>
+<td><code>class_type</code> / <code>url</code> / <code>error</code></td>
+</tr>
+<tr>
+<td><code>widget_slots_unparsed</code></td>
+<td>节点定义的控件顺序解析不出来（老格式工作流会因此还原不出值）</td>
+<td><code>class_type</code> / <code>error</code></td>
+</tr>
+<tr>
+<td><code>recover</code></td>
+<td>重启时的任务恢复</td>
+<td><code>kept_in_flight</code> / <code>reset_pending</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>输出上限</strong>：单个文件超过 16 MiB 滚成 <code>.1</code>，只保留一代。<code>DEBUG</code> 忘记关闭不会把数据卷写满。</p>
+<blockquote>
+<p>⚠️ 开启 <code>DEBUG</code> 会把<strong>完整提示词内容</strong>持续写入这些文件，排查完请去掉 <code>DEBUG</code> 并重启。</p>
+</blockquote>
+<hr />
+<h2 id="5-工作流接口">5. 工作流接口</h2>
+<h3 id="51-核心概念提示词落点">5.1 核心概念：提示词落点</h3>
+<p>一份工作流的可配置内容只有两样：<strong>正向提示词写到哪里</strong>、<strong>负向提示词写到哪里</strong>。落点存在 <code>workflows.mapping_json</code>：</p>
+<pre><code class="language-json">{
+  &quot;positive_prompt&quot;: { &quot;node_id&quot;: &quot;6&quot;, &quot;field&quot;: &quot;text&quot; },
+  &quot;negative_prompt&quot;: { &quot;node_id&quot;: &quot;7&quot;, &quot;field&quot;: &quot;text&quot; }
+}
+</code></pre>
+<p><strong>落点自动识别</strong>：从「<code>positive</code> 与 <code>negative</code> 两个输入都接了线」的节点（即条件采样器）出发，沿连线上溯找到第一个承载提示词的文本节点。识别结果在<strong>导入时自动写入</strong>，无需手工配置。</p>
+<p><strong>必须同时记录 <code>node_id</code> 与 <code>field</code></strong>：有些节点（如 <code>TextEncodeQwenImage21</code>）在同一个节点上既有 <code>prompt</code> 也有 <code>negative_prompt</code> 两个输入框，只记节点会在注入时让负向覆盖正向。</p>
+<p><strong>负向同源</strong>：部分工作流的负向是从正向 zero-out（<code>ConditioningZeroOut</code>）派生出来的，没有独立的负向文本框。此时 <code>negative_shared</code> 为 <code>true</code>，负向落点不写入映射，提交时负向提示词不会生效——接口会通过 <code>negative_unavailable</code> 字段明确说明。</p>
+<h3 id="52-数据结构">5.2 数据结构</h3>
+<p><strong>落点对象</strong></p>
+<pre><code class="language-json">{ &quot;node_id&quot;: &quot;6&quot;, &quot;field&quot;: &quot;text&quot; }
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>node_id</code></td>
+<td>string</td>
+<td>节点 id</td>
+</tr>
+<tr>
+<td><code>field</code></td>
+<td>string</td>
+<td>输入字段名；<strong>可能为空</strong>（老格式导出离线时只能拿到节点 id，字段名留到提交时解析）</td>
+</tr>
+</tbody>
+</table>
+<p><strong>落点结果 <code>promptTargets</code></strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>positive</code></td>
+<td>object | null</td>
+<td>正向落点</td>
+</tr>
+<tr>
+<td><code>negative</code></td>
+<td>object | null</td>
+<td>负向落点</td>
+</tr>
+<tr>
+<td><code>negative_shared</code></td>
+<td>bool</td>
+<td>为 <code>true</code> 表示负向与正向落在<strong>同一节点同一字段</strong>，负向无处可写</td>
+</tr>
+</tbody>
+</table>
+<p><strong>候选节点 <code>promptCandidate</code></strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>node_id</code></td>
+<td>string</td>
+<td>节点 id</td>
+</tr>
+<tr>
+<td><code>class_type</code></td>
+<td>string</td>
+<td>节点类型名</td>
+</tr>
+<tr>
+<td><code>field</code></td>
+<td>string</td>
+<td>字段名；老格式可能缺失</td>
+</tr>
+<tr>
+<td><code>preview</code></td>
+<td>string</td>
+<td>控件原文预览（最多 80 字符）</td>
+</tr>
+<tr>
+<td><code>role</code></td>
+<td>string</td>
+<td>自动识别给出的角色：<code>positive</code> / <code>negative</code> / 空</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>候选列表已剔除前端专用节点（<code>Note</code> / <code>Reroute</code> / <code>PrimitiveNode</code>）与静音（mode=2）、旁路（mode=4）节点——它们不会进入提交载荷，选中也无效。</p>
+</blockquote>
+<h3 id="53-工作流列表">5.3 工作流列表</h3>
+<pre><code>GET /api/workflows?page=1&amp;page_size=20
+</code></pre>
+<p><strong>响应 200</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>items</code></td>
+<td>array</td>
+<td>工作流列表</td>
+</tr>
+<tr>
+<td><code>total</code></td>
+<td>int</td>
+<td>总数</td>
+</tr>
+<tr>
+<td><code>page</code></td>
+<td>int</td>
+<td>当前页</td>
+</tr>
+<tr>
+<td><code>page_size</code></td>
+<td>int</td>
+<td>每页条数</td>
+</tr>
+</tbody>
+</table>
+<p><code>items[]</code> 元素：</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>int</td>
+<td>主键</td>
+</tr>
+<tr>
+<td><code>name</code></td>
+<td>string</td>
+<td>名称</td>
+</tr>
+<tr>
+<td><code>description</code></td>
+<td>string</td>
+<td>描述</td>
+</tr>
+<tr>
+<td><code>workflow_path</code></td>
+<td>string</td>
+<td>数据库中的原始值（<strong>未</strong>取 basename）</td>
+</tr>
+<tr>
+<td><code>mapping</code></td>
+<td>object</td>
+<td>提示词落点映射</td>
+</tr>
+<tr>
+<td><code>negative_prompt</code></td>
+<td>string</td>
+<td>工作流级负向提示词</td>
+</tr>
+<tr>
+<td><code>enabled</code></td>
+<td>bool</td>
+<td>是否启用</td>
+</tr>
+<tr>
+<td><code>is_default</code></td>
+<td>bool</td>
+<td>是否为默认工作流</td>
+</tr>
+<tr>
+<td><code>created_at</code></td>
+<td>string</td>
+<td>创建时间</td>
+</tr>
+<tr>
+<td><code>updated_at</code></td>
+<td>string</td>
+<td>更新时间</td>
+</tr>
+<tr>
+<td><code>task_count</code></td>
+<td>int</td>
+<td>引用该工作流的任务总数</td>
+</tr>
+<tr>
+<td><code>in_flight</code></td>
+<td>int</td>
+<td>排队中 / 生成中的任务数</td>
+</tr>
+</tbody>
+</table>
+<p>排序：<code>id</code> 倒序。</p>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>500</td>
+<td>查询失败</td>
+<td><code>query workflows failed</code></td>
+</tr>
+<tr>
+<td>500</td>
+<td>行读取失败</td>
+<td><code>read workflow failed</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="54-新建工作流">5.4 新建工作流</h3>
+<pre><code>POST /api/workflows
+</code></pre>
+<p><strong>请求体</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>必填</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code></td>
+<td>string</td>
+<td>是</td>
+<td>名称（自动去首尾空格）</td>
+</tr>
+<tr>
+<td><code>workflow_json</code></td>
+<td>object | string</td>
+<td>是</td>
+<td>工作流 JSON。两种形态都接受：直接给对象，或把导出文件的原文当字符串塞进来（外层引号会被自动剥掉）；不是对象一律 400</td>
+</tr>
+<tr>
+<td><code>description</code></td>
+<td>string</td>
+<td>否</td>
+<td>描述，默认 <code>""</code></td>
+</tr>
+<tr>
+<td><code>negative_prompt</code></td>
+<td>string</td>
+<td>否</td>
+<td>工作流级负向提示词，默认 <code>""</code></td>
+</tr>
+<tr>
+<td><code>mapping</code></td>
+<td>object</td>
+<td>否</td>
+<td>手工指定的落点；<strong>未指定的一侧由自动识别补全</strong></td>
+</tr>
+<tr>
+<td><code>params_schema</code></td>
+<td>object</td>
+<td>否</td>
+<td>已废弃，仅为兼容旧前端保留，服务端忽略</td>
+</tr>
+</tbody>
+</table>
+<p><strong>响应 201</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>int64</td>
+<td>新工作流 id</td>
+</tr>
+<tr>
+<td><code>name</code></td>
+<td>string</td>
+<td>名称</td>
+</tr>
+<tr>
+<td><code>workflow_path</code></td>
+<td>string</td>
+<td>生成的文件名，格式 <code>&lt;安全化的名称&gt;-&lt;id&gt;.json</code></td>
+</tr>
+<tr>
+<td><code>mapping</code></td>
+<td>object</td>
+<td>最终落点映射</td>
+</tr>
+<tr>
+<td><code>negative_prompt</code></td>
+<td>string</td>
+<td>负向提示词</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td>body 非法 / <code>name</code> 为空 / 缺 <code>workflow_json</code></td>
+<td><code>name and workflow_json are required</code></td>
+</tr>
+<tr>
+<td>400</td>
+<td><code>workflow_json</code> 不是合法 JSON</td>
+<td><code>workflow_json must be valid JSON</code></td>
+</tr>
+<tr>
+<td>400</td>
+<td><code>workflow_json</code> 是合法 JSON 但不是对象（字符串/数组/数字）</td>
+<td><code>workflow_json must be a JSON object</code></td>
+</tr>
+<tr>
+<td>400</td>
+<td><code>mapping</code> 非空但非法</td>
+<td><code>mapping must be valid JSON</code></td>
+</tr>
+<tr>
+<td>500</td>
+<td>写库或写文件失败</td>
+<td><code>save workflow failed</code> / <code>save workflow file failed</code></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>文件名的 id 后缀是必需的：只按名称生成会让两个同名工作流指向同一个文件，改其中一个会静默改掉另一个。</p>
+</blockquote>
+<h3 id="55-工作流详情">5.5 工作流详情</h3>
+<pre><code>GET /api/workflows/{id}
+</code></pre>
+<p><strong>响应 200</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>int64</td>
+<td></td>
+</tr>
+<tr>
+<td><code>name</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>description</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>workflow_path</code></td>
+<td>string</td>
+<td>这里是 <strong>basename</strong>（与列表接口不同）</td>
+</tr>
+<tr>
+<td><code>workflow_json</code></td>
+<td>object</td>
+<td>工作流 JSON 全文</td>
+</tr>
+<tr>
+<td><code>mapping</code></td>
+<td>object</td>
+<td>落点映射</td>
+</tr>
+<tr>
+<td><code>negative_prompt</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>enabled</code></td>
+<td>bool</td>
+<td></td>
+</tr>
+<tr>
+<td><code>is_default</code></td>
+<td>bool</td>
+<td></td>
+</tr>
+<tr>
+<td><code>created_at</code> / <code>updated_at</code></td>
+<td>string</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td><code>id</code> 不是整数</td>
+<td><code>invalid workflow id</code></td>
+</tr>
+<tr>
+<td>404</td>
+<td>记录不存在</td>
+<td><code>workflow not found</code></td>
+</tr>
+<tr>
+<td>500</td>
+<td>读工作流文件失败</td>
+<td><code>read workflow file failed</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="56-更新工作流">5.6 更新工作流</h3>
+<pre><code>PUT /api/workflows/{id}
+</code></pre>
+<p><strong>请求体</strong>（全部可选）</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>缺省行为</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code></td>
+<td>string</td>
+<td>去空格后为空 → 保持原值</td>
+</tr>
+<tr>
+<td><code>description</code></td>
+<td>string</td>
+<td><strong>不传 → 保持原值；传空串 → 清空</strong></td>
+</tr>
+<tr>
+<td><code>workflow_json</code></td>
+<td>object | string</td>
+<td>不传 → 不重写文件。形态规则同创建接口</td>
+</tr>
+<tr>
+<td><code>mapping</code></td>
+<td>object</td>
+<td>不传 → 用库中已有映射</td>
+</tr>
+<tr>
+<td><code>negative_prompt</code></td>
+<td>string</td>
+<td><strong>不传 → 保持原值；传空串 → 清空</strong></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><code>description</code> 与 <code>negative_prompt</code> 用「是否传该字段」区分「不改」和「清空」，<code>null</code> 与省略等价。</p>
+</blockquote>
+<p><strong>响应 200</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>int64</td>
+<td></td>
+</tr>
+<tr>
+<td><code>name</code></td>
+<td>string</td>
+<td>最终名称</td>
+</tr>
+<tr>
+<td><code>workflow_path</code></td>
+<td>string</td>
+<td>最终文件名</td>
+</tr>
+<tr>
+<td><code>mapping</code></td>
+<td>object</td>
+<td>最终落点映射</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td><code>id</code> 非法 / body 非法</td>
+<td><code>invalid workflow id</code> / <code>invalid JSON body</code></td>
+</tr>
+<tr>
+<td>400</td>
+<td>新 <code>workflow_json</code> 非法</td>
+<td><code>workflow_json must be valid JSON</code> / <code>workflow_json must be a JSON object</code></td>
+</tr>
+<tr>
+<td>404</td>
+<td>记录不存在</td>
+<td><code>workflow not found</code></td>
+</tr>
+<tr>
+<td>500</td>
+<td>写文件 / 更新失败</td>
+<td><code>save workflow file failed</code> / <code>update workflow failed</code></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>替换了 <code>workflow_json</code> 时，服务端会用<strong>新的工作流</strong>重新做落点识别（沿用旧映射会导致提示词写到已不存在的节点上）。</p>
+</blockquote>
+<h3 id="57-删除工作流">5.7 删除工作流</h3>
+<pre><code>DELETE /api/workflows/{id}
+</code></pre>
+<p><strong>响应 200</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>int64</td>
+<td></td>
+</tr>
+<tr>
+<td><code>deleted</code></td>
+<td>bool</td>
+<td>恒为 <code>true</code></td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>409</td>
+<td>存在排队中 / 生成中的任务</td>
+<td><code>该工作流还有 N 个排队中/生成中的任务，请等待完成或先取消这些任务</code></td>
+</tr>
+<tr>
+<td>404</td>
+<td>记录不存在</td>
+<td><code>workflow not found</code></td>
+</tr>
+<tr>
+<td>500</td>
+<td>删除失败</td>
+<td><code>delete workflow failed</code></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>只拦「在途」任务。已完成的历史任务不受影响（任务表冗余了工作流名，展示不依赖此表）。
+删除顺序为先删库、后删文件——即使删文件失败，也只会留下可人工清理的孤儿文件，不会出现删不掉的记录。
+若历史数据中多个工作流共用同一文件，删除时会检查引用，不会误删他人文件。</p>
+</blockquote>
+<h3 id="58-设置-取消默认工作流">5.8 设置 / 取消默认工作流</h3>
+<pre><code>PUT /api/workflows/{id}/default
+</code></pre>
+<p><strong>请求体</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>必填</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>is_default</code></td>
+<td>bool</td>
+<td>是</td>
+<td><code>true</code> 设为默认；<code>false</code> 取消默认</td>
+</tr>
+</tbody>
+</table>
+<p><strong>响应 200</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>int64</td>
+<td>工作流 id</td>
+</tr>
+<tr>
+<td><code>is_default</code></td>
+<td>bool</td>
+<td>回显请求值</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td><code>id</code> 非法 / body 非法</td>
+<td><code>invalid workflow id</code> / <code>invalid JSON body</code></td>
+</tr>
+<tr>
+<td>404</td>
+<td>记录不存在</td>
+<td><code>workflow not found</code></td>
+</tr>
+<tr>
+<td>500</td>
+<td>操作失败</td>
+<td><code>set default failed</code></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>默认为<strong>全局唯一</strong>：设为默认时会先把其它工作流的默认标记清零。</p>
+</blockquote>
+<h3 id="59-识别落点未保存的工作流">5.9 识别落点（未保存的工作流）</h3>
+<pre><code>POST /api/workflows/prompt-targets
+</code></pre>
+<p><strong>请求体</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>必填</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>workflow_json</code></td>
+<td>object | string</td>
+<td>是</td>
+<td>工作流 JSON。两种形态都接受（对象，或导出文件原文当字符串）</td>
+</tr>
+</tbody>
+</table>
+<p><strong>响应 200</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>detected</code></td>
+<td>object</td>
+<td>自动识别结果（<code>promptTargets</code>）</td>
+</tr>
+<tr>
+<td><code>stored</code></td>
+<td>object</td>
+<td>已保存的映射；此入口不读库，<strong>恒为 <code>{"positive_prompt":{},"negative_prompt":{}}</code></strong></td>
+</tr>
+<tr>
+<td><code>candidates</code></td>
+<td>array</td>
+<td>候选节点列表</td>
+</tr>
+<tr>
+<td><code>negative_unavailable</code></td>
+<td>string</td>
+<td>负向为何不可用；空串表示无此问题</td>
+</tr>
+</tbody>
+</table>
+<p><code>negative_unavailable</code> 的两种取值：</p>
+<table>
+<thead>
+<tr>
+<th>条件</th>
+<th>文案</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>负向与正向同源</td>
+<td><code>这份工作流的负向由正向派生（ConditioningZeroOut 之类），没有独立的负向提示词节点，负向提示词不会生效。</code></td>
+</tr>
+<tr>
+<td>未识别出负向</td>
+<td><code>未能自动识别负向提示词节点，请手动选择；选好后提交时会写进去。</code></td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-json">{
+  &quot;detected&quot;: {
+    &quot;positive&quot;: { &quot;node_id&quot;: &quot;6&quot;, &quot;field&quot;: &quot;text&quot; },
+    &quot;negative&quot;: { &quot;node_id&quot;: &quot;7&quot;, &quot;field&quot;: &quot;text&quot; },
+    &quot;negative_shared&quot;: false
+  },
+  &quot;stored&quot;: { &quot;positive_prompt&quot;: {}, &quot;negative_prompt&quot;: {} },
+  &quot;candidates&quot;: [
+    { &quot;node_id&quot;: &quot;6&quot;, &quot;class_type&quot;: &quot;CLIPTextEncode&quot;, &quot;field&quot;: &quot;text&quot;,
+      &quot;preview&quot;: &quot;a photo of a cat&quot;, &quot;role&quot;: &quot;positive&quot; },
+    { &quot;node_id&quot;: &quot;7&quot;, &quot;class_type&quot;: &quot;CLIPTextEncode&quot;, &quot;field&quot;: &quot;text&quot;,
+      &quot;preview&quot;: &quot;blurry, low quality&quot;, &quot;role&quot;: &quot;negative&quot; }
+  ],
+  &quot;negative_unavailable&quot;: &quot;&quot;
+}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td>缺 <code>workflow_json</code></td>
+<td><code>workflow_json is required</code></td>
+</tr>
+<tr>
+<td>400</td>
+<td>不是合法 JSON</td>
+<td><code>workflow_json must be valid JSON</code></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>该入口不读库，用于「还没保存的新工作流」先看落点。识别不需要 ComfyUI 在线。</p>
+</blockquote>
+<h3 id="510-识别落点已保存的工作流">5.10 识别落点（已保存的工作流）</h3>
+<pre><code>GET /api/workflows/{id}/prompt-targets
+</code></pre>
+<p>响应结构同 5.9，区别在于 <code>stored</code> 来自数据库，且<strong>已保存的映射优先</strong>——用户手工选过的落点不会被自动识别覆盖。</p>
+<p>若工作流导入时未能识别出任何落点，<code>stored</code> 会是空对象：</p>
+<pre><code class="language-json">{ &quot;positive_prompt&quot;: {}, &quot;negative_prompt&quot;: {} }
+</code></pre>
+<p>提交时服务端会再自动解析一次。</p>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td><code>id</code> 非法</td>
+<td><code>invalid workflow id</code></td>
+</tr>
+<tr>
+<td>404</td>
+<td>记录不存在</td>
+<td><code>workflow not found</code></td>
+</tr>
+<tr>
+<td>500</td>
+<td>读文件 / 解析失败</td>
+<td><code>read workflow file failed</code> / <code>parse workflow failed</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="511-校验工作流">5.11 校验工作流</h3>
+<pre><code>POST /api/workflows/validate          # 校验 body 里的工作流
+POST /api/workflows/{id}/validate     # 校验已保存的工作流
+</code></pre>
+<p><strong>请求体</strong>（可选）</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>workflow_json</code></td>
+<td>object | string</td>
+<td>传了优先用它；不传则读库中那份。<strong>两种形态都接受</strong>：直接给对象，或把导出文件的原文当字符串塞进来（后者的外层引号会被自动剥掉）</td>
+</tr>
+</tbody>
+</table>
+<p><strong>响应 200</strong></p>
+<blockquote>
+<p>⚠️ <strong>校验发现问题时 HTTP 状态码依然是 200</strong>，结果体现在 <code>ok</code> / <code>errors</code> / <code>warnings</code> 中。</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ok</code></td>
+<td>bool</td>
+<td>无 errors 时为 <code>true</code></td>
+</tr>
+<tr>
+<td><code>unreachable</code></td>
+<td>bool</td>
+<td>ComfyUI 不可达时为 <code>true</code>（此时 <code>ok=false</code>）</td>
+</tr>
+<tr>
+<td><code>message</code></td>
+<td>string</td>
+<td>不可达时的说明</td>
+</tr>
+<tr>
+<td><code>workflow_id</code></td>
+<td>int64</td>
+<td>不带 id 的入口为 0</td>
+</tr>
+<tr>
+<td><code>workflow_name</code></td>
+<td>string</td>
+<td>不带 id 的入口为空串</td>
+</tr>
+<tr>
+<td><code>comfyui_url</code></td>
+<td>string</td>
+<td>校验时使用的 ComfyUI 地址</td>
+</tr>
+<tr>
+<td><code>checked_at</code></td>
+<td>string</td>
+<td>校验时间（RFC3339）</td>
+</tr>
+<tr>
+<td><code>errors</code></td>
+<td>array</td>
+<td>致命问题，会导致提交失败</td>
+</tr>
+<tr>
+<td><code>warnings</code></td>
+<td>array</td>
+<td>提示性问题，不影响提交</td>
+</tr>
+<tr>
+<td><code>skipped_nodes</code></td>
+<td>array</td>
+<td>提交时会被自动跳过的节点</td>
+</tr>
+</tbody>
+</table>
+<p><code>errors[]</code> / <code>warnings[]</code> 元素：</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>node_id</code></td>
+<td>string</td>
+<td>节点 id</td>
+</tr>
+<tr>
+<td><code>class_type</code></td>
+<td>string</td>
+<td>节点类型</td>
+</tr>
+<tr>
+<td><code>field</code></td>
+<td>string</td>
+<td>字段名（可能缺失）</td>
+</tr>
+<tr>
+<td><code>kind</code></td>
+<td>string</td>
+<td>问题种类，见下表</td>
+</tr>
+<tr>
+<td><code>message</code></td>
+<td>string</td>
+<td>可读描述</td>
+</tr>
+<tr>
+<td><code>value</code></td>
+<td>string</td>
+<td>相关取值（可能缺失）</td>
+</tr>
+<tr>
+<td><code>candidates</code></td>
+<td>array\&lt;string&gt;</td>
+<td>combo 候选列表（可能缺失）</td>
+</tr>
+</tbody>
+</table>
+<p><code>kind</code> 取值：</p>
+<table>
+<thead>
+<tr>
+<th>kind</th>
+<th>归类</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>workflow_format</code></td>
+<td>errors</td>
+<td>工作流不是合法 JSON / 无法转换为提交格式 / 没有任何可提交节点</td>
+</tr>
+<tr>
+<td><code>unsupported_feature</code></td>
+<td>errors</td>
+<td>使用了不支持的特性（如子图）</td>
+</tr>
+<tr>
+<td><code>node_type_missing</code></td>
+<td>errors</td>
+<td>目标 ComfyUI 上没有该节点类型（缺自定义节点/插件）</td>
+</tr>
+<tr>
+<td><code>value_not_in_list</code></td>
+<td>errors</td>
+<td>取值不在候选列表里</td>
+</tr>
+<tr>
+<td><code>required_missing</code></td>
+<td>errors</td>
+<td>缺少必填输入（既没有值也没有连线）</td>
+</tr>
+<tr>
+<td><code>unknown_field</code></td>
+<td>warnings</td>
+<td>节点定义里没有这个输入名，会被忽略</td>
+</tr>
+<tr>
+<td><code>widget_values_mismatch</code></td>
+<td>warnings</td>
+<td>旧格式导出，控件值个数与当前节点定义不符</td>
+</tr>
+<tr>
+<td><code>auto_repairable</code></td>
+<td>warnings</td>
+<td>导出把控件值串位了：值不在本字段的候选里，却是同一节点另一个字段的合法取值。<strong>提交时会自动纠正后重试一次</strong>，工作流文件不会被改动</td>
+</tr>
+</tbody>
+</table>
+<p><code>skipped_nodes[]</code> 元素：</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>node_id</code></td>
+<td>string</td>
+<td>节点 id</td>
+</tr>
+<tr>
+<td><code>class_type</code></td>
+<td>string</td>
+<td>节点类型</td>
+</tr>
+<tr>
+<td><code>reason</code></td>
+<td>string</td>
+<td><code>静音（mode=2）</code> / <code>旁路（mode=4）</code> / <code>前端专用节点</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>示例：校验失败</strong></p>
+<pre><code class="language-json">{
+  &quot;ok&quot;: false,
+  &quot;workflow_id&quot;: 3,
+  &quot;workflow_name&quot;: &quot;写实人像&quot;,
+  &quot;comfyui_url&quot;: &quot;http://127.0.0.1:8188&quot;,
+  &quot;checked_at&quot;: &quot;2026-10-01T18:30:00+08:00&quot;,
+  &quot;errors&quot;: [
+    {
+      &quot;node_id&quot;: &quot;8&quot;, &quot;class_type&quot;: &quot;CLIPLoader&quot;, &quot;field&quot;: &quot;clip_name&quot;,
+      &quot;kind&quot;: &quot;value_not_in_list&quot;,
+      &quot;message&quot;: &quot;取值 \&quot;krea2\&quot; 不在候选列表里&quot;,
+      &quot;value&quot;: &quot;krea2&quot;,
+      &quot;candidates&quot;: [&quot;umt5_xxl_fp8_e4m3fn.safetensors&quot;]
+    }
+  ],
+  &quot;warnings&quot;: [
+    {
+      &quot;node_id&quot;: &quot;6&quot;, &quot;class_type&quot;: &quot;CLIPTextEncode&quot;, &quot;field&quot;: &quot;legacy_field&quot;,
+      &quot;kind&quot;: &quot;unknown_field&quot;,
+      &quot;message&quot;: &quot;节点定义里没有这个输入名，会被 ComfyUI 忽略（通常说明导出格式与当前版本不匹配）&quot;
+    }
+  ],
+  &quot;skipped_nodes&quot;: [
+    { &quot;node_id&quot;: &quot;1&quot;, &quot;class_type&quot;: &quot;Note&quot;, &quot;reason&quot;: &quot;前端专用节点&quot; }
+  ]
+}
+</code></pre>
+<p><strong>示例：ComfyUI 不可达</strong></p>
+<pre><code class="language-json">{
+  &quot;ok&quot;: false,
+  &quot;unreachable&quot;: true,
+  &quot;message&quot;: &quot;无法从 ComfyUI(http://127.0.0.1:8188) 读取节点定义：dial tcp 127.0.0.1:8188: connect: connection refused&quot;,
+  &quot;workflow_id&quot;: 3,
+  &quot;workflow_name&quot;: &quot;写实人像&quot;,
+  &quot;comfyui_url&quot;: &quot;http://127.0.0.1:8188&quot;,
+  &quot;checked_at&quot;: &quot;2026-10-01T18:30:00+08:00&quot;,
+  &quot;errors&quot;: [],
+  &quot;warnings&quot;: []
+}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td><code>id</code> 非法</td>
+<td><code>invalid workflow id</code></td>
+</tr>
+<tr>
+<td>404</td>
+<td>带 id 但不存在</td>
+<td><code>workflow not found</code></td>
+</tr>
+<tr>
+<td>400</td>
+<td>既无 id 也无 <code>workflow_json</code></td>
+<td><code>workflow_json is required</code></td>
+</tr>
+<tr>
+<td>400</td>
+<td>未配置 ComfyUI 地址</td>
+<td><code>comfyui_url is not configured</code></td>
+</tr>
+<tr>
+<td>500</td>
+<td>读文件失败</td>
+<td><code>read workflow file failed</code></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>「连不上」与「工作流有问题」被刻意分开报告——服务没起时若报一堆「节点不存在」，会把排查方向带偏。
+校验是<strong>只读检查</strong>，不会阻拦保存或提交；前端把它呈现为提示而非闸门。</p>
+</blockquote>
+<hr />
+<h2 id="6-任务接口">6. 任务接口</h2>
+<h3 id="61-状态机">6.1 状态机</h3>
+<p><strong>任务（task）</strong></p>
+<pre><code>pending ──→ running ──→ completed
+   │           │
+   │           └──→ failed ──(retry)──→ pending
+   └──→ cancelled
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>状态</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>pending</code></td>
+<td>已入库，等待后台提交</td>
+</tr>
+<tr>
+<td><code>running</code></td>
+<td>正在提交 / 等待 ComfyUI 出图</td>
+</tr>
+<tr>
+<td><code>completed</code></td>
+<td>所有 item 都已终结（部分成功部分失败也算完成）</td>
+</tr>
+<tr>
+<td><code>failed</code></td>
+<td>全部 item 失败</td>
+</tr>
+<tr>
+<td><code>cancelled</code></td>
+<td>用户取消</td>
+</tr>
+</tbody>
+</table>
+<p><strong>任务项（item）</strong></p>
+<pre><code>pending ──→ running ──→ submitted ──→ success
+   │                        │
+   └──→ failed ←────────────┘
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>状态</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>pending</code></td>
+<td>等待提交</td>
+</tr>
+<tr>
+<td><code>running</code></td>
+<td>正在提交给 ComfyUI</td>
+</tr>
+<tr>
+<td><code>submitted</code></td>
+<td>已提交，等待出图 / 等待下载</td>
+</tr>
+<tr>
+<td><code>success</code></td>
+<td>出图并已保存</td>
+</tr>
+<tr>
+<td><code>failed</code></td>
+<td>失败（见 <code>error_message</code>）</td>
+</tr>
+</tbody>
+</table>
+<p><strong>下载重试语义</strong>：图片已在 ComfyUI 出好但保存失败（如磁盘错误）时，item <strong>保持 <code>submitted</code></strong>，下一轮自动重试；连续失败 40 次才判定为失败。</p>
+<h3 id="62-直接提交提示词">6.2 直接提交提示词</h3>
+<pre><code>POST /api/tasks/direct
+</code></pre>
+<p><strong>请求体</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>必填</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>workflow_id</code></td>
+<td>int64</td>
+<td>是</td>
+<td>必须是存在且启用的工作流</td>
+</tr>
+<tr>
+<td><code>positive_prompt</code></td>
+<td>string</td>
+<td>是</td>
+<td>正向提示词，去空格后不能为空</td>
+</tr>
+<tr>
+<td><code>title</code></td>
+<td>string</td>
+<td>否</td>
+<td>标题；省略时自动取正向提示词前 50 个字符</td>
+</tr>
+<tr>
+<td><code>parameters</code></td>
+<td>object</td>
+<td>否</td>
+<td>透传参数，原样存入任务记录</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>⚠️ 由于请求体拒绝未知字段，<strong>不要传 <code>negative_prompt</code></strong>——它不在结构体里，会导致整个请求解析失败并返回
+<code>workflow_id and positive_prompt are required</code>。负向提示词配置在<strong>工作流</strong>上。</p>
+</blockquote>
+<p><strong>响应 202</strong></p>
+<blockquote>
+<p>注意是 <strong>202 Accepted</strong>，不是 201。</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>int64</td>
+<td>任务 id</td>
+</tr>
+<tr>
+<td><code>prompt_id</code></td>
+<td>int64</td>
+<td>同时入库的提示词 id（分组为「手动提交」）</td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>string</td>
+<td>固定 <code>pending</code></td>
+</tr>
+<tr>
+<td><code>comfyui_url</code></td>
+<td>string</td>
+<td>当前 ComfyUI 地址快照</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td>body 非法 / 缺必填</td>
+<td><code>workflow_id and positive_prompt are required</code></td>
+</tr>
+<tr>
+<td>400</td>
+<td>工作流不存在或已禁用</td>
+<td><code>workflow not found or disabled</code></td>
+</tr>
+<tr>
+<td>500</td>
+<td>读设置 / 写库失败</td>
+<td><code>read ComfyUI URL failed</code> / <code>create task failed</code> / <code>create prompt failed</code> / <code>create task item failed</code> / <code>commit task failed</code></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>建任务只是入队。真正的提交由后台 submitter 每 3 秒扫 <code>pending</code> 的 item 完成，
+提交失败会写进该 item 的 <code>error_message</code>（原文形如
+<code>submit to ComfyUI failed: ComfyUI /prompt HTTP 400: node 8 (CLIPLoader): clip_name: 'krea2' not in [...]</code>）。</p>
+</blockquote>
+<h4 id="提交被拒时的自动纠正">提交被拒时的自动纠正</h4>
+<p>工作流从 ComfyUI 导出时，控件值会按「位置数组 + 名字映射」两份一起写出。节点定义在版本间加了控件、
+或这份 JSON 是脚本/更早版本拼出来的时候，值会落到隔壁字段上——文件在 ComfyUI 里点运行是好的，
+导出的 JSON 却过不了 <code>/prompt</code> 的校验。</p>
+<p>服务在<strong>被 ComfyUI 明确以「取值不在列表」拒绝</strong>时，会做一次保守的纠正后重试一次：</p>
+<ul>
+<li>若这个错位的值，恰好是<strong>同一个节点另一个输入</strong>的合法取值 → 把它挪过去；</li>
+<li>腾空的字段用该字段自己的默认值补上（显式 <code>default</code> 优先，否则取候选列表第一项）。</li>
+</ul>
+<p>例：<code>clip_name</code> 拿到了 <code>"krea2"</code>（那是 <code>type</code> 的合法取值），<code>type</code> 停在默认值上 →
+把 <code>krea2</code> 挪到 <code>type</code>，<code>clip_name</code> 补上候选第一项（正是本来的文本编码器）。</p>
+<p>边界（写死的行为，不会越界）：</p>
+<ul>
+<li><strong>只影响这一次提交的载荷</strong>。<code>data/workflows/*.json</code> 一个字节都不会改。</li>
+<li><strong>只重试一次</strong>。纠正本身是确定性的一步，再失败说明不是串位问题。</li>
+<li><strong>值已经没有归属时不动</strong>（模型被删、选项下线）。那种情况没有正确答案，静默换成别的模型会让人
+  以为跑的是自己选的东西——直接把 ComfyUI 的原话原样报回 <code>error_message</code>。</li>
+<li>该值有<strong>多个</strong>字段都接受、或拿不到节点定义 → 不动，同样原样报错。</li>
+</ul>
+<p>改了什么会记在 item 的 <code>notes</code> 里，任务详情可见：</p>
+<pre><code>提交时自动纠正了导出串位的控件值——node 8 (CLIPLoader)：clip_name 的 &quot;krea2&quot; 不在候选里，
+但 type 接受它 → 挪到 type（原值 &quot;stable_diffusion&quot;），clip_name 用默认值
+&quot;qwen3VL4BAbliteratedComfyui_v10_full_fp8.safetensors&quot; 补上
+</code></pre>
+<p>同样的判断会在 <code>POST /api/workflows/validate</code> 里提前以 <code>auto_repairable</code> 警告给出，不必等提交。</p>
+<h3 id="63-任务列表">6.3 任务列表</h3>
+<pre><code>GET /api/tasks?status=running&amp;group=风景&amp;page=1&amp;page_size=20
+</code></pre>
+<p><strong>Query 参数</strong></p>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>status</code></td>
+<td>string</td>
+<td>精确匹配任务状态</td>
+</tr>
+<tr>
+<td><code>group</code></td>
+<td>string</td>
+<td>按提示词分组筛选：任务下任一 item 的提示词属于该分组即命中</td>
+</tr>
+<tr>
+<td><code>page</code> / <code>page_size</code></td>
+<td>int</td>
+<td>见 1.3</td>
+</tr>
+</tbody>
+</table>
+<p><strong>响应 200</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>items</code></td>
+<td>array</td>
+<td>任务列表</td>
+</tr>
+<tr>
+<td><code>total</code> / <code>page</code> / <code>page_size</code></td>
+<td>int</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p><code>items[]</code> 元素：</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>int</td>
+<td>任务 id</td>
+</tr>
+<tr>
+<td><code>source_type</code></td>
+<td>string</td>
+<td>来源类型，如 <code>direct</code></td>
+</tr>
+<tr>
+<td><code>workflow_id</code></td>
+<td>int</td>
+<td>工作流 id</td>
+</tr>
+<tr>
+<td><code>workflow_name</code></td>
+<td>string</td>
+<td>工作流名（工作流已删除时回退任务上的冗余名，可能为空串）</td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>string</td>
+<td>任务状态</td>
+</tr>
+<tr>
+<td><code>total_count</code> / <code>success_count</code> / <code>failed_count</code></td>
+<td>int</td>
+<td>计数</td>
+</tr>
+<tr>
+<td><code>created_at</code></td>
+<td>string</td>
+<td>创建时间</td>
+</tr>
+<tr>
+<td><code>image_id</code></td>
+<td>int64</td>
+<td>代表图 id；无图时该字段<strong>不存在</strong></td>
+</tr>
+<tr>
+<td><code>prompt_id</code></td>
+<td>int64</td>
+<td>该任务第一个提示词 id；无则字段不存在</td>
+</tr>
+<tr>
+<td><code>prompt_title</code></td>
+<td>string</td>
+<td>提示词标题</td>
+</tr>
+<tr>
+<td><code>prompt_count</code></td>
+<td>int64</td>
+<td>去重后的提示词数量</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>500</td>
+<td>查询失败</td>
+<td><code>query tasks failed</code> / <code>read task failed</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="64-任务详情">6.4 任务详情</h3>
+<pre><code>GET /api/tasks/{id}
+</code></pre>
+<p><strong>响应 200</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>int64</td>
+<td></td>
+</tr>
+<tr>
+<td><code>source_type</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>workflow_id</code></td>
+<td>int</td>
+<td></td>
+</tr>
+<tr>
+<td><code>comfyui_url</code></td>
+<td>string</td>
+<td>任务创建时的地址快照</td>
+</tr>
+<tr>
+<td><code>parameters</code></td>
+<td>object</td>
+<td>原始参数，形如 <code>{"positive_prompt":"...","parameters":{...}}</code></td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>total_count</code> / <code>success_count</code> / <code>failed_count</code></td>
+<td>int</td>
+<td></td>
+</tr>
+<tr>
+<td><code>created_at</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>items</code></td>
+<td>array</td>
+<td>任务项列表</td>
+</tr>
+</tbody>
+</table>
+<p><code>items[]</code> 元素：</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>int</td>
+<td>item id</td>
+</tr>
+<tr>
+<td><code>prompt_id</code></td>
+<td>int64</td>
+<td>关联提示词 id，无关联为 0</td>
+</tr>
+<tr>
+<td><code>positive_prompt</code></td>
+<td>string</td>
+<td>正向提示词</td>
+</tr>
+<tr>
+<td><code>comfy_prompt_id</code></td>
+<td>string</td>
+<td>ComfyUI 返回的 prompt id，未提交时为空串</td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>string</td>
+<td>item 状态</td>
+</tr>
+<tr>
+<td><code>error_message</code></td>
+<td>string</td>
+<td>失败原因</td>
+</tr>
+<tr>
+<td><code>notes</code></td>
+<td>string</td>
+<td>提交时的中性说明（目前只有「自动纠正了导出串位的控件值」这一种），无说明时为空串</td>
+</tr>
+<tr>
+<td><code>images</code></td>
+<td>array</td>
+<td>结果图，元素为 <code>{"id":int64,"filename":string}</code>；无图时该字段不存在</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td><code>id</code> 非法</td>
+<td><code>invalid task id</code></td>
+</tr>
+<tr>
+<td>404</td>
+<td>任务不存在</td>
+<td><code>task not found</code></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>此接口<strong>不返回</strong> <code>workflow_name</code>（只有列表接口返回）。</p>
+</blockquote>
+<h3 id="65-任务事件流sse">6.5 任务事件流（SSE）</h3>
+<pre><code>GET /api/tasks/{id}/events
+</code></pre>
+<p><strong>响应 200</strong>：<code>Content-Type: text/event-stream</code></p>
+<table>
+<thead>
+<tr>
+<th>响应头</th>
+<th>值</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Content-Type</code></td>
+<td><code>text/event-stream</code></td>
+</tr>
+<tr>
+<td><code>Cache-Control</code></td>
+<td><code>no-cache</code></td>
+</tr>
+<tr>
+<td><code>Connection</code></td>
+<td><code>keep-alive</code></td>
+</tr>
+</tbody>
+</table>
+<p>建立连接后服务端先发送握手注释：</p>
+<pre><code>: connected
+</code></pre>
+<p>随后每个事件形如 <code>data: &lt;JSON&gt;\n\n</code>：</p>
+<table>
+<thead>
+<tr>
+<th><code>status</code></th>
+<th>携带字段</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>running</code></td>
+<td><code>task_id</code>, <code>item_id</code>, <code>status</code></td>
+</tr>
+<tr>
+<td><code>success</code></td>
+<td><code>task_id</code>, <code>item_id</code>, <code>status</code></td>
+</tr>
+<tr>
+<td><code>failed</code></td>
+<td><code>task_id</code>, <code>item_id</code>, <code>status</code>, <code>error</code></td>
+</tr>
+<tr>
+<td><code>cancelled</code></td>
+<td><code>task_id</code>, <code>status</code>（<strong>无 <code>item_id</code></strong>）</td>
+</tr>
+<tr>
+<td><code>pending</code></td>
+<td><code>task_id</code>, <code>status</code>（重试时推送）</td>
+</tr>
+</tbody>
+</table>
+<p>示例：</p>
+<pre><code>data: {&quot;task_id&quot;:11,&quot;item_id&quot;:23,&quot;status&quot;:&quot;running&quot;}
+
+data: {&quot;task_id&quot;:11,&quot;item_id&quot;:23,&quot;status&quot;:&quot;success&quot;}
+</code></pre>
+<p>订阅者缓冲为 8；缓冲满时新事件会被丢弃（不阻塞服务端）。客户端断开时自动注销订阅。</p>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td><code>id</code> 非法</td>
+<td><code>invalid task id</code></td>
+</tr>
+<tr>
+<td>500</td>
+<td>运行环境不支持流式响应</td>
+<td><code>streaming unsupported</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="66-取消任务">6.6 取消任务</h3>
+<pre><code>POST /api/tasks/{id}/cancel
+</code></pre>
+<p><strong>响应 200</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>int64</td>
+<td></td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>string</td>
+<td>固定 <code>cancelled</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>前置条件</strong>：任务状态必须是 <code>pending</code> 或 <code>running</code>。</p>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>404</td>
+<td>任务不存在</td>
+<td><code>task not found</code></td>
+</tr>
+<tr>
+<td>409</td>
+<td>状态不允许取消</td>
+<td><code>task is not cancellable</code></td>
+</tr>
+<tr>
+<td>500</td>
+<td>其它错误</td>
+<td><code>cancel task failed</code></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>取消时会异步通知 ComfyUI 从队列中移除已提交的任务（仅移除排队项，不中断正在执行的）。</p>
+</blockquote>
+<h3 id="67-重试任务">6.7 重试任务</h3>
+<pre><code>POST /api/tasks/{id}/retry
+</code></pre>
+<p><strong>响应 202</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>int64</td>
+<td></td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>string</td>
+<td>固定 <code>pending</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>前置条件</strong>：任务状态必须是 <code>failed</code>，且其关联工作流仍然存在。</p>
+<p>已成功的 item 保持不变（不会重复出图），只有失败的 item 被重置。</p>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>404</td>
+<td>任务不存在</td>
+<td><code>task not found</code></td>
+</tr>
+<tr>
+<td>409</td>
+<td>状态不是 <code>failed</code></td>
+<td><code>only failed tasks can be retried</code></td>
+</tr>
+<tr>
+<td>409</td>
+<td>关联工作流已删除</td>
+<td><code>工作流已删除，无法重试该任务</code></td>
+</tr>
+<tr>
+<td>500</td>
+<td>其它错误</td>
+<td><code>retry task failed</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="68-删除任务">6.8 删除任务</h3>
+<pre><code>DELETE /api/tasks/{id}
+</code></pre>
+<p><strong>响应 200</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>int64</td>
+<td></td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>string</td>
+<td>固定 <code>deleted</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>前置条件</strong>：任务状态不能是 <code>running</code>。</p>
+<p>删除会级联清理该任务的 items、图片记录与磁盘图片文件。</p>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>404</td>
+<td>任务不存在</td>
+<td><code>task not found</code></td>
+</tr>
+<tr>
+<td>409</td>
+<td>任务正在运行</td>
+<td><code>cannot delete running task, cancel it first</code></td>
+</tr>
+<tr>
+<td>500</td>
+<td>其它错误</td>
+<td><code>delete task failed</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="69-批量操作">6.9 批量操作</h3>
+<pre><code>POST /api/tasks/batch-cancel
+POST /api/tasks/batch-retry
+POST /api/tasks/batch-delete
+</code></pre>
+<p><strong>请求体</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>必填</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ids</code></td>
+<td>array\&lt;int64&gt;</td>
+<td>是</td>
+<td>任务 id 列表，最多 500 个</td>
+</tr>
+</tbody>
+</table>
+<p><strong>响应 200</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>applied</code></td>
+<td>int</td>
+<td>成功处理的数量</td>
+</tr>
+<tr>
+<td><code>skipped</code></td>
+<td>int</td>
+<td>被跳过的数量</td>
+</tr>
+</tbody>
+</table>
+<p><strong>计入 <code>skipped</code> 的情况</strong>：任务不存在、状态不允许取消、状态不是 failed、正在运行不可删除、关联工作流已删除。</p>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td>body 非法或 <code>ids</code> 为空</td>
+<td><code>ids is required</code></td>
+</tr>
+<tr>
+<td>400</td>
+<td>超过 500 个</td>
+<td><code>too many ids, max 500 per request</code></td>
+</tr>
+<tr>
+<td>500</td>
+<td>出现非可跳过的服务端错误</td>
+<td><code>batch operation failed</code></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="7-提示词接口">7. 提示词接口</h2>
+<h3 id="71-提示词列表">7.1 提示词列表</h3>
+<pre><code>GET /api/prompts?group=风景&amp;status=pending&amp;q=cat&amp;favorite=1&amp;page=1&amp;page_size=20
+</code></pre>
+<p><strong>Query 参数</strong></p>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>group</code></td>
+<td>string</td>
+<td>精确匹配分组名</td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>string</td>
+<td>精确匹配状态</td>
+</tr>
+<tr>
+<td><code>q</code></td>
+<td>string</td>
+<td>模糊搜索标题或正向提示词</td>
+</tr>
+<tr>
+<td><code>favorite</code></td>
+<td>string</td>
+<td>值为 <code>1</code> 时只返回收藏项</td>
+</tr>
+<tr>
+<td><code>page</code> / <code>page_size</code></td>
+<td>int</td>
+<td>见 1.3</td>
+</tr>
+</tbody>
+</table>
+<p><strong>响应 200</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>items</code></td>
+<td>array</td>
+<td>提示词列表</td>
+</tr>
+<tr>
+<td><code>total</code> / <code>page</code> / <code>page_size</code></td>
+<td>int</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p><code>items[]</code> 元素：</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>int</td>
+<td></td>
+</tr>
+<tr>
+<td><code>title</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>description</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>positive_prompt</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>group_name</code></td>
+<td>string</td>
+<td>分组名</td>
+</tr>
+<tr>
+<td><code>group_id</code></td>
+<td>string</td>
+<td>分组 id（由分组名生成，纯中文时可能为空串）</td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>is_favorite</code></td>
+<td>bool</td>
+<td></td>
+</tr>
+<tr>
+<td><code>completed_at</code></td>
+<td>string</td>
+<td>可能为空串</td>
+</tr>
+<tr>
+<td><code>created_at</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>run_count</code></td>
+<td>int</td>
+<td>关联生成次数</td>
+</tr>
+<tr>
+<td><code>image_count</code></td>
+<td>int</td>
+<td>关联图片数</td>
+</tr>
+<tr>
+<td><code>cover_image_id</code></td>
+<td>int</td>
+<td>封面图 id；无图为 0</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>500</td>
+<td>查询失败</td>
+<td><code>query prompts failed</code> / <code>read prompt failed</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="72-新建提示词">7.2 新建提示词</h3>
+<pre><code>POST /api/prompts
+</code></pre>
+<p><strong>请求体</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>必填</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>positive_prompt</code></td>
+<td>string</td>
+<td>是</td>
+<td>正向提示词</td>
+</tr>
+<tr>
+<td><code>title</code></td>
+<td>string</td>
+<td>否</td>
+<td>省略时自动取正向提示词前 50 个字符</td>
+</tr>
+<tr>
+<td><code>description</code></td>
+<td>string</td>
+<td>否</td>
+<td></td>
+</tr>
+<tr>
+<td><code>group_name</code></td>
+<td>string</td>
+<td>否</td>
+<td>分组名，决定 <code>group_id</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>响应 201</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>int</td>
+<td></td>
+</tr>
+<tr>
+<td><code>title</code></td>
+<td>string</td>
+<td>最终标题</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td>body 非法或正向提示词为空</td>
+<td><code>positive_prompt is required</code></td>
+</tr>
+<tr>
+<td>500</td>
+<td>插入失败</td>
+<td><code>create prompt failed</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="73-分组列表">7.3 分组列表</h3>
+<pre><code>GET /api/prompts/groups
+</code></pre>
+<p><strong>响应 200</strong>：<strong>裸数组</strong>（不是 <code>{items:...}</code>）</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>group_name</code></td>
+<td>string</td>
+<td>分组名</td>
+</tr>
+<tr>
+<td><code>group_id</code></td>
+<td>string</td>
+<td>分组 id</td>
+</tr>
+<tr>
+<td><code>count</code></td>
+<td>int</td>
+<td>该组提示词数量</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-json">[
+  { &quot;group_name&quot;: &quot;手动提交&quot;, &quot;group_id&quot;: &quot;manual&quot;, &quot;count&quot;: 12 },
+  { &quot;group_name&quot;: &quot;风景&quot;, &quot;group_id&quot;: &quot;fengjing&quot;, &quot;count&quot;: 40 }
+]
+</code></pre>
+<p>「手动提交」分组固定排在最前，其余按最近创建时间倒序。</p>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>500</td>
+<td>查询失败</td>
+<td><code>query groups failed</code> / <code>read group failed</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="74-提示词详情">7.4 提示词详情</h3>
+<pre><code>GET /api/prompts/{id}
+</code></pre>
+<p><strong>响应 200</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>int</td>
+<td></td>
+</tr>
+<tr>
+<td><code>title</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>description</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>positive_prompt</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>group_name</code> / <code>group_id</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>is_favorite</code></td>
+<td>bool</td>
+<td></td>
+</tr>
+<tr>
+<td><code>completed_at</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>created_at</code> / <code>updated_at</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>runs</code></td>
+<td>array</td>
+<td>生成历史，倒序</td>
+</tr>
+</tbody>
+</table>
+<p><code>runs[]</code> 元素：</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>item_id</code></td>
+<td>int</td>
+<td>任务项 id</td>
+</tr>
+<tr>
+<td><code>task_id</code></td>
+<td>int</td>
+<td>任务 id</td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>comfy_prompt_id</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>error_message</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>workflow_id</code></td>
+<td>int</td>
+<td></td>
+</tr>
+<tr>
+<td><code>workflow_name</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>images</code></td>
+<td>array</td>
+<td>元素为 <code>{"id":int,"filename":string}</code></td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td><code>id</code> 非法</td>
+<td><code>invalid prompt id</code></td>
+</tr>
+<tr>
+<td>404</td>
+<td>不存在</td>
+<td><code>prompt not found</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="75-更新提示词">7.5 更新提示词</h3>
+<pre><code>PUT /api/prompts/{id}
+</code></pre>
+<p><strong>请求体</strong>：同 7.2。</p>
+<blockquote>
+<p>各字段<strong>传空串表示保留原值</strong>（不清空）。</p>
+</blockquote>
+<p><strong>响应 200</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>int</td>
+<td></td>
+</tr>
+<tr>
+<td><code>updated</code></td>
+<td>bool</td>
+<td>恒为 <code>true</code></td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td><code>id</code> 非法 / body 非法</td>
+<td><code>invalid prompt id</code> / <code>invalid JSON body</code></td>
+</tr>
+<tr>
+<td>404</td>
+<td>不存在</td>
+<td><code>prompt not found</code></td>
+</tr>
+<tr>
+<td>500</td>
+<td>更新失败</td>
+<td><code>update prompt failed</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="76-删除提示词">7.6 删除提示词</h3>
+<pre><code>DELETE /api/prompts/{id}
+</code></pre>
+<p><strong>响应 200</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>int</td>
+<td></td>
+</tr>
+<tr>
+<td><code>deleted</code></td>
+<td>bool</td>
+<td>恒为 <code>true</code></td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td><code>id</code> 非法</td>
+<td><code>invalid prompt id</code></td>
+</tr>
+<tr>
+<td>404</td>
+<td>不存在</td>
+<td><code>prompt not found</code></td>
+</tr>
+<tr>
+<td>500</td>
+<td>删除失败</td>
+<td><code>delete prompt failed</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="77-切换收藏">7.7 切换收藏</h3>
+<pre><code>PATCH /api/prompts/{id}/favorite
+</code></pre>
+<p><strong>请求体</strong>：无。</p>
+<p><strong>响应 200</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>int</td>
+<td></td>
+</tr>
+<tr>
+<td><code>is_favorite</code></td>
+<td>bool</td>
+<td>切换后的状态</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>收藏是联动的</strong>：切换提示词收藏会同步该提示词名下的<strong>所有图片</strong>；反过来切换某张图片的收藏，也会同步其所属提示词的收藏态并级联到同组其它图片。手动提交的图片（无关联提示词）只影响自身。</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td><code>id</code> 非法</td>
+<td><code>invalid prompt id</code></td>
+</tr>
+<tr>
+<td>404</td>
+<td>不存在</td>
+<td><code>prompt not found</code></td>
+</tr>
+<tr>
+<td>500</td>
+<td>失败</td>
+<td><code>toggle favorite failed</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="78-批量删除提示词">7.8 批量删除提示词</h3>
+<pre><code>POST /api/prompts/batch-delete
+</code></pre>
+<p><strong>请求体</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>必填</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ids</code></td>
+<td>array\&lt;int64&gt;</td>
+<td>是</td>
+<td>提示词 id 列表</td>
+</tr>
+</tbody>
+</table>
+<p><strong>响应 200</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>deleted</code></td>
+<td>int</td>
+<td>实际删除行数</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td>body 非法或 <code>ids</code> 为空</td>
+<td><code>ids is required</code></td>
+</tr>
+<tr>
+<td>500</td>
+<td>删除失败</td>
+<td><code>batch delete failed</code></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>⚠️ 此接口<strong>不校验 500 上限</strong>，与其它批量接口不同。</p>
+</blockquote>
+<h3 id="79-批量出图">7.9 批量出图</h3>
+<pre><code>POST /api/prompts/batch-run
+</code></pre>
+<p><strong>请求体</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>必填</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ids</code></td>
+<td>array\&lt;int64&gt;</td>
+<td>是</td>
+<td>提示词 id 列表</td>
+</tr>
+<tr>
+<td><code>workflow_id</code></td>
+<td>int64</td>
+<td>是</td>
+<td>使用的工作流</td>
+</tr>
+<tr>
+<td><code>parameters</code></td>
+<td>object</td>
+<td>否</td>
+<td>透传参数</td>
+</tr>
+</tbody>
+</table>
+<p><strong>响应 200</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>created</code></td>
+<td>int</td>
+<td>成功创建的任务数</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>⚠️ 单条创建失败会被<strong>静默跳过</strong>（不计入 <code>created</code>，也不报错）。此接口同样<strong>不校验 500 上限</strong>。</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td>缺参数</td>
+<td><code>ids and workflow_id are required</code></td>
+</tr>
+<tr>
+<td>500</td>
+<td>读设置失败</td>
+<td><code>read ComfyUI URL failed</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="710-按分组出图">7.10 按分组出图</h3>
+<pre><code>POST /api/prompts/group-run
+</code></pre>
+<p><strong>请求体</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>必填</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>group_name</code></td>
+<td>string</td>
+<td>是</td>
+<td>分组名</td>
+</tr>
+<tr>
+<td><code>workflow_id</code></td>
+<td>int64</td>
+<td>是</td>
+<td>使用的工作流</td>
+</tr>
+<tr>
+<td><code>parameters</code></td>
+<td>object</td>
+<td>否</td>
+<td>透传参数</td>
+</tr>
+</tbody>
+</table>
+<p>对分组下状态为 <code>pending</code> 或 <code>failed</code> 的提示词批量建任务。</p>
+<p><strong>响应 200</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>created</code></td>
+<td>int</td>
+<td>成功创建的任务数</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td>缺参数</td>
+<td><code>group_name and workflow_id are required</code></td>
+</tr>
+<tr>
+<td>500</td>
+<td>读设置 / 查询失败</td>
+<td><code>read ComfyUI URL failed</code> / <code>query group prompts failed</code> / <code>read group prompts failed</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="711-单条出图">7.11 单条出图</h3>
+<pre><code>POST /api/prompts/{id}/run
+</code></pre>
+<p><strong>请求体</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>必填</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>workflow_id</code></td>
+<td>int64</td>
+<td>是</td>
+<td>使用的工作流</td>
+</tr>
+<tr>
+<td><code>parameters</code></td>
+<td>object</td>
+<td>否</td>
+<td>透传参数</td>
+</tr>
+</tbody>
+</table>
+<p><strong>响应 202</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>task_id</code></td>
+<td>int</td>
+<td>新任务 id</td>
+</tr>
+<tr>
+<td><code>prompt_id</code></td>
+<td>int</td>
+<td>提示词 id</td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>string</td>
+<td>固定 <code>pending</code></td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td><code>id</code> 非法 / 缺 <code>workflow_id</code></td>
+<td><code>invalid prompt id</code> / <code>workflow_id is required</code></td>
+</tr>
+<tr>
+<td>404</td>
+<td>提示词不存在</td>
+<td><code>prompt not found</code></td>
+</tr>
+<tr>
+<td>500</td>
+<td>创建失败</td>
+<td><code>read ComfyUI URL failed</code> / <code>create task failed</code> / <code>create task item failed</code> / <code>commit task failed</code></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="8-json-导入接口">8. JSON 导入接口</h2>
+<h3 id="81-输入格式">8.1 输入格式</h3>
+<p>支持两种等价写法：</p>
+<pre><code class="language-json">{ &quot;entries&quot;: [ { &quot;id&quot;: &quot;1&quot;, &quot;title&quot;: &quot;标题&quot;, &quot;desc&quot;: &quot;描述&quot;, &quot;positive&quot;: &quot;提示词&quot; } ] }
+</code></pre>
+<pre><code class="language-json">[ { &quot;id&quot;: &quot;1&quot;, &quot;title&quot;: &quot;标题&quot;, &quot;desc&quot;: &quot;描述&quot;, &quot;positive&quot;: &quot;提示词&quot; } ]
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>必填</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>positive</code></td>
+<td>是</td>
+<td>正向提示词，不能为空</td>
+</tr>
+<tr>
+<td><code>title</code></td>
+<td>否</td>
+<td>省略时取正向提示词前 50 个字符</td>
+</tr>
+<tr>
+<td><code>desc</code></td>
+<td>否</td>
+<td>描述</td>
+</tr>
+<tr>
+<td><code>id</code></td>
+<td>否</td>
+<td>仅用于文件内部去重</td>
+</tr>
+</tbody>
+</table>
+<p><strong>关键行为</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>行为</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>分组名 = 文件名</td>
+<td>上传 <code>&lt;文件名&gt;.json</code> 后，其中的提示词归入名为 <code>&lt;文件名&gt;</code> 的分组</td>
+</tr>
+<tr>
+<td>去重键</td>
+<td><code>(分组名, 正向提示词)</code> —— <strong>同组内相同提示词重复导入是幂等的</strong></td>
+</tr>
+<tr>
+<td>同名文件再导入</td>
+<td>是<strong>追加</strong>而非覆盖：改了内容再用同名文件导入，会新增记录而不是替换</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>⚠️ 因此重新生成数据集时请<strong>换一个文件名</strong>，否则新旧内容会混在同一分组里。</p>
+</blockquote>
+<h3 id="82-备份文件列表">8.2 备份文件列表</h3>
+<pre><code>GET /api/json-files?page=1&amp;page_size=20
+</code></pre>
+<p><strong>响应 200</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>items</code></td>
+<td>array</td>
+<td>元素含 <code>id</code>、<code>filename</code>、<code>created_at</code></td>
+</tr>
+<tr>
+<td><code>total</code> / <code>page</code> / <code>page_size</code></td>
+<td>int</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>500</td>
+<td>查询失败</td>
+<td><code>query JSON files failed</code> / <code>read JSON file failed</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="83-上传-json-文件">8.3 上传 JSON 文件</h3>
+<pre><code>POST /api/json-files/upload
+Content-Type: multipart/form-data
+</code></pre>
+<p><strong>表单字段</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>必填</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>file</code></td>
+<td>file</td>
+<td>是</td>
+<td>必须是 <code>.json</code> 文件，最大 50 MiB</td>
+</tr>
+</tbody>
+</table>
+<p><strong>响应 201</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>filename</code></td>
+<td>string</td>
+<td>生成的备份文件名</td>
+</tr>
+<tr>
+<td><code>total</code></td>
+<td>int</td>
+<td>解析到的条目总数</td>
+</tr>
+<tr>
+<td><code>inserted</code></td>
+<td>int</td>
+<td>实际插入数量</td>
+</tr>
+<tr>
+<td><code>skipped_duplicates</code></td>
+<td>int</td>
+<td>因重复跳过的数量</td>
+</tr>
+<tr>
+<td><code>group_name</code></td>
+<td>string</td>
+<td>分组名（= 原文件名去扩展名）</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-bash">curl -X POST http://127.0.0.1:8080/api/json-files/upload -F &quot;file=@风景.json&quot;
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td>multipart 解析失败</td>
+<td><code>invalid multipart form</code></td>
+</tr>
+<tr>
+<td>400</td>
+<td>缺 <code>file</code> 字段</td>
+<td><code>file is required</code></td>
+</tr>
+<tr>
+<td>400</td>
+<td>非 <code>.json</code> 文件</td>
+<td><code>only JSON files are supported</code></td>
+</tr>
+<tr>
+<td>400</td>
+<td>读文件失败</td>
+<td><code>read file failed</code></td>
+</tr>
+<tr>
+<td>400</td>
+<td>内容格式错误</td>
+<td><code>JSON must be an object with entries or an array</code> / <code>each entry requires a positive prompt</code> / <code>no entries found in JSON</code></td>
+</tr>
+<tr>
+<td>500</td>
+<td>备份或入库失败</td>
+<td><code>save JSON backup failed</code> / <code>save JSON record failed</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="84-粘贴-json-文本导入">8.4 粘贴 JSON 文本导入</h3>
+<pre><code>POST /api/json-files/import-text
+</code></pre>
+<p><strong>请求体</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>必填</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>content</code></td>
+<td>string</td>
+<td>是</td>
+<td>JSON 文本，最大 10 MiB</td>
+</tr>
+<tr>
+<td><code>filename</code></td>
+<td>string</td>
+<td>否</td>
+<td>作为分组名；省略时使用 <code>手动导入-&lt;时间戳&gt;</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>响应 201</strong>：同 8.3。</p>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td>body 为空或读取失败</td>
+<td><code>request body is required</code></td>
+</tr>
+<tr>
+<td>400</td>
+<td>外层不是合法 JSON</td>
+<td><code>invalid request body</code></td>
+</tr>
+<tr>
+<td>400</td>
+<td><code>content</code> 为空</td>
+<td><code>content is required</code></td>
+</tr>
+<tr>
+<td>400</td>
+<td>内容格式错误</td>
+<td>同 8.3 的三条消息</td>
+</tr>
+<tr>
+<td>500</td>
+<td>备份或入库失败</td>
+<td><code>save JSON backup failed</code> / <code>save JSON record failed</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="85-查看备份内容">8.5 查看备份内容</h3>
+<pre><code>GET /api/json-files/{id}
+</code></pre>
+<p><strong>响应 200</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>int</td>
+<td></td>
+</tr>
+<tr>
+<td><code>filename</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>content</code></td>
+<td>string</td>
+<td>文件全文</td>
+</tr>
+<tr>
+<td><code>created_at</code></td>
+<td>string</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td><code>id</code> 非法</td>
+<td><code>invalid JSON file id</code></td>
+</tr>
+<tr>
+<td>404</td>
+<td>不存在</td>
+<td><code>JSON file not found</code></td>
+</tr>
+<tr>
+<td>500</td>
+<td>读磁盘文件失败</td>
+<td><code>read JSON file failed</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="86-下载备份文件">8.6 下载备份文件</h3>
+<pre><code>GET /api/json-files/{id}/download
+</code></pre>
+<p><strong>响应 200</strong>：文件流，带 <code>Content-Disposition: attachment</code>。</p>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td><code>id</code> 非法</td>
+<td><code>invalid JSON file id</code></td>
+</tr>
+<tr>
+<td>404</td>
+<td>不存在</td>
+<td><code>JSON file not found</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="87-删除备份记录">8.7 删除备份记录</h3>
+<pre><code>DELETE /api/json-files/{id}
+</code></pre>
+<p>删除备份记录与磁盘上的源文件，<strong>不影响已入库的提示词</strong>。</p>
+<p><strong>响应 200</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>int</td>
+<td></td>
+</tr>
+<tr>
+<td><code>deleted</code></td>
+<td>bool</td>
+<td>恒为 <code>true</code></td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td><code>id</code> 非法</td>
+<td><code>invalid JSON file id</code></td>
+</tr>
+<tr>
+<td>404</td>
+<td>不存在</td>
+<td><code>JSON file not found</code></td>
+</tr>
+<tr>
+<td>500</td>
+<td>失败</td>
+<td><code>delete JSON file failed</code></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="9-图片接口">9. 图片接口</h2>
+<h3 id="91-两个容易混淆的字段">9.1 两个容易混淆的字段</h3>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>filename</code></td>
+<td><strong>展示名 / 下载名</strong>，通常是 ComfyUI 给出的原始文件名</td>
+</tr>
+<tr>
+<td><code>storage_path</code></td>
+<td><strong>磁盘上的真实文件名</strong>，形如 <code>&lt;时间戳&gt;_&lt;id&gt;.png</code>，与 <code>filename</code> 常常不同</td>
+</tr>
+</tbody>
+</table>
+<p>文件类接口（<code>/file</code>、<code>/download</code>、删除）一律按 <code>storage_path</code> 定位真实文件。</p>
+<blockquote>
+<p>⚠️ 列表接口 <code>GET /api/images</code> 里这个字段叫 <strong><code>path</code></strong>，详情接口 <code>GET /api/images/{id}</code> 里叫 <strong><code>storage_path</code></strong>——同一份数据，键名不同。</p>
+</blockquote>
+<h3 id="92-图片列表">9.2 图片列表</h3>
+<pre><code>GET /api/images?favorite=1&amp;q=cat&amp;group=风景&amp;page=1&amp;page_size=20
+</code></pre>
+<p><strong>Query 参数</strong></p>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>favorite</code></td>
+<td>string</td>
+<td>值为 <code>1</code> 时只返回收藏图片</td>
+</tr>
+<tr>
+<td><code>q</code></td>
+<td>string</td>
+<td>模糊搜索提示词标题、正向提示词或文件名</td>
+</tr>
+<tr>
+<td><code>group</code></td>
+<td>string</td>
+<td>按提示词分组筛选</td>
+</tr>
+<tr>
+<td><code>page</code> / <code>page_size</code></td>
+<td>int</td>
+<td>见 1.3</td>
+</tr>
+</tbody>
+</table>
+<p><strong>响应 200</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>items</code></td>
+<td>array</td>
+<td>图片列表</td>
+</tr>
+<tr>
+<td><code>total</code> / <code>page</code> / <code>page_size</code></td>
+<td>int</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p><code>items[]</code> 元素：</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>int</td>
+<td></td>
+</tr>
+<tr>
+<td><code>generation_item_id</code></td>
+<td>int</td>
+<td>关联任务项 id</td>
+</tr>
+<tr>
+<td><code>filename</code></td>
+<td>string</td>
+<td>展示名</td>
+</tr>
+<tr>
+<td><code>path</code></td>
+<td>string</td>
+<td>真实路径（即 <code>storage_path</code>）</td>
+</tr>
+<tr>
+<td><code>is_favorite</code></td>
+<td>bool</td>
+<td></td>
+</tr>
+<tr>
+<td><code>created_at</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>prompt_id</code></td>
+<td>int</td>
+<td>关联提示词 id；<strong>手动提交的图片为 0</strong></td>
+</tr>
+<tr>
+<td><code>prompt_title</code></td>
+<td>string</td>
+<td>无关联时为空串</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>500</td>
+<td>查询失败</td>
+<td><code>query images failed</code> / <code>read image failed</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="93-图片详情">9.3 图片详情</h3>
+<pre><code>GET /api/images/{id}
+</code></pre>
+<p><strong>响应 200</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>int</td>
+<td></td>
+</tr>
+<tr>
+<td><code>generation_item_id</code></td>
+<td>int</td>
+<td></td>
+</tr>
+<tr>
+<td><code>filename</code></td>
+<td>string</td>
+<td>展示名</td>
+</tr>
+<tr>
+<td><code>storage_path</code></td>
+<td>string</td>
+<td>真实路径</td>
+</tr>
+<tr>
+<td><code>positive_prompt</code></td>
+<td>string</td>
+<td>生成时使用的正向提示词</td>
+</tr>
+<tr>
+<td><code>negative_prompt</code></td>
+<td>string</td>
+<td>工作流上的负向提示词</td>
+</tr>
+<tr>
+<td><code>is_favorite</code></td>
+<td>bool</td>
+<td></td>
+</tr>
+<tr>
+<td><code>created_at</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>prompt_id</code></td>
+<td>int</td>
+<td>无关联为 0</td>
+</tr>
+<tr>
+<td><code>prompt_title</code></td>
+<td>string</td>
+<td>无关联为空串</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td><code>id</code> 非法</td>
+<td><code>invalid image id</code></td>
+</tr>
+<tr>
+<td>404</td>
+<td>不存在</td>
+<td><code>image not found</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="94-图片文件内联">9.4 图片文件（内联）</h3>
+<pre><code>GET /api/images/{id}/file
+</code></pre>
+<p><strong>响应 200</strong>：图片二进制流，<code>Content-Type</code> 由文件扩展名推断（如 <code>image/png</code>）。不带 <code>Content-Disposition</code>，适合直接用于 <code>&lt;img&gt;</code> 标签。</p>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td><code>id</code> 非法</td>
+<td><code>invalid image id</code></td>
+</tr>
+<tr>
+<td>404</td>
+<td>记录不存在</td>
+<td><code>image not found</code></td>
+</tr>
+<tr>
+<td>404</td>
+<td>文件路径解析失败</td>
+<td><code>image file not found</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="95-图片下载">9.5 图片下载</h3>
+<pre><code>GET /api/images/{id}/download
+</code></pre>
+<p><strong>响应 200</strong>：图片二进制流，带 <code>Content-Disposition: attachment; filename="&lt;展示名&gt;"</code>。</p>
+<p>状态码同 9.4。</p>
+<h3 id="96-删除图片">9.6 删除图片</h3>
+<pre><code>DELETE /api/images/{id}
+</code></pre>
+<p><strong>响应 200</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>int</td>
+<td></td>
+</tr>
+<tr>
+<td><code>deleted</code></td>
+<td>bool</td>
+<td>恒为 <code>true</code></td>
+</tr>
+</tbody>
+</table>
+<p>删除顺序为<strong>先删磁盘文件、再删库记录</strong>。</p>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td><code>id</code> 非法</td>
+<td><code>invalid image id</code></td>
+</tr>
+<tr>
+<td>404</td>
+<td>不存在</td>
+<td><code>image not found</code></td>
+</tr>
+<tr>
+<td>500</td>
+<td>其它错误</td>
+<td><code>delete image failed</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="97-批量删除图片">9.7 批量删除图片</h3>
+<pre><code>POST /api/images/batch-delete
+</code></pre>
+<p><strong>请求体</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>必填</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ids</code></td>
+<td>array\&lt;int64&gt;</td>
+<td>是</td>
+<td>最多 500 个</td>
+</tr>
+</tbody>
+</table>
+<p><strong>响应 200</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>applied</code></td>
+<td>int</td>
+<td>实际删除数</td>
+</tr>
+<tr>
+<td><code>skipped</code></td>
+<td>int</td>
+<td>不存在的数量</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td>body 非法或 <code>ids</code> 为空</td>
+<td><code>ids is required</code></td>
+</tr>
+<tr>
+<td>400</td>
+<td>超过 500 个</td>
+<td><code>too many ids, max 500 per request</code></td>
+</tr>
+<tr>
+<td>500</td>
+<td>出现非可跳过的错误</td>
+<td><code>batch operation failed</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="98-批量收藏图片">9.8 批量收藏图片</h3>
+<pre><code>POST /api/images/batch-favorite
+</code></pre>
+<p><strong>请求体</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>必填</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ids</code></td>
+<td>array\&lt;int64&gt;</td>
+<td>是</td>
+<td>最多 500 个</td>
+</tr>
+<tr>
+<td><code>favorite</code></td>
+<td>bool</td>
+<td>否</td>
+<td><code>true</code> 收藏，<code>false</code> 取消；默认 <code>false</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>响应 200</strong>：<code>{"applied": N, "skipped": M}</code></p>
+<p>状态码同 9.7。</p>
+<h3 id="99-切换图片收藏">9.9 切换图片收藏</h3>
+<pre><code>PATCH /api/images/{id}/favorite
+</code></pre>
+<p><strong>响应 200</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>int</td>
+<td></td>
+</tr>
+<tr>
+<td><code>is_favorite</code></td>
+<td>bool</td>
+<td>切换后的状态</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>若图片有关联提示词，则以提示词的收藏态为准并级联；手动提交的图片只影响自身。</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td><code>id</code> 非法</td>
+<td><code>invalid image id</code></td>
+</tr>
+<tr>
+<td>404</td>
+<td>不存在</td>
+<td><code>image not found</code></td>
+</tr>
+<tr>
+<td>500</td>
+<td>失败</td>
+<td><code>toggle favorite failed</code></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="10-数据导入导出">10. 数据导入导出</h2>
+<h3 id="101-导出-zip">10.1 导出 ZIP</h3>
+<pre><code>GET /api/export?favorite=1&amp;group=风景&amp;status=completed&amp;search=cat
+</code></pre>
+<p><strong>Query 参数</strong></p>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>favorite</code></td>
+<td>string</td>
+<td>值为 <code>1</code> 时只导出收藏</td>
+</tr>
+<tr>
+<td><code>group</code></td>
+<td>string</td>
+<td>按分组筛选</td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>string</td>
+<td>按提示词状态筛选</td>
+</tr>
+<tr>
+<td><code>search</code></td>
+<td>string</td>
+<td>模糊搜索标题、正向提示词、描述</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>⚠️ 这里的搜索参数名是 <code>search</code>，而列表接口用的是 <code>q</code>，注意区分。</p>
+</blockquote>
+<p><strong>响应 200</strong>：<code>application/zip</code> 流。</p>
+<table>
+<thead>
+<tr>
+<th>响应头</th>
+<th>值</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Content-Type</code></td>
+<td><code>application/zip</code></td>
+</tr>
+<tr>
+<td><code>Content-Disposition</code></td>
+<td><code>attachment; filename="export-&lt;YYYYMMDD_HHMMSS&gt;.zip"</code></td>
+</tr>
+</tbody>
+</table>
+<p>ZIP 结构：</p>
+<pre><code>export-20261001_183000.zip
+├── prompts.json        # 提示词数组（含 negative_prompt / group_id / is_favorite）
+├── images.json         # 图片数组（含 archive_name / prompt_id / positive_prompt）
+└── images/             # 图片二进制文件
+    ├── 1767000000_12.png
+    └── ...
+</code></pre>
+<p><code>prompts.json</code> 元素：</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>int64</td>
+</tr>
+<tr>
+<td><code>title</code></td>
+<td>string</td>
+</tr>
+<tr>
+<td><code>description</code></td>
+<td>string</td>
+</tr>
+<tr>
+<td><code>positive_prompt</code></td>
+<td>string</td>
+</tr>
+<tr>
+<td><code>negative_prompt</code></td>
+<td>string</td>
+</tr>
+<tr>
+<td><code>group_name</code></td>
+<td>string</td>
+</tr>
+<tr>
+<td><code>group_id</code></td>
+<td>string</td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>string</td>
+</tr>
+<tr>
+<td><code>is_favorite</code></td>
+<td>bool</td>
+</tr>
+</tbody>
+</table>
+<p><code>images.json</code> 元素：</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>int64</td>
+<td></td>
+</tr>
+<tr>
+<td><code>filename</code></td>
+<td>string</td>
+<td>展示名</td>
+</tr>
+<tr>
+<td><code>archive_name</code></td>
+<td>string</td>
+<td>ZIP 内的实际文件名；与 <code>filename</code> 相同时省略</td>
+</tr>
+<tr>
+<td><code>prompt_id</code></td>
+<td>int64</td>
+<td></td>
+</tr>
+<tr>
+<td><code>positive_prompt</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>is_favorite</code></td>
+<td>bool</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>500</td>
+<td>提示词查询失败</td>
+<td><code>query prompts failed</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="102-导入-zip">10.2 导入 ZIP</h3>
+<pre><code>POST /api/import
+Content-Type: multipart/form-data
+</code></pre>
+<p><strong>表单字段</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>必填</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>file</code></td>
+<td>file</td>
+<td>是</td>
+<td>必须是 <code>.zip</code> 文件，最大 500 MiB</td>
+</tr>
+</tbody>
+</table>
+<p><strong>去重规则</strong></p>
+<table>
+<thead>
+<tr>
+<th>对象</th>
+<th>去重键</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>提示词</td>
+<td><code>title</code> + <code>positive_prompt</code> 完全相同</td>
+</tr>
+<tr>
+<td>图片</td>
+<td><code>filename</code> 已存在</td>
+</tr>
+</tbody>
+</table>
+<p><strong>响应 200</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>imported_prompts</code></td>
+<td>int</td>
+<td>新插入的提示词数</td>
+</tr>
+<tr>
+<td><code>skipped_prompts</code></td>
+<td>int</td>
+<td>跳过的提示词数</td>
+</tr>
+<tr>
+<td><code>imported_images</code></td>
+<td>int</td>
+<td>新插入的图片数</td>
+</tr>
+<tr>
+<td><code>skipped_images</code></td>
+<td>int</td>
+<td>跳过的图片数</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>触发条件</th>
+<th>错误消息</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td>缺 <code>file</code> 字段</td>
+<td><code>missing file field</code></td>
+</tr>
+<tr>
+<td>400</td>
+<td>非 <code>.zip</code> 文件</td>
+<td><code>only .zip files are supported</code></td>
+</tr>
+<tr>
+<td>400</td>
+<td>ZIP 无法解析</td>
+<td><code>invalid zip file</code></td>
+</tr>
+<tr>
+<td>500</td>
+<td>写临时文件 / 事务失败</td>
+<td><code>create temp file failed</code> / <code>begin transaction failed</code> / <code>commit failed</code></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>ZIP 内的文件名会被收敛为纯文件名，含路径分隔符或 <code>..</code> 的条目直接跳过（防止路径穿越）。</p>
+</blockquote>
+<hr />
+<h2 id="11-附录错误码与行为细节">11. 附录：错误码与行为细节</h2>
+<h3 id="111-状态码汇总">11.1 状态码汇总</h3>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>含义</th>
+<th>典型场景</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td>成功</td>
+<td>查询、更新、删除（注意：<strong>校验失败也是 200</strong>）</td>
+</tr>
+<tr>
+<td>201</td>
+<td>已创建</td>
+<td>新建工作流 / 提示词 / JSON 导入</td>
+</tr>
+<tr>
+<td>202</td>
+<td>已接受</td>
+<td>创建任务（异步执行）</td>
+</tr>
+<tr>
+<td>204</td>
+<td>无内容</td>
+<td><code>OPTIONS</code> 预检请求</td>
+</tr>
+<tr>
+<td>400</td>
+<td>参数错误</td>
+<td>缺必填、<code>id</code> 非法、body 非法 JSON、含未知字段</td>
+</tr>
+<tr>
+<td>404</td>
+<td>不存在</td>
+<td>资源 id 无效</td>
+</tr>
+<tr>
+<td>409</td>
+<td>状态冲突</td>
+<td>工作流有在途任务、任务状态不允许取消/重试/删除</td>
+</tr>
+<tr>
+<td>500</td>
+<td>服务端错误</td>
+<td>数据库或文件操作失败</td>
+</tr>
+<tr>
+<td>502</td>
+<td>上游不可达</td>
+<td>测试 ComfyUI 连通性失败</td>
+</tr>
+<tr>
+<td>503</td>
+<td>依赖不可用</td>
+<td>数据库 Ping 失败</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>「未开启 <code>DEBUG</code> 时 <code>/api/debug/*</code> 返回 404」是<strong>路由不存在</strong>，不是资源不存在，错误体是 Go 默认的 <code>404 page not found</code> 纯文本，而非 <code>{"error": ...}</code>。</p>
+</blockquote>
+<h3 id="112-值得注意的行为">11.2 值得注意的行为</h3>
+<p><strong>工作流</strong></p>
+<ul>
+<li>落点自动识别在<strong>导入时</strong>完成，无需手工配置；手工选择的一侧优先，未选的一侧由自动识别补全。</li>
+<li>工作流文件名带 id 后缀，两个同名工作流不会共用文件。</li>
+<li>删除工作流会拦住在途任务，顺序为先删库、后删文件。</li>
+<li>默认工作流全局唯一。</li>
+<li>提交时<strong>实时读取</strong>当前的 ComfyUI 地址；<code>generation_tasks.comfyui_url</code> 只是创建时的审计快照。</li>
+</ul>
+<p><strong>提示词与负向</strong></p>
+<ul>
+<li>负向提示词配置在<strong>工作流</strong>上，不在提交接口里。同一个工作流的所有任务共用同一份负向。</li>
+<li>部分工作流的负向由正向派生（<code>negative_shared: true</code>），此时负向不会生效，接口会明确提示。</li>
+</ul>
+<p><strong>任务</strong></p>
+<ul>
+<li>创建任务是异步的，返回 202 不代表已提交给 ComfyUI。</li>
+<li>出图成功但保存失败时任务不会立刻判失败，而是保持 <code>submitted</code> 自动重试，连续 40 次失败才终止。</li>
+<li>已成功的结果在重试时不会被重跑。</li>
+</ul>
+<p><strong>收藏联动</strong></p>
+<ul>
+<li>收藏状态在「提示词」与「图片」两个层级之间级联：改任一侧会同步另一侧。</li>
+<li>手动提交的图片没有关联提示词，收藏只影响自身。</li>
+</ul>
+<p><strong>JSON 导入</strong></p>
+<ul>
+<li>分组名 = 文件名；去重键为「同组 + 同内容」。</li>
+<li>同名文件重复导入是<strong>追加</strong>，改内容后请换文件名。</li>
+</ul>
+<p><strong>已知限制</strong></p>
+<ul>
+<li><strong>子图（Subgraph）不支持</strong>：含子图的工作流会在保存/提交时被拒绝。</li>
+<li><strong>无鉴权</strong>：接口不做认证，请勿直接暴露到公网。</li>
+<li><strong>CORS 实际不生效</strong>：白名单配置项未被读取，不会输出跨域头；跨域访问需自建反向代理。</li>
+<li><code>POST /api/prompts/batch-delete</code> 与 <code>POST /api/prompts/batch-run</code> 不校验 500 条上限。</li>
+</ul>
+<p><strong>调试（<code>DEBUG</code> 开启时）</strong></p>
+<ul>
+<li><code>DEBUG</code> 关闭时：不建 <code>debug/</code> 目录、不写任何调试文件、<code>/api/debug/*</code> 路由不注册、出站请求的代码路径与开启前完全一致（多一层 nil 判断，无额外分配）。</li>
+<li>调试文件单份上限 16 MiB，超出滚成 <code>.1</code>，只保留一代。</li>
+<li><code>startup.json</code> 是<strong>覆盖写</strong>（只留最新一份），其余三个是追加写的 JSONL。</li>
+<li>写盘失败一律吞掉，<strong>绝不影响出图</strong>；<code>/api/debug/files/{name}</code> 走白名单，任何含 <code>/</code> 或 <code>\</code> 的名字都会被拒。</li>
+</ul>
+</main>
+<button id="top-btn" title="回到顶部">↑</button>
+<script>
+(function () {
+  var content = document.getElementById('content');
+  var toc = document.getElementById('toc');
+  var search = document.getElementById('search');
+  var info = document.getElementById('search-info');
+  var headings = Array.prototype.slice.call(content.querySelectorAll('h2, h3'));
+
+  headings.forEach(function (h) {
+    h.id = h.id || h.textContent.trim();
+  });
+
+  // 滚动高亮当前小节
+  var links = {};
+  toc.querySelectorAll('a').forEach(function (a) {
+    links[decodeURIComponent(a.getAttribute('href').slice(1))] = a;
+  });
+  var observer = new IntersectionObserver(function (entries) {
+    entries.forEach(function (e) {
+      if (!e.isIntersecting) return;
+      toc.querySelectorAll('a.active').forEach(function (a) { a.classList.remove('active'); });
+      var a = links[e.target.id];
+      if (a) {
+        a.classList.add('active');
+        var rect = a.getBoundingClientRect();
+        if (rect.top < 0 || rect.bottom > window.innerHeight) {
+          a.scrollIntoView({ block: 'center' });
+        }
+      }
+    });
+  }, { rootMargin: '-10% 0px -75% 0px' });
+  headings.forEach(function (h) { observer.observe(h); });
+
+  // 目录过滤 + 正文命中高亮
+  var marks = [];
+  function clearMarks() {
+    marks.forEach(function (m) {
+      var p = m.parentNode;
+      if (!p) return;
+      p.replaceChild(document.createTextNode(m.textContent), m);
+      p.normalize();
+    });
+    marks = [];
+  }
+  function highlight(q) {
+    // 在 content 的文本节点里就地包一层高亮标签，跳过 script/style 与已高亮的节点
+    var walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT, {
+      acceptNode: function (node) {
+        if (!node.nodeValue || !node.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
+        var p = node.parentNode;
+        if (!p) return NodeFilter.FILTER_REJECT;
+        var tag = p.nodeName;
+        if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'MARK') return NodeFilter.FILTER_REJECT;
+        return node.nodeValue.toLowerCase().indexOf(q) !== -1
+          ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+      }
+    });
+    var targets = [];
+    while (walker.nextNode()) targets.push(walker.currentNode);
+    targets.forEach(function (node) {
+      var text = node.nodeValue, lower = text.toLowerCase(), frag = document.createDocumentFragment();
+      var from = 0, at;
+      while ((at = lower.indexOf(q, from)) !== -1) {
+        if (at > from) frag.appendChild(document.createTextNode(text.slice(from, at)));
+        var m = document.createElement('mark');
+        m.textContent = text.slice(at, at + q.length);
+        frag.appendChild(m);
+        marks.push(m);
+        from = at + q.length;
+      }
+      if (from < text.length) frag.appendChild(document.createTextNode(text.slice(from)));
+      node.parentNode.replaceChild(frag, node);
+    });
+    return marks.length;
+  }
+  search.addEventListener('input', function () {
+    var q = search.value.trim().toLowerCase();
+    var tocLis = Array.prototype.slice.call(toc.querySelectorAll('li'));
+    clearMarks();
+    if (!q) {
+      tocLis.forEach(function (li) { li.classList.remove('hidden'); });
+      info.textContent = '';
+      return;
+    }
+    var headingHits = tocLis.filter(function (li) {
+      var a = li.querySelector('a');
+      return !!(a && a.textContent.toLowerCase().indexOf(q) !== -1);
+    });
+    // 标题一条都没命中时不要把整个目录清空 —— 那看起来像导航坏了；
+    // 保留全量目录，只在信息栏说明「标题未命中」，用户仍可凭正文高亮定位。
+    if (headingHits.length) {
+      tocLis.forEach(function (li) {
+        li.classList.toggle('hidden', headingHits.indexOf(li) === -1);
+      });
+    } else {
+      tocLis.forEach(function (li) { li.classList.remove('hidden'); });
+    }
+    var bodyHits = highlight(q);
+    info.textContent = headingHits.length
+      ? ('目录 ' + headingHits.length + ' 节 · 正文 ' + bodyHits + ' 处')
+      : ('标题未命中 · 正文 ' + bodyHits + ' 处');
+    var first = content.querySelector('mark');
+    if (first) first.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  });
+
+  // 表格首列方法徽章上色
+  content.querySelectorAll('table').forEach(function (t) {
+    t.querySelectorAll('tbody tr').forEach(function (tr) {
+      var cell = tr.children[0];
+      if (!cell) return;
+      var v = cell.textContent.trim();
+      var colors = { GET: 'var(--get)', POST: 'var(--post)', PUT: 'var(--put)', PATCH: 'var(--patch)', DELETE: 'var(--del)' };
+      if (colors[v]) { cell.style.color = colors[v]; cell.style.fontWeight = '600'; }
+    });
+  });
+
+  var topBtn = document.getElementById('top-btn');
+  window.addEventListener('scroll', function () {
+    topBtn.style.display = window.scrollY > 500 ? 'block' : 'none';
+  });
+  topBtn.addEventListener('click', function () { window.scrollTo({ top: 0, behavior: 'smooth' }); });
+})();
+</script>
+</body>
+</html>

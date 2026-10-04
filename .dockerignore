@@ -1,0 +1,30 @@
+# 构建上下文排除清单。
+# Dockerfile 只需要 frontend/ 与 backend/ 的源码；
+# 其余都是本地数据、备份与调试素材，传进去只会拖慢构建、污染中间层。
+
+# 依赖与构建产物（容器内会重新装/重新编译）
+frontend/node_modules
+frontend/dist
+backend/server
+backend/cmd/server/server
+
+# 运行时数据与备份：绝不进镜像
+data/
+generated-images/
+*.tar
+*.db
+*.db-shm
+*.db-wal
+
+# 本地调试脚本、素材与记忆
+.workbuddy/
+style-tests/
+submit.py
+
+# 文档（镜像内不提供，接口文档看仓库即可）
+docs/
+
+# 版本控制与系统文件
+.git
+.gitignore
+.DS_Store

@@ -1,0 +1,731 @@
+{
+  "id": "ddef59b4-9812-4deb-9ab2-ef30569614c9",
+  "revision": 0,
+  "last_node_id": 14,
+  "last_link_id": 14,
+  "nodes": [
+    {
+      "id": 10,
+      "type": "UNETLoader",
+      "pos": [
+        -920,
+        230
+      ],
+      "size": [
+        340,
+        82
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "slot_index": 0,
+          "links": [
+            1
+          ]
+        }
+      ],
+      "title": "底模 UNet (Krea2-Turbo int8)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.36.0",
+        "Node name for S&R": "UNETLoader"
+      },
+      "widgets_values": [
+        "krea-2-turbo-int8-convrot.safetensors",
+        "default"
+      ],
+      "widgets_values_named": {
+        "unet_name": "krea-2-turbo-int8-convrot.safetensors",
+        "weight_dtype": "default"
+      }
+    },
+    {
+      "id": 8,
+      "type": "CLIPLoader",
+      "pos": [
+        -920,
+        420
+      ],
+      "size": [
+        340,
+        106
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "slot_index": 0,
+          "links": [
+            2
+          ]
+        }
+      ],
+      "title": "文本编码器 (Krea2)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.36.0",
+        "Node name for S&R": "CLIPLoader"
+      },
+      "widgets_values": [
+        "qwen3VL4BAbliteratedComfyui_v10_full_fp8.safetensors",
+        "krea2",
+        "default"
+      ],
+      "widgets_values_named": {
+        "clip_name": "qwen3VL4BAbliteratedComfyui_v10_full_fp8.safetensors",
+        "type": "krea2",
+        "device": "default"
+      }
+    },
+    {
+      "id": 4,
+      "type": "VAELoader",
+      "pos": [
+        -920,
+        590
+      ],
+      "size": [
+        340,
+        82
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "slot_index": 0,
+          "links": [
+            13
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.36.0",
+        "Node name for S&R": "VAELoader"
+      },
+      "widgets_values": [
+        "qwen_image_vae.safetensors"
+      ],
+      "widgets_values_named": {
+        "vae_name": "qwen_image_vae.safetensors"
+      }
+    },
+    {
+      "id": 12,
+      "type": "LoraLoader",
+      "pos": [
+        -540,
+        190
+      ],
+      "size": [
+        315,
+        126
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 1
+        },
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "slot_index": 0,
+          "links": [
+            3
+          ]
+        },
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "slot_index": 1,
+          "links": [
+            4
+          ]
+        }
+      ],
+      "title": "LoRA · NSFW V4",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.36.0",
+        "Node name for S&R": "LoraLoader"
+      },
+      "widgets_values": [
+        "krea2_nsfw_v4.safetensors",
+        0.9,
+        0.9
+      ],
+      "widgets_values_named": {
+        "lora_name": "krea2_nsfw_v4.safetensors",
+        "strength_model": 0.9,
+        "strength_clip": 0.9
+      }
+    },
+    {
+      "id": 13,
+      "type": "LoraLoader",
+      "pos": [
+        -540,
+        370
+      ],
+      "size": [
+        315,
+        126
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 3
+        },
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 4
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "slot_index": 0,
+          "links": [
+            11
+          ]
+        },
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "slot_index": 1,
+          "links": [
+            5
+          ]
+        }
+      ],
+      "title": "LoRA · Realism Engine V2",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.36.0",
+        "Node name for S&R": "LoraLoader"
+      },
+      "widgets_values": [
+        "realism_engine_krea2_v2.safetensors",
+        0.6,
+        0.6
+      ],
+      "widgets_values_named": {
+        "lora_name": "realism_engine_krea2_v2.safetensors",
+        "strength_model": 0.6,
+        "strength_clip": 0.6
+      }
+    },
+    {
+      "id": 6,
+      "type": "CLIPTextEncode",
+      "pos": [
+        -180,
+        120
+      ],
+      "size": [
+        400,
+        180
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 5
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "slot_index": 0,
+          "links": [
+            6,
+            7
+          ]
+        }
+      ],
+      "title": "正向提示词",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.36.0",
+        "Node name for S&R": "CLIPTextEncode"
+      },
+      "widgets_values": [
+        ""
+      ],
+      "widgets_values_named": {
+        "text": ""
+      }
+    },
+    {
+      "id": 1,
+      "type": "ConditioningZeroOut",
+      "pos": [
+        280,
+        320
+      ],
+      "size": [
+        210,
+        26
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "conditioning",
+          "type": "CONDITIONING",
+          "link": 6
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "slot_index": 0,
+          "links": [
+            9
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.36.0",
+        "Node name for S&R": "ConditioningZeroOut"
+      }
+    },
+    {
+      "id": 5,
+      "type": "ConditioningKrea2Rebalance",
+      "pos": [
+        280,
+        120
+      ],
+      "size": [
+        400,
+        130
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "conditioning",
+          "type": "CONDITIONING",
+          "link": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "conditioning",
+          "type": "CONDITIONING",
+          "slot_index": 0,
+          "links": [
+            8
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfyui-krea2-conditioning",
+        "ver": "729cda4fade982988a375b01928f515458407a5c",
+        "Node name for S&R": "ConditioningKrea2Rebalance"
+      },
+      "widgets_values": [
+        "balanced",
+        "1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.5, 5.0, 1.1, 4.0, 1.0",
+        1,
+        true
+      ],
+      "widgets_values_named": {
+        "preset": "balanced",
+        "per_layer_weights": "1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.5, 5.0, 1.1, 4.0, 1.0",
+        "multiplier": 1,
+        "renormalize": true
+      }
+    },
+    {
+      "id": 3,
+      "type": "EmptyLatentImage",
+      "pos": [
+        -180,
+        360
+      ],
+      "size": [
+        315,
+        106
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "slot_index": 0,
+          "links": [
+            10
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.36.0",
+        "Node name for S&R": "EmptyLatentImage"
+      },
+      "widgets_values": [
+        720,
+        1280,
+        1
+      ],
+      "widgets_values_named": {
+        "width": 720,
+        "height": 1280,
+        "batch_size": 1
+      },
+      "title": "720x1280"
+    },
+    {
+      "id": 7,
+      "type": "KSampler",
+      "pos": [
+        760,
+        220
+      ],
+      "size": [
+        315,
+        262
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 11
+        },
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "link": 8
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "link": 9
+        },
+        {
+          "name": "latent_image",
+          "type": "LATENT",
+          "link": 10
+        }
+      ],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "slot_index": 0,
+          "links": [
+            12
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.36.0",
+        "Node name for S&R": "KSampler"
+      },
+      "widgets_values": [
+        777777777,
+        "randomize",
+        8,
+        1,
+        "euler",
+        "sgm_uniform",
+        1
+      ],
+      "widgets_values_named": {
+        "seed": 777777777,
+        "control_after_generate": "randomize",
+        "steps": 8,
+        "cfg": 1,
+        "sampler_name": "euler",
+        "scheduler": "sgm_uniform",
+        "denoise": 1
+      }
+    },
+    {
+      "id": 2,
+      "type": "VAEDecode",
+      "pos": [
+        1120,
+        260
+      ],
+      "size": [
+        210,
+        46
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 12
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 13
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "slot_index": 0,
+          "links": [
+            14
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.36.0",
+        "Node name for S&R": "VAEDecode"
+      }
+    },
+    {
+      "id": 11,
+      "type": "SaveImage",
+      "pos": [
+        1120,
+        400
+      ],
+      "size": [
+        360,
+        300
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 14
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.36.0",
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "Krea2-T2I-body090real060-9x16-raw"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "Krea2-T2I-body090real060-9x16-raw"
+      }
+    },
+    {
+      "id": 14,
+      "type": "MarkdownNote",
+      "mode": 0,
+      "pos": [
+        -780,
+        -280
+      ],
+      "size": [
+        660,
+        320
+      ],
+      "flags": {},
+      "order": 12,
+      "inputs": [],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": [
+        "# Krea2-文生图-身材090写实060-9x16-原图\n\n- 旧名：`Krea2-写实Lora-全身`\n- 命名规则：底模-任务-LoRA实名+强度-比例[-变体段]-输出档\n- LoRA 实名段 `身材090写实060` 由 LoraLoader 节点反查生成，已与文件名核对一致\n- 业务：身材+写实双 LoRA 最高档 · 原图档。原 demo 主题为绿发骨面具 Cosplay 棚拍；线上 id19(Cosplay 词) 与 id23(catsuit 词) 与本条同栈，已归并到这一条。\n- 配对：成图档：Krea2-文生图-身材090写实060-9x16-放大\n- 落盘前缀（ASCII，ComfyUI /view 不做 URL 编码故不能用中文）：`Krea2-T2I-body090real060-9x16-raw`\n- 提示词：正向由 comfyui-server 提交时注入（节点已留空），负向保持原样\n- seed 已统一 randomize（服务端不覆写 seed，fixed 会让批量提交出同一张图）\n\n⚠ Krea2 文本编码器两套配法并存（本机未统一）：本文件 clip_name=\"krea2\" + type=stable_diffusion。线上真正跑通过的是 qwen3VL4BAbliteratedComfyui_v10_full_fp8.safetensors + type=krea2。换机/重建前先验能不能在下拉框选到。\n"
+      ],
+      "title": "工作流说明（命名/溯源）"
+    }
+  ],
+  "links": [
+    [
+      1,
+      10,
+      0,
+      12,
+      0,
+      "MODEL"
+    ],
+    [
+      2,
+      8,
+      0,
+      12,
+      1,
+      "CLIP"
+    ],
+    [
+      3,
+      12,
+      0,
+      13,
+      0,
+      "MODEL"
+    ],
+    [
+      4,
+      12,
+      1,
+      13,
+      1,
+      "CLIP"
+    ],
+    [
+      5,
+      13,
+      1,
+      6,
+      0,
+      "CLIP"
+    ],
+    [
+      6,
+      6,
+      0,
+      1,
+      0,
+      "CONDITIONING"
+    ],
+    [
+      7,
+      6,
+      0,
+      5,
+      0,
+      "CONDITIONING"
+    ],
+    [
+      8,
+      5,
+      0,
+      7,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      9,
+      1,
+      0,
+      7,
+      2,
+      "CONDITIONING"
+    ],
+    [
+      10,
+      3,
+      0,
+      7,
+      3,
+      "LATENT"
+    ],
+    [
+      11,
+      13,
+      0,
+      7,
+      0,
+      "MODEL"
+    ],
+    [
+      12,
+      7,
+      0,
+      2,
+      0,
+      "LATENT"
+    ],
+    [
+      13,
+      4,
+      0,
+      2,
+      1,
+      "VAE"
+    ],
+    [
+      14,
+      2,
+      0,
+      11,
+      0,
+      "IMAGE"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "workspace_info": {
+      "id": null,
+      "name": null
+    },
+    "ds": {
+      "scale": 0.5138429752066116,
+      "offset": [
+        1333.3333333333333,
+        494.3767591475673
+      ]
+    },
+    "frontendVersion": "1.52.7",
+    "VHS_latentpreview": false,
+    "VHS_latentpreviewrate": 0,
+    "VHS_MetadataImage": true,
+    "VHS_KeepIntermediate": true
+  },
+  "version": 0.4
+}

@@ -2,9 +2,8 @@
 import { onMounted, onUnmounted, ref, computed, watch } from 'vue'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
-import ParamForm from '../components/ParamForm.vue'
 import { api, type Workflow } from '../api/client'
-import { buildRunMapping, pickDefaultWorkflow } from '../utils/workflowParams'
+import { pickDefaultWorkflow } from '../utils/workflowParams'
 import { openImageViewer } from '../utils/imageViewer'
 import { backToListOr } from '../utils/nav'
 
@@ -98,11 +97,6 @@ function onWorkflowChange() {
   params.value = {}
 }
 
-// 合并 mapping.parameters（节点位置）和 params_schema（类型/标签）
-const runMapping = computed(() => buildRunMapping(workflows.value.find(w => w.id === selectedWorkflow.value)))
-// 生成参数项数：折叠面板的标题提示与显隐判断
-const runParamCount = computed(() => Object.keys(runMapping.value?.parameters ?? {}).length)
-
 async function confirmRun() {
   if (!selectedWorkflow.value) { showMessage('请选择工作流', 'error'); return }
   running.value = true
@@ -110,7 +104,7 @@ async function confirmRun() {
     const result = await api<{ task_id: number }>(`/api/prompts/${route.params.id}/run`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ workflow_id: selectedWorkflow.value, parameters: params.value }),
+      body: JSON.stringify({ workflow_id: selectedWorkflow.value }),
     })
     showRunModal.value = false
     router.push(`/tasks/${result.task_id}`)
@@ -242,18 +236,6 @@ onUnmounted(() => setPolling(false))
         <option :value="0" disabled>请选择工作流</option>
         <option v-for="w in workflows.filter(x => x.enabled)" :key="w.id" :value="w.id">{{ w.name }}</option>
       </select>
-      <!-- 生成参数：重跑时通常沿用工作流默认，属低频调整项，默认折叠。
-           注意用 <details> 只是视觉隐藏，ParamForm 仍会挂载，
-           默认值照常参与提交，不影响作图结果 -->
-      <details v-if="selectedWorkflow && runParamCount > 0" class="collapse-panel">
-        <summary>
-          <span>生成参数</span>
-          <span class="text-xs muted">{{ runParamCount }} 项 · 默认折叠</span>
-        </summary>
-        <div class="collapse-body">
-          <ParamForm :mapping="runMapping" v-model="params" />
-        </div>
-      </details>
       <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:16px;">
         <button class="btn btn-ghost" @click="showRunModal = false">取消</button>
         <button class="btn btn-primary" :disabled="running" @click="confirmRun">

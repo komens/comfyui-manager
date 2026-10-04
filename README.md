@@ -149,7 +149,7 @@ docker compose up -d --build
 
 ```bash
 # 构建镜像（NAS 部署，x86_64）
-docker build --platform linux/amd64 -t comfyui-server:1.5.0 .
+docker build --platform linux/amd64 -t comfyui-server:1.10.0 .
 
 # 运行容器
 docker run -d --name comfyui-server \
@@ -157,17 +157,17 @@ docker run -d --name comfyui-server \
   -v /volume1/docker/comfyui-server/data:/app/data \
   -e COMFYUI_URL=http://192.168.1.20:8188 \
   --restart unless-stopped \
-  comfyui-server:1.5.0
+  comfyui-server:1.10.0
 
-# 导出镜像（传输到 NAS）
-docker save comfyui-server:1.5.0 -o comfyui-server.tar
+# 导出镜像（传输到 NAS；文件名带版本号，便于多版本归档）
+docker save comfyui-server:1.10.0 -o comfyui-server-1.10.0.tar
 ```
 
 **说明：**
 - `--platform linux/amd64`：指定构建平台为 x86_64 架构（适用于大多数 NAS）
 - `-p 18080:8080`：将宿主机的 18080 端口映射到容器的 8080 端口
 - `-v <宿主目录>:/app/data`：挂载数据目录，持久化数据库、图片和工作流
-- `docker save`：导出镜像为 tar 文件，方便传输到 NAS 设备
+- `docker save` / `docker load`：导出 tar 传到 NAS 后，用 `docker load -i comfyui-server-1.10.0.tar` 导入
 
 ### 环境变量
 
@@ -178,6 +178,7 @@ docker save comfyui-server:1.5.0 -o comfyui-server.tar
 | `DATA_DIR` | `/app/data` | 数据存储目录 |
 | `DB_PATH` | `/app/data/db/comfyui.db` | SQLite 数据库路径 |
 | `STATIC_DIR` | `/app/static` | 前端静态文件目录（Docker 内置） |
+| `DEBUG` | 关闭 | 调试总开关。填 `1` 开启，排查线索落盘到 `data/debug/`，并在 Web 界面出现「调试日志」页（见下节） |
 
 ### 数据目录
 
@@ -188,10 +189,53 @@ data/
 ├── db/comfyui.db      # SQLite 数据库
 ├── images/            # 生成的图片
 ├── workflows/         # 工作流 JSON（ComfyUI 导出）
-└── json/              # 上传的 JSON 文件备份
+├── json/              # 上传的 JSON 文件备份
+└── debug/             # 仅 DEBUG 开启时存在
 ```
 
 首次启动时这些子目录会自动创建。
+
+### 排查：DEBUG 模式
+
+出问题时**先开 DEBUG 再复现**，比事后猜快得多。因为 `data/` 是挂载出来的，日志直接落在宿主机上，不需要进容器。
+
+**开启**
+
+```bash
+# 在 docker-compose.yml 同目录建 .env
+echo "DEBUG=1" > .env
+docker compose up -d
+```
+
+生效标志：启动日志里出现 `debug: ON` 那几行（会逐条列出落盘路径）。**没有这几行说明镜像里还没有这段代码，需要重新构建镜像。**
+
+重启后 Web 界面侧边栏的「系统」区会多出 **调试日志** 页，可以列文件、下载、清空。
+
+**落盘的四份文件**（`data/debug/`）
+
+| 文件 | 内容 |
+|---|---|
+| `startup.json` | 每次启动覆盖写：版本、`data_dir` 的**绝对路径**与各子目录可写性、`comfyui_url`、`journal_mode`、各表行数、关键列是否存在 |
+| `submit-payloads.jsonl` | 每次 `POST /prompt` 的完整请求体。写盘发生在请求发出**之前**，所以被 400 拒掉的载荷也能看到 |
+| `http.jsonl` | 所有出站请求；非 2xx 与传输错误必然记录（带响应体） |
+| `events.jsonl` | 任务状态流转与关键决策 |
+
+**按症状找**
+
+| 症状 | 看哪里 |
+|---|---|
+| 任务卡着不动 | `events.jsonl` 的 `waiting_for_output`（每约 5 分钟一条心跳）；`http.jsonl` 里 `tag=history` 有没有 404。**ComfyUI 重启过的话 `/history` 是空的（内存态），任务取不回图，只能重跑** |
+| 提交报 400 / 提交被拒 | `http.jsonl` 里 `tag=prompt` 的记录带 ComfyUI 的原话；`submit-payloads.jsonl` 是实际发出去的载荷 |
+| 改了工作流却没生效 | `startup.json` 的 `data_dir` 与各目录可写性——直接看出挂载点对不对、是不是挂到了空的卷上 |
+| 出图了但没保存下来 | `events.jsonl` 的 `save_retry`；`no_outputs` 事件会带上 ComfyUI 给的 `outputs` 原文 |
+| 提交时自动改了什么值 | `events.jsonl` 的 `repair_applied`，含每个字段纠正前后的值 |
+| 提示「所有必填都缺失」 | `events.jsonl` 的 `node_def_missing` / `widget_slots_unparsed`——多半是没拉到节点定义，而不是工作流坏了 |
+
+**注意**
+
+- 日志会记录**完整提示词内容**，排查完记得删掉 `.env` 里的 `DEBUG` 再 `docker compose up -d`。
+- 单个文件超过 16MB 会自动滚成 `.1`（只保留一代），忘记关也不会把数据卷写满。
+- `DEBUG` 关闭时不会创建 `debug/` 目录、不写任何文件，相关接口也不存在。
 
 ### 常用命令
 
@@ -215,14 +259,21 @@ comfyui-server/
 ├── backend/
 │   ├── go.mod
 │   └── cmd/server/
-│       ├── main.go            # 入口、路由、配置、数据库初始化、静态文件服务
+│       ├── main.go            # 入口、路由、配置、数据库初始化、启动快照、静态文件服务
 │       ├── comfyui.go         # ComfyUI 客户端、格式转换、提示词注入、图片下载
-│       ├── workflows.go       # 工作流 CRUD、参数自动识别
+│       ├── promptnodes.go     # 提示词落点识别（按结构解析，不认节点类型名）
+│       ├── widgetorder.go     # 老格式导出（裸位置数组）的控件顺序还原 + 定义缓存
+│       ├── repair.go          # 提交被拒时把串位的控件值挪回原位（只改本次载荷）
+│       ├── validate.go        # 提交前校验（节点定义来自实时 object_info）
+│       ├── workflows.go       # 工作流 CRUD、workflow_json 归一化
 │       ├── tasks.go           # 任务创建、查询、分页
 │       ├── prompts.go         # 提示词 CRUD、批量操作、分组
 │       ├── json.go            # JSON 文件上传、解析、入库
 │       ├── images.go          # 图片列表、详情、下载、删除（分页）
 │       ├── events.go          # SSE 事件推送、任务取消（含 ComfyUI 队列删除）
+│       ├── debug.go           # DEBUG 开关、落盘路径、事件流、启动快照
+│       ├── debugtrace.go      # 出站请求统一留痕（tracedDo）
+│       ├── debugapi.go        # 调试文件查看/下载/清空接口
 │       └── ...
 ├── frontend/
 │   ├── vite.config.ts         # Vite 配置，/api 代理到 localhost:8080
@@ -231,8 +282,7 @@ comfyui-server/
 │       ├── components/
 │       │   ├── AppShell.vue   # 布局框架（侧栏导航）
 │       │   ├── PageHeader.vue # 页面标题组件
-│       │   ├── Pagination.vue # 通用分页组件
-│       │   └── ParamForm.vue  # 动态参数表单
+│       │   └── Pagination.vue # 通用分页组件
 │       ├── views/
 │       │   ├── DashboardView.vue    # 概览首页
 │       │   ├── DirectSubmitView.vue # 直接提交
@@ -244,6 +294,7 @@ comfyui-server/
 │       │   ├── TaskDetailView.vue   # 任务详情（SSE 实时进度）
 │       │   ├── GalleryView.vue      # 图片库（分页、灯箱预览）
 │       │   ├── JsonFilesView.vue    # JSON 文件管理（分页）
+│       │   ├── DebugView.vue        # 调试日志（仅 DEBUG 开启时出现在侧栏）
 │       │   └── SettingsView.vue     # 设置页
 │       ├── router/index.ts    # 路由配置
 │       ├── style.css          # 全局设计系统样式

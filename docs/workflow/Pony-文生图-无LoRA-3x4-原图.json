@@ -1,0 +1,473 @@
+{
+  "id": "cd3a865f-905e-4722-8a46-392bfd6fc5ce",
+  "revision": 0,
+  "last_node_id": 8,
+  "last_link_id": 9,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "CheckpointLoaderSimple",
+      "pos": [
+        -560,
+        200
+      ],
+      "size": [
+        340,
+        98
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "label": "MODEL",
+          "name": "MODEL",
+          "type": "MODEL",
+          "slot_index": 0,
+          "links": [
+            6
+          ]
+        },
+        {
+          "label": "CLIP",
+          "name": "CLIP",
+          "type": "CLIP",
+          "slot_index": 1,
+          "links": [
+            1,
+            2
+          ]
+        },
+        {
+          "label": "VAE",
+          "name": "VAE",
+          "type": "VAE",
+          "slot_index": 2,
+          "links": [
+            8
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.36.0",
+        "Node name for S&R": "CheckpointLoaderSimple"
+      },
+      "widgets_values": [
+        "ponyDiffusionV6XL_v6StartWithThisOne.safetensors"
+      ],
+      "widgets_values_named": {
+        "ckpt_name": "ponyDiffusionV6XL_v6StartWithThisOne.safetensors"
+      }
+    },
+    {
+      "id": 2,
+      "type": "CLIPTextEncode",
+      "pos": [
+        -160,
+        60
+      ],
+      "size": [
+        340,
+        130
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "clip",
+          "name": "clip",
+          "type": "CLIP",
+          "link": 1
+        }
+      ],
+      "outputs": [
+        {
+          "label": "CONDITIONING",
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "slot_index": 0,
+          "links": [
+            3
+          ]
+        }
+      ],
+      "title": "正向提示词",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.36.0",
+        "Node name for S&R": "CLIPTextEncode"
+      },
+      "widgets_values": [
+        ""
+      ],
+      "widgets_values_named": {
+        "text": ""
+      }
+    },
+    {
+      "id": 3,
+      "type": "CLIPTextEncode",
+      "pos": [
+        -160,
+        250
+      ],
+      "size": [
+        340,
+        130
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "clip",
+          "name": "clip",
+          "type": "CLIP",
+          "link": 2
+        }
+      ],
+      "outputs": [
+        {
+          "label": "CONDITIONING",
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "slot_index": 0,
+          "links": [
+            4
+          ]
+        }
+      ],
+      "title": "负向提示词",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.36.0",
+        "Node name for S&R": "CLIPTextEncode"
+      },
+      "widgets_values": [
+        "score_6, score_5, score_4, source_pony, source_furry, mechanical joints, robotic limbs, cyborg, metal parts, gears, lowres, bad anatomy, bad hands, extra fingers, missing fingers, extra limbs, deformed, jpeg artifacts, watermark, text, signature"
+      ],
+      "widgets_values_named": {
+        "text": "score_6, score_5, score_4, source_pony, source_furry, mechanical joints, robotic limbs, cyborg, metal parts, gears, lowres, bad anatomy, bad hands, extra fingers, missing fingers, extra limbs, deformed, jpeg artifacts, watermark, text, signature"
+      }
+    },
+    {
+      "id": 4,
+      "type": "EmptyLatentImage",
+      "pos": [
+        -160,
+        430
+      ],
+      "size": [
+        340,
+        106
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "label": "LATENT",
+          "name": "LATENT",
+          "type": "LATENT",
+          "slot_index": 0,
+          "links": [
+            5
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.36.0",
+        "Node name for S&R": "EmptyLatentImage"
+      },
+      "widgets_values": [
+        864,
+        1152,
+        1
+      ],
+      "widgets_values_named": {
+        "width": 864,
+        "height": 1152,
+        "batch_size": 1
+      },
+      "title": "864x1152"
+    },
+    {
+      "id": 5,
+      "type": "KSampler",
+      "pos": [
+        250,
+        60
+      ],
+      "size": [
+        320,
+        262
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "model",
+          "name": "model",
+          "type": "MODEL",
+          "link": 6
+        },
+        {
+          "label": "positive",
+          "name": "positive",
+          "type": "CONDITIONING",
+          "link": 3
+        },
+        {
+          "label": "negative",
+          "name": "negative",
+          "type": "CONDITIONING",
+          "link": 4
+        },
+        {
+          "label": "latent_image",
+          "name": "latent_image",
+          "type": "LATENT",
+          "link": 5
+        }
+      ],
+      "outputs": [
+        {
+          "label": "LATENT",
+          "name": "LATENT",
+          "type": "LATENT",
+          "slot_index": 0,
+          "links": [
+            7
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.36.0",
+        "Node name for S&R": "KSampler"
+      },
+      "widgets_values": [
+        180499645335090,
+        "randomize",
+        30,
+        6.5,
+        "dpmpp_2m",
+        "karras",
+        1
+      ],
+      "widgets_values_named": {
+        "seed": 180499645335090,
+        "control_after_generate": "randomize",
+        "steps": 30,
+        "cfg": 6.5,
+        "sampler_name": "dpmpp_2m",
+        "scheduler": "karras",
+        "denoise": 1
+      }
+    },
+    {
+      "id": 6,
+      "type": "VAEDecode",
+      "pos": [
+        620,
+        60
+      ],
+      "size": [
+        210,
+        46
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "samples",
+          "name": "samples",
+          "type": "LATENT",
+          "link": 7
+        },
+        {
+          "label": "vae",
+          "name": "vae",
+          "type": "VAE",
+          "link": 8
+        }
+      ],
+      "outputs": [
+        {
+          "label": "IMAGE",
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "slot_index": 0,
+          "links": [
+            9
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.36.0",
+        "Node name for S&R": "VAEDecode"
+      }
+    },
+    {
+      "id": 7,
+      "type": "SaveImage",
+      "pos": [
+        880,
+        60
+      ],
+      "size": [
+        340,
+        270
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "images",
+          "name": "images",
+          "type": "IMAGE",
+          "link": 9
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.36.0"
+      },
+      "widgets_values": [
+        "Pony-T2I-noLora-3x4-raw"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "Pony-T2I-noLora-3x4-raw"
+      }
+    },
+    {
+      "id": 8,
+      "type": "MarkdownNote",
+      "mode": 0,
+      "pos": [
+        -780,
+        -280
+      ],
+      "size": [
+        660,
+        320
+      ],
+      "flags": {},
+      "order": 7,
+      "inputs": [],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": [
+        "# Pony-文生图-无LoRA-3x4-原图\n\n- 旧名：`Pony-文生图`\n- 命名规则：底模-任务-LoRA实名+强度-比例[-变体段]-输出档\n- LoRA 实名段 `无LoRA` 由 LoraLoader 节点反查生成，已与文件名核对一致\n- 业务：Pony V6 XL 动漫线 · 原图档。832×1216，采样器统一 dpmpp_2m/karras、cfg 6.5、30 步。\n- 配对：成图档：Pony-文生图-无LoRA-2x3-放大\n- 落盘前缀（ASCII，ComfyUI /view 不做 URL 编码故不能用中文）：`Pony-T2I-noLora-3x4-raw`\n- 提示词：正向由 comfyui-server 提交时注入（节点已留空），负向保持原样\n- seed 已统一 randomize（服务端不覆写 seed，fixed 会让批量提交出同一张图）\n\n- 变更记录（2026-10-03 第二轮）：由 `Pony-文生图-无LoRA-2x3-原图` 调整而来。原生 832×1216(2:3 桶) → 864×1152，SDXL 精确 3:4 桶\n"
+      ],
+      "title": "工作流说明（命名/溯源）"
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      1,
+      2,
+      0,
+      "CLIP"
+    ],
+    [
+      2,
+      1,
+      1,
+      3,
+      0,
+      "CLIP"
+    ],
+    [
+      3,
+      2,
+      0,
+      5,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      4,
+      3,
+      0,
+      5,
+      2,
+      "CONDITIONING"
+    ],
+    [
+      5,
+      4,
+      0,
+      5,
+      3,
+      "LATENT"
+    ],
+    [
+      6,
+      1,
+      0,
+      5,
+      0,
+      "MODEL"
+    ],
+    [
+      7,
+      5,
+      0,
+      6,
+      0,
+      "LATENT"
+    ],
+    [
+      8,
+      1,
+      2,
+      6,
+      1,
+      "VAE"
+    ],
+    [
+      9,
+      6,
+      0,
+      7,
+      0,
+      "IMAGE"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.6908333333333333,
+      "offset": [
+        1195.2111271580973,
+        362.11462534868815
+      ]
+    },
+    "frontendVersion": "1.52.7",
+    "VHS_latentpreview": false,
+    "VHS_latentpreviewrate": 0,
+    "VHS_MetadataImage": true,
+    "VHS_KeepIntermediate": true
+  },
+  "version": 0.4
+}

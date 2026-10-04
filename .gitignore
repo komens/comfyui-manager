@@ -15,3 +15,9 @@ frontend/dist/
 
 # 个人调试脚本，不随项目分发
 submit.py
+
+# 画风探针/对照组的工作流草稿，与 docs/workflow 正式库重叠，只留本机
+style-tests/
+
+# 根目录的历史重复导出（同内容已以规范名收进 docs/workflow）
+/z-image-turbo-juru-lora.json

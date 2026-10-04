@@ -222,17 +222,17 @@ func (a *app) getTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items := make([]map[string]any, 0)
-	rows, rowsErr := a.db.QueryContext(r.Context(), `SELECT id, prompt_id, positive_prompt, COALESCE(comfy_prompt_id,''), status, error_message FROM generation_items WHERE task_id=? ORDER BY id`, id)
+	rows, rowsErr := a.db.QueryContext(r.Context(), `SELECT id, prompt_id, positive_prompt, COALESCE(comfy_prompt_id,''), status, error_message, COALESCE(notes,'') FROM generation_items WHERE task_id=? ORDER BY id`, id)
 	if rowsErr == nil {
 		defer rows.Close()
 		for rows.Next() {
 			var itemID int
 			var promptID sql.NullInt64
-			var positive, promptIDStr, itemStatus, itemError string
-			if err := rows.Scan(&itemID, &promptID, &positive, &promptIDStr, &itemStatus, &itemError); err == nil {
+			var positive, promptIDStr, itemStatus, itemError, itemNotes string
+			if err := rows.Scan(&itemID, &promptID, &positive, &promptIDStr, &itemStatus, &itemError, &itemNotes); err == nil {
 				items = append(items, map[string]any{"id": itemID, "prompt_id": promptID.Int64,
 					"positive_prompt": positive, "comfy_prompt_id": promptIDStr,
-					"status": itemStatus, "error_message": itemError})
+					"status": itemStatus, "error_message": itemError, "notes": itemNotes})
 			}
 		}
 	}

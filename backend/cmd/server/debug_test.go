@@ -14,7 +14,16 @@ func TestDebugSwitch(t *testing.T) {
 	dataDir := t.TempDir()
 	logger := log.New(io.Discard, "", 0)
 
-	reset := func() { debugOn = false; submitDumpPath = "" }
+	// 全部变量一起重置：initDebug 在「关闭」分支会提前 return，
+	// 只清 debugOn 的话上一轮留下的路径会串到下一轮。
+	reset := func() {
+		debugOn = false
+		debugDir = ""
+		submitDumpPath = ""
+		debugHTTPPath = ""
+		debugEventPath = ""
+		debugStartupPath = ""
+	}
 
 	// 默认关闭
 	t.Setenv("DEBUG", "")

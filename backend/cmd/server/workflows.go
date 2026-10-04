@@ -1,13 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +20,9 @@ import (
 // Description / NegativePrompt 用指针是为了区分「没传这个字段」和「传了空串」：
 // nil = 保持原值，"" = 清空。用普通 string 时二者无法区分——曾经同一个函数里
 // description 是「空=不改」、negative_prompt 是「空=清空」，结果两个字段各缺一半语义。
+//
+// ParamsSchema 只剩兼容用途：新版本不再解析工作流的可编辑参数，收到就当没看见。
+// 留着是为了让浏览器里缓存了旧前端的情况不至于直接报「未知字段」。
 type workflowInput struct {
 	Name           string          `json:"name"`
 	Description    *string         `json:"description"`
@@ -37,13 +40,79 @@ func strOrFallback(value *string, fallback string) string {
 	return *value
 }
 
+// maxWorkflowJSONLayers 限制剥离层数。正常只有「对象」和「被当字符串传的 JSON」
+// 两种形态，多留两层是兜畸形输入，同时防止「字符串里还是字符串」无限剥下去。
+const maxWorkflowJSONLayers = 3
+
+// normalizeWorkflowJSON 把 workflow_json 统一成「对象」的原始 JSON。
+//
+// 客户端有两种送法，都得认：直接给对象（本系统前端就是 JSON.parse 后发的），
+// 或者把导出文件的原文当字符串塞进来（curl、脚本、别家导出工具都这么干）。
+// 后者若原样落盘，文件内容会多出一层引号（"{\"nodes\":...}"），此后每次提交都报
+//
+//	parse workflow failed: json: cannot unmarshal string into Go value of type map[string]interface {}
+//
+// 而根源只是那层多余的引号——「我导出的工作流给你跑不了」里最常见的一种。
+//
+// 剥不动就原样返回：合法性由调用方按自己的语境判断，这里只负责形态。
+func normalizeWorkflowJSON(raw json.RawMessage) json.RawMessage {
+	trimmed := bytes.TrimSpace(raw)
+	for depth := 0; depth < maxWorkflowJSONLayers && len(trimmed) > 0 && trimmed[0] == '"'; depth++ {
+		var inner string
+		if err := json.Unmarshal(trimmed, &inner); err != nil {
+			return trimmed
+		}
+		next := bytes.TrimSpace([]byte(inner))
+		if len(next) == 0 || !json.Valid(next) {
+			return trimmed
+		}
+		trimmed = next
+	}
+	return trimmed
+}
+
+// decodeWorkflowBody 从请求体里取工作流 JSON 并归一化形态。
+//
+// 三个入口（创建 / 更新 / 校验）都从这里走，保证「接口收到的」和「落盘 / 校验的」
+// 是同一份形态。返回 false 表示已经写过响应（调用方直接 return）。
+func decodeWorkflowBody(w http.ResponseWriter, raw json.RawMessage, requiredField string) (json.RawMessage, bool) {
+	normalized := normalizeWorkflowJSON(raw)
+	if !json.Valid(normalized) {
+		writeError(w, http.StatusBadRequest, requiredField+" must be valid JSON")
+		return nil, false
+	}
+	var probe any
+	if err := json.Unmarshal(normalized, &probe); err != nil {
+		writeError(w, http.StatusBadRequest, requiredField+" must be valid JSON")
+		return nil, false
+	}
+	if _, isObject := probe.(map[string]any); !isObject {
+		// 字符串/数组/数字都不是工作流。明确报出来，别让它落盘成一个
+		// 每次提交都失败、却看不出原因的文件。
+		writeError(w, http.StatusBadRequest, requiredField+" must be a JSON object")
+		return nil, false
+	}
+	return normalized, true
+}
+
+// readWorkflowFile 读工作流文件并归一化形态。
+// 老库里可能存着多一层引号的畸形文件，读的时候顺手纠正——不必去改用户的文件，
+// 也能让这些存量数据继续跑。
+func readWorkflowFile(path string) ([]byte, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return normalizeWorkflowJSON(raw), nil
+}
+
 func (a *app) listWorkflows(w http.ResponseWriter, r *http.Request) {
 	// 统计总数
 	var total int
 	_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM workflows`).Scan(&total)
 	// 分页
 	page, pageSize, offset := parsePagination(r)
-	rows, err := a.db.QueryContext(r.Context(), `SELECT id, name, description, workflow_path, mapping_json, COALESCE(negative_prompt,''), params_schema, enabled, is_default, created_at, updated_at,
+	rows, err := a.db.QueryContext(r.Context(), `SELECT id, name, description, workflow_path, mapping_json, COALESCE(negative_prompt,''), enabled, is_default, created_at, updated_at,
 		(SELECT COUNT(*) FROM generation_tasks t WHERE t.workflow_id=workflows.id),
 		(SELECT COUNT(*) FROM generation_tasks t WHERE t.workflow_id=workflows.id AND t.status IN ('pending','running'))
 		FROM workflows ORDER BY id DESC LIMIT ? OFFSET ?`, pageSize, offset)
@@ -55,16 +124,16 @@ func (a *app) listWorkflows(w http.ResponseWriter, r *http.Request) {
 	items := make([]map[string]any, 0)
 	for rows.Next() {
 		var id, enabled, isDefault int
-		var name, description, path, mapping, negative, schema, created, updated string
+		var name, description, path, mapping, negative, created, updated string
 		var taskCount, inFlight int
-		if err := rows.Scan(&id, &name, &description, &path, &mapping, &negative, &schema, &enabled, &isDefault, &created, &updated, &taskCount, &inFlight); err != nil {
+		if err := rows.Scan(&id, &name, &description, &path, &mapping, &negative, &enabled, &isDefault, &created, &updated, &taskCount, &inFlight); err != nil {
 			writeError(w, http.StatusInternalServerError, "read workflow failed")
 			return
 		}
 		items = append(items, map[string]any{"id": id, "name": name, "description": description,
 			"workflow_path": path, "mapping": json.RawMessage(mapping),
-			"negative_prompt": negative, "params_schema": json.RawMessage(schema),
-			"enabled": enabled == 1, "is_default": isDefault == 1, "created_at": created, "updated_at": updated,
+			"negative_prompt": negative,
+			"enabled":         enabled == 1, "is_default": isDefault == 1, "created_at": created, "updated_at": updated,
 			"task_count": taskCount, "in_flight": inFlight})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "page": page, "page_size": pageSize})
@@ -77,28 +146,21 @@ func (a *app) createWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := strings.TrimSpace(input.Name)
-	var workflow any
-	if err := json.Unmarshal(input.WorkflowJSON, &workflow); err != nil {
-		writeError(w, http.StatusBadRequest, "workflow_json must be valid JSON")
+	workflowJSON, ok := decodeWorkflowBody(w, input.WorkflowJSON, "workflow_json")
+	if !ok {
 		return
 	}
 	mapping := input.Mapping
-	if len(mapping) == 0 {
-		mapping = json.RawMessage(`{}`)
-	}
-	if !json.Valid(mapping) {
+	if len(mapping) > 0 && !json.Valid(mapping) {
 		writeError(w, http.StatusBadRequest, "mapping must be valid JSON")
 		return
 	}
-	schema := input.ParamsSchema
-	if len(schema) == 0 {
-		schema = json.RawMessage(`{}`)
+	// 编辑器没选的那一侧由自动识别补上：导入即用，不需要先点「识别」再保存——
+	// 「配一个新工作流就报错」最常见的来源就是这一步。
+	mapping = mergePromptMapping(mapping, workflowJSON)
+	if len(mapping) == 0 {
+		mapping = json.RawMessage(`{}`)
 	}
-	if !json.Valid(schema) {
-		writeError(w, http.StatusBadRequest, "params_schema must be valid JSON")
-		return
-	}
-	mapping = syncMappingDefaults(mapping, schema)
 	description := strOrFallback(input.Description, "")
 	negative := strOrFallback(input.NegativePrompt, "")
 
@@ -110,8 +172,8 @@ func (a *app) createWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := tx.ExecContext(r.Context(),
-		`INSERT INTO workflows(name, description, workflow_path, mapping_json, negative_prompt, params_schema, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?)`,
-		name, description, "", string(mapping), negative, string(schema), time.Now(), time.Now())
+		`INSERT INTO workflows(name, description, workflow_path, mapping_json, negative_prompt, created_at, updated_at) VALUES(?,?,?,?,?,?,?)`,
+		name, description, "", string(mapping), negative, time.Now(), time.Now())
 	if err != nil {
 		_ = tx.Rollback()
 		writeError(w, http.StatusInternalServerError, "save workflow failed")
@@ -120,7 +182,7 @@ func (a *app) createWorkflow(w http.ResponseWriter, r *http.Request) {
 	id, _ := result.LastInsertId()
 	// 只存文件名，读取时按当前 dataDir 解析（避免绑定启动目录）
 	fileName := workflowFileName(name, id)
-	if err := writeAtomic(filepath.Join(a.dataDir, "workflows", fileName), input.WorkflowJSON); err != nil {
+	if err := writeAtomic(filepath.Join(a.dataDir, "workflows", fileName), workflowJSON); err != nil {
 		_ = tx.Rollback()
 		writeError(w, http.StatusInternalServerError, "save workflow file failed")
 		return
@@ -135,8 +197,7 @@ func (a *app) createWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "name": name, "workflow_path": fileName,
-		"mapping": json.RawMessage(mapping), "negative_prompt": negative,
-		"params_schema": json.RawMessage(schema)})
+		"mapping": json.RawMessage(mapping), "negative_prompt": negative})
 }
 
 func (a *app) getWorkflow(w http.ResponseWriter, r *http.Request) {
@@ -145,16 +206,16 @@ func (a *app) getWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid workflow id")
 		return
 	}
-	var name, description, path, mapping, negative, schema, created, updated string
+	var name, description, path, mapping, negative, created, updated string
 	var enabled, isDefault int
 	err = a.db.QueryRowContext(r.Context(),
-		`SELECT name, description, workflow_path, mapping_json, COALESCE(negative_prompt,''), params_schema, enabled, is_default, created_at, updated_at FROM workflows WHERE id=?`, id).
-		Scan(&name, &description, &path, &mapping, &negative, &schema, &enabled, &isDefault, &created, &updated)
+		`SELECT name, description, workflow_path, mapping_json, COALESCE(negative_prompt,''), enabled, is_default, created_at, updated_at FROM workflows WHERE id=?`, id).
+		Scan(&name, &description, &path, &mapping, &negative, &enabled, &isDefault, &created, &updated)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "workflow not found")
 		return
 	}
-	workflowJSON, err := os.ReadFile(a.workflowFilePath(path))
+	workflowJSON, err := readWorkflowFile(a.workflowFilePath(path))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "read workflow file failed")
 		return
@@ -162,8 +223,8 @@ func (a *app) getWorkflow(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id": id, "name": name, "description": description, "workflow_path": filepath.Base(path),
 		"workflow_json": json.RawMessage(workflowJSON), "mapping": json.RawMessage(mapping),
-		"negative_prompt": negative, "params_schema": json.RawMessage(schema),
-		"enabled": enabled == 1, "is_default": isDefault == 1, "created_at": created, "updated_at": updated,
+		"negative_prompt": negative,
+		"enabled":         enabled == 1, "is_default": isDefault == 1, "created_at": created, "updated_at": updated,
 	})
 }
 
@@ -224,10 +285,10 @@ func (a *app) updateWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	var oldPath, oldMapping, oldName, oldDescription, oldNegative, oldSchema string
+	var oldPath, oldMapping, oldName, oldDescription, oldNegative string
 	err = a.db.QueryRowContext(r.Context(),
-		`SELECT name, description, workflow_path, mapping_json, COALESCE(negative_prompt,''), params_schema FROM workflows WHERE id=?`, id).
-		Scan(&oldName, &oldDescription, &oldPath, &oldMapping, &oldNegative, &oldSchema)
+		`SELECT name, description, workflow_path, mapping_json, COALESCE(negative_prompt,'') FROM workflows WHERE id=?`, id).
+		Scan(&oldName, &oldDescription, &oldPath, &oldMapping, &oldNegative)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "workflow not found")
 		return
@@ -238,40 +299,45 @@ func (a *app) updateWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 	// 归一化为文件名（兼容旧数据里的 "./data/workflows/x.json"）
 	path := filepath.Base(oldPath)
-	mapping := oldMapping
 	if len(input.WorkflowJSON) > 0 {
-		var workflow any
-		if err := json.Unmarshal(input.WorkflowJSON, &workflow); err != nil {
-			writeError(w, http.StatusBadRequest, "workflow_json must be valid JSON")
+		workflowJSON, ok := decodeWorkflowBody(w, input.WorkflowJSON, "workflow_json")
+		if !ok {
 			return
 		}
+		input.WorkflowJSON = workflowJSON // 后面的自动识别与落盘都用归一化后的形态
 		path = workflowFileName(name, id)
-		if err := writeAtomic(filepath.Join(a.dataDir, "workflows", path), input.WorkflowJSON); err != nil {
+		if err := writeAtomic(filepath.Join(a.dataDir, "workflows", path), workflowJSON); err != nil {
 			writeError(w, http.StatusInternalServerError, "save workflow file failed")
 			return
 		}
 	}
-	if len(input.Mapping) > 0 {
-		if !json.Valid(input.Mapping) {
-			writeError(w, http.StatusBadRequest, "mapping must be valid JSON")
-			return
+	if len(input.Mapping) > 0 && !json.Valid(input.Mapping) {
+		writeError(w, http.StatusBadRequest, "mapping must be valid JSON")
+		return
+	}
+	// 拿哪份工作流做自动识别：优先请求里带的新内容，其次是已经存着的那份。
+	// 换了工作流却不重新识别的话，旧映射会冲着旧节点 id 写，提示词就打偏了。
+	detectSource := input.WorkflowJSON
+	if len(detectSource) == 0 {
+		stored, err := os.ReadFile(a.workflowFilePath(path))
+		if err == nil {
+			detectSource = stored
 		}
-		mapping = string(input.Mapping)
+	}
+	provided := input.Mapping
+	if len(provided) == 0 {
+		provided = json.RawMessage(oldMapping)
+	}
+	mapping := "{}"
+	if merged := mergePromptMapping(provided, detectSource); len(merged) > 0 {
+		mapping = string(merged)
 	}
 	// nil = 请求里没带这个字段（保持原值）；非 nil = 以请求为准，空串即清空
 	description := strOrFallback(input.Description, oldDescription)
 	negative := strOrFallback(input.NegativePrompt, oldNegative)
-	schema := string(input.ParamsSchema)
-	if len(input.ParamsSchema) == 0 {
-		schema = oldSchema
-	} else if !json.Valid(input.ParamsSchema) {
-		writeError(w, http.StatusBadRequest, "params_schema must be valid JSON")
-		return
-	}
-	mapping = string(syncMappingDefaults(json.RawMessage(mapping), json.RawMessage(schema)))
 	_, err = a.db.ExecContext(r.Context(),
-		`UPDATE workflows SET name=?, description=?, workflow_path=?, mapping_json=?, negative_prompt=?, params_schema=?, updated_at=? WHERE id=?`,
-		name, description, path, mapping, negative, schema, time.Now(), id)
+		`UPDATE workflows SET name=?, description=?, workflow_path=?, mapping_json=?, negative_prompt=?, updated_at=? WHERE id=?`,
+		name, description, path, mapping, negative, time.Now(), id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "update workflow failed")
 		return
@@ -281,59 +347,77 @@ func (a *app) updateWorkflow(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "name": name, "workflow_path": path, "mapping": json.RawMessage(mapping)})
 }
 
-// syncMappingDefaults 把 params_schema 的默认值同步进 mapping.parameters，消除第二份副本。
+// buildPromptMapping 把解析结果转成要落库的映射。
 //
-// 「参数默认值」在库里存了两处：mapping_json.parameters[].default 与 params_schema[].default。
-// 前端表单只读 params_schema；但后端 injectDirectPrompt 在参数缺键时会退回 mapping 里的
-// default（典型是 visible:false 的隐藏参数——ParamForm 不会渲染、也就不会提交）。两处一旦
-// 漂移，就会出现「改了工作流参数，重跑却还是旧值」，且现场只表现为参数没生效，极难定位。
-// 这里统一以 params_schema 为准：同一份默认值只有一个真源。
+// 负向与正向同源时**不写进映射**：那种工作流没有独立的负向文本框，存进去只会让
+// 编辑器显示一个「选了也不生效」的节点。留空即表示「提交时自动解析」，结果一样。
+func buildPromptMapping(targets promptTargets) promptMapping {
+	mapping := promptMapping{}
+	if targets.Positive != nil {
+		mapping.Positive = *targets.Positive
+	}
+	if targets.Negative != nil && !targets.NegativeShared {
+		mapping.Negative = *targets.Negative
+	}
+	return mapping
+}
+
+// autoDetectPromptMapping 识别一份工作流该把正负向提示词写到哪里。
 //
-// 只覆盖两边**同名**的参数；mapping 里手工加过、schema 里没有的条目原样保留。
-func syncMappingDefaults(mapping, schema json.RawMessage) json.RawMessage {
-	if len(mapping) == 0 || len(schema) == 0 {
-		return mapping
+// 走离线路径（UI 导出格式图遍历，见 promptnodes.go）：导入工作流不该依赖 ComfyUI
+// 在线。更老的导出格式（连 widgets_values_named 都没有）只能解析出节点 id，
+// 字段名留到提交时再定——那时 API 格式已经还原好了。
+//
+// 解析不出任何落点时返回 nil，调用方会把映射存成 {}，提交时再自动解析一遍。
+func autoDetectPromptMapping(workflowRaw json.RawMessage) json.RawMessage {
+	var workflow map[string]any
+	if err := json.Unmarshal(workflowRaw, &workflow); err != nil {
+		return nil
 	}
-	var mappingDoc map[string]any
-	if err := json.Unmarshal(mapping, &mappingDoc); err != nil {
-		return mapping
+	targets := resolvePromptTargetsFromUI(workflow)
+	if _, isUIFormat := workflow["nodes"].([]any); !isUIFormat {
+		targets = resolvePromptTargets(workflow)
 	}
-	params, _ := mappingDoc["parameters"].(map[string]any)
-	if len(params) == 0 {
-		return mapping
+	if targets.Positive == nil && targets.Negative == nil {
+		return nil
 	}
-	var list []struct {
-		Name    string `json:"name"`
-		Default any    `json:"default"`
-	}
-	if err := json.Unmarshal(schema, &list); err != nil {
-		return mapping
-	}
-	changed := false
-	for _, s := range list {
-		if s.Name == "" || s.Default == nil {
-			continue
-		}
-		entry, ok := params[s.Name].(map[string]any)
-		if !ok {
-			continue
-		}
-		// 用 DeepEqual 而不是 ==：JSON 里的数组/对象反序列化成 slice/map，
-		// 这类不可比较类型直接用 == 会 panic。
-		if reflect.DeepEqual(entry["default"], s.Default) {
-			continue
-		}
-		entry["default"] = s.Default
-		changed = true
-	}
-	if !changed {
-		return mapping
-	}
-	out, err := json.Marshal(mappingDoc)
+	encoded, err := json.Marshal(buildPromptMapping(targets))
 	if err != nil {
-		return mapping
+		return nil
 	}
-	return out
+	return json.RawMessage(encoded)
+}
+
+// mergePromptMapping 把「编辑器里选好的落点」与「按结构自动识别的落点」合并。
+//
+// 每一侧以显式选择为准，没选的那一侧用自动识别的补上。这样编辑器里「留空」
+// 就永远等于「自动」——不会出现「把选择清空、旧节点却还留着」的错位。
+//
+// 每侧都记 node_id + field：同一个节点上可能同时有 prompt 和 negative_prompt
+// 两个框（TextEncodeQwenImage21），只记节点会让负向把正向盖掉。
+func mergePromptMapping(provided json.RawMessage, workflowJSON json.RawMessage) json.RawMessage {
+	var chosen promptMapping
+	if len(provided) > 0 {
+		if err := json.Unmarshal(provided, &chosen); err != nil {
+			return provided
+		}
+	}
+	if detected := autoDetectPromptMapping(workflowJSON); len(detected) > 0 {
+		var auto promptMapping
+		if err := json.Unmarshal(detected, &auto); err == nil {
+			if chosen.Positive.NodeID == "" {
+				chosen.Positive = auto.Positive
+			}
+			if chosen.Negative.NodeID == "" {
+				chosen.Negative = auto.Negative
+			}
+		}
+	}
+	merged, err := json.Marshal(chosen)
+	if err != nil {
+		return nil
+	}
+	return json.RawMessage(merged)
 }
 
 // workflowFileName 生成工作流文件的存储名。
@@ -428,8 +512,42 @@ func (a *app) deleteWorkflow(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "deleted": true})
 }
 
-// detectWorkflowParams 解析 workflow_json，自动识别可编辑参数并生成 mapping
-func (a *app) detectWorkflowParams(w http.ResponseWriter, r *http.Request) {
+// promptTargetsResponse 是「提示词落点」接口的返回体。
+type promptTargetsResponse struct {
+	// Detected 是按结构自动识别的结果（离线可算，不需要 ComfyUI 在线）。
+	Detected promptTargets `json:"detected"`
+	// Stored 是这份工作流已保存的映射——编辑器里手动选过的以它为准。
+	Stored promptMapping `json:"stored"`
+	// Candidates 是可供选择的提示词节点，供编辑器做成下拉框。
+	Candidates []promptCandidate `json:"candidates"`
+	// NegativeUnavailable 说明负向提示词为什么写不进去；空串表示没有这个问题。
+	NegativeUnavailable string `json:"negative_unavailable"`
+}
+
+// buildPromptTargetsResponse 组装落点信息。
+func buildPromptTargetsResponse(workflow map[string]any) promptTargetsResponse {
+	_, isUIFormat := workflow["nodes"].([]any)
+	detected := resolvePromptTargetsFromUI(workflow)
+	if !isUIFormat {
+		detected = resolvePromptTargets(workflow)
+	}
+	response := promptTargetsResponse{
+		Detected:   detected,
+		Candidates: collectPromptCandidates(workflow),
+	}
+	switch {
+	case detected.NegativeShared:
+		response.NegativeUnavailable = "这份工作流的负向由正向派生（ConditioningZeroOut 之类），没有独立的负向提示词节点，负向提示词不会生效。"
+	case detected.Negative == nil:
+		response.NegativeUnavailable = "未能自动识别负向提示词节点，请手动选择；选好后提交时会写进去。"
+	}
+	return response
+}
+
+// detectWorkflowPromptTargets 扫描请求体里的 workflow_json，返回落点与候选节点。
+//
+// 走的是不带 id 的通用入口，所以「还没保存的新工作流」也能先看落点再保存。
+func (a *app) detectWorkflowPromptTargets(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		WorkflowJSON json.RawMessage `json:"workflow_json"`
 	}
@@ -437,254 +555,47 @@ func (a *app) detectWorkflowParams(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "workflow_json is required")
 		return
 	}
+	normalized := normalizeWorkflowJSON(input.WorkflowJSON)
 	var workflow map[string]any
-	if err := json.Unmarshal(input.WorkflowJSON, &workflow); err != nil {
+	if err := json.Unmarshal(normalized, &workflow); err != nil {
 		writeError(w, http.StatusBadRequest, "workflow_json must be valid JSON")
 		return
 	}
-	params := make([]map[string]any, 0)
-	positiveNode, negativeNode := "", ""
-
-	// 归一化节点：同时支持 API 格式（nodeID 为键）和 UI 导出格式（nodes 数组）
-	type nodeInfo struct {
-		id        string
-		classType string
-		inputs    map[string]any
-	}
-	var nodes []nodeInfo
-	if rawNodes, ok := workflow["nodes"].([]any); ok {
-		// UI 导出格式
-		for _, raw := range rawNodes {
-			n, ok := raw.(map[string]any)
-			if !ok {
-				continue
-			}
-			id := fmt.Sprintf("%v", n["id"])
-			classType, _ := n["type"].(string)
-			inputs := parseUIWidgets(classType, n)
-			nodes = append(nodes, nodeInfo{id: id, classType: classType, inputs: inputs})
-		}
-	} else {
-		// API 格式
-		for nodeID, nodeRaw := range workflow {
-			node, ok := nodeRaw.(map[string]any)
-			if !ok {
-				continue
-			}
-			classType, _ := node["class_type"].(string)
-			inputs, _ := node["inputs"].(map[string]any)
-			if inputs == nil {
-				inputs = map[string]any{}
-			}
-			nodes = append(nodes, nodeInfo{id: nodeID, classType: classType, inputs: inputs})
-		}
-	}
-
-	for _, n := range nodes {
-		classType := n.classType
-		inputs := n.inputs
-		nodeID := n.id
-		switch {
-		case classType == "KSampler" || classType == "KSamplerAdvanced":
-			if v, ok := inputs["steps"]; ok {
-				params = append(params, map[string]any{"name": "steps", "label": "采样步数", "type": "integer", "node_id": nodeID, "field": "inputs.steps", "default": v})
-			}
-			if v, ok := inputs["cfg"]; ok {
-				params = append(params, map[string]any{"name": "cfg", "label": "CFG 系数", "type": "number", "node_id": nodeID, "field": "inputs.cfg", "default": v})
-			}
-			if _, ok := inputs["seed"]; ok {
-				params = append(params, map[string]any{"name": "seed", "label": "随机种子", "type": "seed", "node_id": nodeID, "field": "inputs.seed", "default": 0})
-			}
-		case classType == "EmptyLatentImage" || classType == "EmptySD3LatentImage":
-			if v, ok := inputs["width"]; ok {
-				params = append(params, map[string]any{"name": "width", "label": "宽度", "type": "integer", "node_id": nodeID, "field": "inputs.width", "default": v})
-			}
-			if v, ok := inputs["height"]; ok {
-				params = append(params, map[string]any{"name": "height", "label": "高度", "type": "integer", "node_id": nodeID, "field": "inputs.height", "default": v})
-			}
-			if v, ok := inputs["batch_size"]; ok {
-				params = append(params, map[string]any{"name": "batch_size", "label": "批量数量", "type": "integer", "node_id": nodeID, "field": "inputs.batch_size", "default": v})
-			}
-		case classType == "CheckpointLoaderSimple":
-			if v, ok := inputs["ckpt_name"]; ok {
-				params = append(params, map[string]any{"name": "checkpoint", "label": "模型", "type": "string", "node_id": nodeID, "field": "inputs.ckpt_name", "default": v})
-			}
-		default:
-			// 通用参数检测：跳过已知类型和连接类型输入
-			knownInputs := map[string]bool{
-				"steps": true, "cfg": true, "seed": true, "width": true, "height": true,
-				"batch_size": true, "ckpt_name": true, "text": true, "image": true,
-				"model": true, "clip": true, "vae": true, "positive": true, "negative": true,
-				"samples": true, "latent": true, "conditioning": true, "control_net": true,
-			}
-			for k, v := range inputs {
-				if knownInputs[k] {
-					continue
-				}
-				// 跳过连接类型（数组 [node_id, slot]）
-				if _, ok := v.([]any); ok {
-					continue
-				}
-				paramType := "string"
-				switch v.(type) {
-				case float64:
-					if v == float64(int(v.(float64))) {
-						paramType = "integer"
-					} else {
-						paramType = "number"
-					}
-				case bool:
-					paramType = "boolean"
-				}
-				if paramType == "string" {
-					if s, ok := v.(string); ok && len(s) > 200 {
-						continue // 跳过长文本
-					}
-				}
-				label := k
-				if len(label) > 30 {
-					label = label[:30]
-				}
-				params = append(params, map[string]any{
-					"name": fmt.Sprintf("%s_%s", classType, k), "label": label, "type": paramType,
-					"node_id": nodeID, "field": "inputs." + k, "default": v,
-				})
-			}
-		case classType == "CLIPTextEncode":
-			text, _ := inputs["text"].(string)
-			lower := strings.ToLower(text)
-			negKeywords := []string{"nsfw", "bad", "worst", "low quality", "低质量", "模糊", "畸形", "错误", "多余", "丑陋", "崩坏", "变形"}
-			isNegative := false
-			for _, kw := range negKeywords {
-				if strings.Contains(lower, strings.ToLower(kw)) {
-					isNegative = true
-					break
-				}
-			}
-			if isNegative {
-				if negativeNode == "" {
-					negativeNode = nodeID
-				}
-			} else if positiveNode == "" && text != "" {
-				positiveNode = nodeID
-			}
-		}
-	}
-	// 生成 mapping 建议
-	mapping := map[string]any{
-		"parameters": map[string]any{},
-	}
-	if positiveNode != "" {
-		mapping["positive_prompt"] = map[string]string{"node_id": positiveNode, "field": "inputs.text"}
-	}
-	if negativeNode != "" {
-		mapping["negative_prompt"] = map[string]string{"node_id": negativeNode, "field": "inputs.text"}
-	}
-	paramMap := map[string]any{}
-	for _, p := range params {
-		name, _ := p["name"].(string)
-		nodeID, _ := p["node_id"].(string)
-		field, _ := p["field"].(string)
-		if name == "seed" {
-			// seed 单独走 mapping.seed，避免被 parameters 循环用默认值 0 覆盖掉随机种子
-			mapping["seed"] = map[string]string{"node_id": nodeID, "field": field}
-			continue
-		}
-		// 带上 type/label/default：前端 ParamForm 靠 def.type 选控件类型，
-		// 只给 node_id/field 会让 steps、cfg、width 等全部退化成文本输入框。
-		entry := map[string]any{"node_id": nodeID, "field": field}
-		for _, key := range []string{"type", "label", "default"} {
-			if v, ok := p[key]; ok {
-				entry[key] = v
-			}
-		}
-		paramMap[name] = entry
-	}
-	mapping["parameters"] = paramMap
-	mappingJSON, _ := json.Marshal(mapping)
-	schemaJSON, _ := json.Marshal(params)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"params":        params,
-		"mapping":       json.RawMessage(mappingJSON),
-		"positive_node": positiveNode,
-		"negative_node": negativeNode,
-		"params_schema": json.RawMessage(schemaJSON),
-	})
+	writeJSON(w, http.StatusOK, buildPromptTargetsResponse(workflow))
 }
 
-// parseUIWidgets 将 ComfyUI UI 导出格式的 widgets_values 数组转换为 inputs 映射
-func parseUIWidgets(classType string, node map[string]any) map[string]any {
-	inputs := map[string]any{}
-	// 优先使用 widgets_values_named（精确 key-value，跳过 control_after_generate 等控制项）
-	if named, ok := node["widgets_values_named"].(map[string]any); ok {
-		for k, v := range named {
-			inputs[k] = v
-		}
-		return inputs
+// getWorkflowPromptTargets 读取已保存的工作流，返回落点、候选节点与已保存的映射。
+func (a *app) getWorkflowPromptTargets(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid workflow id")
+		return
 	}
-	widgets, ok := node["widgets_values"].([]any)
-	if !ok {
-		return inputs
+	var path, mapping string
+	if err := a.db.QueryRowContext(r.Context(),
+		`SELECT workflow_path, mapping_json FROM workflows WHERE id=?`, id).Scan(&path, &mapping); err != nil {
+		writeError(w, http.StatusNotFound, "workflow not found")
+		return
 	}
-	get := func(i int) (any, bool) {
-		if i < len(widgets) {
-			return widgets[i], true
-		}
-		return nil, false
+	workflowBytes, err := readWorkflowFile(a.workflowFilePath(path))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "read workflow file failed")
+		return
 	}
-	switch classType {
-	case "KSampler":
-		seedIdx, stepsIdx, cfgIdx := 0, 1, 2
-		if len(widgets) > 1 {
-			if _, isStr := widgets[1].(string); isStr {
-				stepsIdx, cfgIdx = 2, 3
-			}
-		}
-		if v, ok := get(seedIdx); ok {
-			inputs["seed"] = v
-		}
-		if v, ok := get(stepsIdx); ok {
-			inputs["steps"] = v
-		}
-		if v, ok := get(cfgIdx); ok {
-			inputs["cfg"] = v
-		}
-	case "KSamplerAdvanced":
-		if v, ok := get(1); ok {
-			inputs["seed"] = v
-		}
-		stepsIdx, cfgIdx := 2, 3
-		if len(widgets) > 3 {
-			if _, isStr := widgets[2].(string); isStr {
-				stepsIdx, cfgIdx = 3, 4
-			}
-		}
-		if v, ok := get(stepsIdx); ok {
-			inputs["steps"] = v
-		}
-		if v, ok := get(cfgIdx); ok {
-			inputs["cfg"] = v
-		}
-	case "EmptyLatentImage", "EmptySD3LatentImage":
-		if v, ok := get(0); ok {
-			inputs["width"] = v
-		}
-		if v, ok := get(1); ok {
-			inputs["height"] = v
-		}
-		if v, ok := get(2); ok {
-			inputs["batch_size"] = v
-		}
-	case "CheckpointLoaderSimple":
-		if v, ok := get(0); ok {
-			inputs["ckpt_name"] = v
-		}
-	case "CLIPTextEncode":
-		if v, ok := get(0); ok {
-			inputs["text"] = v
+	var workflow map[string]any
+	if err := json.Unmarshal(workflowBytes, &workflow); err != nil {
+		writeError(w, http.StatusInternalServerError, "parse workflow failed")
+		return
+	}
+	response := buildPromptTargetsResponse(workflow)
+	// 已保存的映射优先：用户可能手工选过，自动识别不能把它盖掉
+	if trimmed := strings.TrimSpace(mapping); trimmed != "" {
+		var stored promptMapping
+		if err := json.Unmarshal([]byte(trimmed), &stored); err == nil {
+			response.Stored = stored
 		}
 	}
-	return inputs
+	writeJSON(w, http.StatusOK, response)
 }
 
 // safeFilename 把工作流名转成文件名片段：在 macOS / Linux / Windows 上都安全，

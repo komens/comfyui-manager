@@ -11,7 +11,7 @@ function backToList() {
   backToListOr(router, '/tasks')
 }
 
-type TaskItem = { id: number; status: string; positive_prompt: string; negative_prompt: string; error_message: string; images?: { id: number; filename: string }[] }
+type TaskItem = { id: number; status: string; positive_prompt: string; negative_prompt: string; error_message: string; notes?: string; images?: { id: number; filename: string }[] }
 
 const route = useRoute()
 const router = useRouter()
@@ -164,6 +164,8 @@ onUnmounted(() => stream?.close())
         <div v-else-if="item.status === 'success' || item.status === 'completed'" class="ic-noimg text-xs">无结果图</div>
       </div>
       <div v-if="item.error_message" class="ic-error">{{ item.error_message }}</div>
+      <!-- 自动纠正说明：中性文案单独一栏。混进 error_message 会让成功项看起来像失败 -->
+      <div v-if="item.notes" class="ic-note">{{ item.notes }}</div>
     </div>
   </div>
 
@@ -221,6 +223,7 @@ onUnmounted(() => stream?.close())
 .ic-thumb:hover { border-color: var(--c-primary); }
 .ic-noimg { align-self: center; color: var(--c-muted); border: 1px dashed var(--c-border); border-radius: 10px; padding: 18px 14px; }
 .ic-error { margin-top: 8px; font-size: 12px; color: var(--c-danger); word-break: break-all; }
+.ic-note { margin-top: 8px; font-size: 12px; color: var(--c-warning, #b8860b); word-break: break-all; }
 .meta-details { padding: 0; }
 .meta-details summary { cursor: pointer; padding: 12px 16px; font-size: 13px; font-weight: 600; color: var(--c-muted); user-select: none; }
 .meta-body { padding: 0 16px 16px; }

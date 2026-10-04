@@ -405,7 +405,9 @@ onMounted(() => {
 
 <style scoped>
 .prompts-layout { display: grid; grid-template-columns: 220px 1fr; gap: 16px; }
-.groups-sidebar { padding: 12px; max-height: calc(100vh - 220px); display: flex; flex-direction: column; min-height: 0; }
+/* grid 子项默认 min-width:auto，刚性内容会撑爆列宽导致页面横向滚动 */
+.prompts-main { min-width: 0; }
+.groups-sidebar { min-width: 0; padding: 12px; max-height: calc(100vh - 220px); display: flex; flex-direction: column; min-height: 0; }
 .groups-title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--c-muted); padding: 4px 10px; margin-bottom: 6px; flex-shrink: 0; }
 .groups-list { overflow-y: auto; flex: 1; min-height: 0; margin: 0 -4px; padding: 0 4px; }
 .groups-list .group-item:first-child { margin-top: 0; }
@@ -446,6 +448,19 @@ onMounted(() => {
 .batch-info { font-size: 13px; font-weight: 600; color: var(--c-primary); margin-right: 4px; }
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 100; padding: 20px; }
 .modal { background: var(--c-card); border-radius: 12px; padding: 24px; width: 100%; max-width: 480px; max-height: 85vh; overflow-y: auto; box-shadow: var(--shadow-lg); }
+@media (max-width: 768px) {
+  /* 移动端防横向溢出：首排允许换行、按钮组收紧（对齐全局 .list-row 的保护策略） */
+  .prompt-card { padding: 12px; }
+  .pc-head { flex-wrap: wrap; row-gap: 8px; }
+  /* 断行按 flex-basis 假想宽度计算：标题 basis 设为整行减勾选框宽，
+     保证「勾选框+标题」恒为第一行（标题拉伸填满），徽章与操作恒为第二行；
+     若用 flex:1 1 0，短标题时徽章会留在第一行，行结构不稳定 */
+  .pc-title { flex: 1 1 calc(100% - 40px); }
+  /* 第二行：徽章靠左、操作靠右 */
+  .pc-actions { flex-wrap: wrap; justify-content: flex-end; }
+  .pc-cover { width: 72px; height: 72px; }
+  .pc-prompt { -webkit-line-clamp: 3; }
+}
 @media (max-width: 720px) {
   .prompts-layout { grid-template-columns: 1fr; }
   .groups-sidebar { max-height: 200px; }

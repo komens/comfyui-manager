@@ -10,6 +10,7 @@ import PromptsView from '../views/PromptsView.vue'
 import PromptDetailView from '../views/PromptDetailView.vue'
 import PromptEditView from '../views/PromptEditView.vue'
 import TaskListView from '../views/TaskListView.vue'
+import DebugView from '../views/DebugView.vue'
 
 // SPA 异步渲染下浏览器自动恢复滚动不可靠，关闭后交给下面的 scrollBehavior 延迟恢复
 if ('scrollRestoration' in window.history) {
@@ -52,6 +53,9 @@ export default createRouter({
     { path: '/tasks/:id', component: TaskDetailView },
     { path: '/gallery', component: GalleryView },
     { path: '/settings', component: SettingsView },
+    // 只在后端 DEBUG 开启时才有内容；没开时页面会给一份开启说明，
+    // 侧边栏入口也不会出现
+    { path: '/debug', component: DebugView },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],
 })

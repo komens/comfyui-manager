@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,6 +44,10 @@ type app struct {
 	// 仅 downloader 单个 goroutine 使用；加锁是为防止将来被并发调用时踩 map。
 	saveFailures map[int64]int
 	saveFailMu   sync.Mutex
+	// 卡在 submitted 的 item 已经等了几个轮询周期：itemID -> 轮数。
+	// 只在 DEBUG 开启时维护，用于每隔一段时间留一次「这个任务还在等」的痕。
+	waiting   map[int64]int
+	waitingMu sync.Mutex
 }
 
 type urlRequest struct {
@@ -74,7 +79,7 @@ func main() {
 	}
 	defer db.Close()
 
-	a := &app{db: db, log: log.New(os.Stdout, "comfyui-server ", log.LstdFlags), dataDir: cfg.DataDir, dbPath: cfg.DBPath, events: make(map[int64]map[chan []byte]struct{}), saveFailures: make(map[int64]int)}
+	a := &app{db: db, log: log.New(os.Stdout, "comfyui-server ", log.LstdFlags), dataDir: cfg.DataDir, dbPath: cfg.DBPath, events: make(map[int64]map[chan []byte]struct{}), saveFailures: make(map[int64]int), waiting: make(map[int64]int)}
 	if err := a.initDB(cfg.InitialComfyUI); err != nil {
 		log.Fatal(err)
 	}
@@ -82,6 +87,8 @@ func main() {
 		log.Fatal(err)
 	}
 	initDebug(cfg.DataDir, a.log)
+	// 启动快照要等库和 settings 都可用之后才写得出来，所以放在这里
+	dumpStartupSnapshot(a.startupSnapshot(cfg))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", a.health)
@@ -97,7 +104,14 @@ func main() {
 	mux.HandleFunc("PUT /api/workflows/{id}", a.updateWorkflow)
 	mux.HandleFunc("DELETE /api/workflows/{id}", a.deleteWorkflow)
 	mux.HandleFunc("PUT /api/workflows/{id}/default", a.setDefaultWorkflow)
-	mux.HandleFunc("POST /api/workflows/detect-params", a.detectWorkflowParams)
+	// 提示词落点：正负向各写到哪个节点的哪个字段。带 id 读库里那份，
+	// 不带 id 时用 body 里的 workflow_json（编辑态下还没保存也能看落点）。
+	mux.HandleFunc("POST /api/workflows/prompt-targets", a.detectWorkflowPromptTargets)
+	mux.HandleFunc("GET /api/workflows/{id}/prompt-targets", a.getWorkflowPromptTargets)
+	// 带 id 校验库里那份；不带 id 时用 body 里的 workflow_json
+	// （前端在「还没保存的新工作流」编辑态下也能先校验再保存）。
+	mux.HandleFunc("POST /api/workflows/validate", a.validateWorkflow)
+	mux.HandleFunc("POST /api/workflows/{id}/validate", a.validateWorkflow)
 	mux.HandleFunc("POST /api/tasks/direct", a.createDirectTask)
 	mux.HandleFunc("GET /api/tasks", a.listTasks)
 	mux.HandleFunc("POST /api/tasks/batch-cancel", a.batchCancelTasks)
@@ -137,6 +151,14 @@ func main() {
 	mux.HandleFunc("GET /api/version", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]string{"version": version})
 	})
+	// 调试接口只在 DEBUG 开启时注册。关闭时这些路径不被注册，会落到下面的
+	// 静态兜底 —— 而 /api/ 前缀在兜底里被显式判成 404，所以线上确实
+	// 不存在「可以下载日志」这个面。
+	if debugOn {
+		mux.HandleFunc("GET /api/debug/status", a.debugStatus)
+		mux.HandleFunc("GET /api/debug/files/{name}", a.debugDownload)
+		mux.HandleFunc("DELETE /api/debug/files/{name}", a.debugClear)
+	}
 	go a.submitter()
 	go a.downloader()
 	go a.recoverTasks()
@@ -146,6 +168,14 @@ func main() {
 		if _, err := os.Stat(cfg.StaticDir); err == nil {
 			staticFS := http.FileServer(http.Dir(cfg.StaticDir))
 			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+				// /api/ 下没被上面注册的路径 = 这个接口不存在，直接 404。
+				// 必须在这里截住：否则会落到下面的 SPA 兜底，返回 index.html
+				// （200 + text/html）——排查时会被误读成「接口在，只是返回怪东西」，
+				// 前端也拿不到准确的 404 来判断「这个能力没开」。
+				if strings.HasPrefix(r.URL.Path, "/api/") {
+					http.NotFound(w, r)
+					return
+				}
 				// Try to serve static file
 				path := filepath.Join(cfg.StaticDir, r.URL.Path)
 				if _, err := os.Stat(path); err == nil {
@@ -290,6 +320,9 @@ VALUES ('comfyui_url', ?, CURRENT_TIMESTAMP);
 		// 任务表冗余工作流名：删除工作流后历史任务仍能显示名字（配合 deleteWorkflow 放宽）
 		`ALTER TABLE generation_tasks ADD COLUMN workflow_name TEXT NOT NULL DEFAULT ''`,
 		`UPDATE generation_tasks SET workflow_name=(SELECT w.name FROM workflows w WHERE w.id=generation_tasks.workflow_id) WHERE workflow_name='' AND workflow_id IS NOT NULL`,
+		// 提交时的自动纠正说明（repair.go）。中性文案，不占 error_message——
+		// 那一栏是红色的「失败原因」，成功项上出现会让人以为出错了。
+		`ALTER TABLE generation_items ADD COLUMN notes TEXT NOT NULL DEFAULT ''`,
 	}
 	for _, stmt := range migrations {
 		if _, err := a.db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
@@ -345,6 +378,11 @@ func (a *app) recoverTasks() {
 		SELECT 1 FROM generation_items gi WHERE gi.task_id=generation_tasks.id AND gi.status IN ('submitted','running'))`)
 	if keptN > 0 || resetN > 0 {
 		a.log.Printf("recovered tasks: %d items kept in-flight (awaiting ComfyUI history), %d items reset to pending", keptN, resetN)
+		// 「重启后任务自己变了状态」是最容易让人怀疑数据被改的地方，留个记录。
+		debugEvent("recover", map[string]any{
+			"kept_in_flight": keptN,
+			"reset_pending":  resetN,
+		})
 	}
 }
 
@@ -396,11 +434,12 @@ func (a *app) testComfyUI(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/system_stats", nil)
 	if err == nil {
-		response, requestErr := http.DefaultClient.Do(request)
+		response, trace, requestErr := tracedDo(http.DefaultClient, request, "system_stats", 4096)
 		if requestErr == nil {
 			defer response.Body.Close()
 			_, _ = io.Copy(io.Discard, response.Body)
 			if response.StatusCode >= 200 && response.StatusCode < 300 {
+				trace.emit("reachable", nil)
 				writeJSON(w, http.StatusOK, map[string]any{"reachable": true, "url": baseURL, "latency_ms": time.Since(start).Milliseconds()})
 				return
 			}
@@ -410,6 +449,107 @@ func (a *app) testComfyUI(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusBadGateway, map[string]any{"reachable": false, "url": baseURL, "latency_ms": time.Since(start).Milliseconds(), "error": err.Error()})
+}
+
+// startupSnapshot 汇总「这台机器上的服务到底在读写哪些地方」。
+//
+// 起因：云端部署时 data 卷挂错、挂空、镜像与库结构对不上，症状都是
+// 「库里是空的」或「明明改了文件却没生效」，而日志里看不出来。
+// 写一份快照，出问题时先看它，比一处处试快得多。
+func (a *app) startupSnapshot(cfg config) map[string]any {
+	comfyURL, _ := a.setting(context.Background(), "comfyui_url")
+	paths := map[string]any{}
+	for name, path := range map[string]string{
+		"data":      cfg.DataDir,
+		"db":        filepath.Dir(cfg.DBPath),
+		"images":    filepath.Join(cfg.DataDir, "images"),
+		"workflows": filepath.Join(cfg.DataDir, "workflows"),
+		"json":      filepath.Join(cfg.DataDir, "json"),
+		"debug":     debugDir,
+		"static":    cfg.StaticDir,
+	} {
+		paths[name] = describePath(path)
+	}
+
+	counts := map[string]any{}
+	for name, query := range map[string]string{
+		"workflows":        `SELECT COUNT(*) FROM workflows`,
+		"generation_tasks": `SELECT COUNT(*) FROM generation_tasks`,
+		"generation_items": `SELECT COUNT(*) FROM generation_items`,
+		"images":           `SELECT COUNT(*) FROM images`,
+		"prompts":          `SELECT COUNT(*) FROM prompts`,
+	} {
+		var n int
+		if err := a.db.QueryRow(query).Scan(&n); err == nil {
+			counts[name] = n
+		} else {
+			counts[name] = err.Error()
+		}
+	}
+
+	return map[string]any{
+		"time":         time.Now().Format(time.RFC3339),
+		"version":      version,
+		"listen":       ":" + cfg.Port,
+		"pid":          os.Getpid(),
+		"go":           runtime.Version(),
+		"data_dir":     absOrSelf(cfg.DataDir),
+		"db_path":      absOrSelf(cfg.DBPath),
+		"static_dir":   absOrSelf(cfg.StaticDir),
+		"comfyui_url":  comfyURL,
+		"initial_url":  cfg.InitialComfyUI,
+		"paths":        paths,
+		"db_counts":    counts,
+		"journal_mode": journalMode(a.db),
+		// 关键列的存废直接反映「库结构跟得上镜像里的代码没有」。
+		// 老库挂到新镜像上，缺列的症状是各种莫名其妙的 SQL 错误。
+		"schema": map[string]any{
+			"generation_items.notes": columnExists(a.db, "generation_items", "notes"),
+			"workflows.is_default":   columnExists(a.db, "workflows", "is_default"),
+			"generation_tasks.name":  columnExists(a.db, "generation_tasks", "workflow_name"),
+			"prompts.is_favorite":    columnExists(a.db, "prompts", "is_favorite"),
+		},
+	}
+}
+
+func absOrSelf(path string) string {
+	if path == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		return abs
+	}
+	return path
+}
+
+func journalMode(db *sql.DB) string {
+	var mode string
+	if err := db.QueryRow(`PRAGMA journal_mode`).Scan(&mode); err != nil {
+		return "unknown: " + err.Error()
+	}
+	return mode
+}
+
+func columnExists(db *sql.DB, table, column string) bool {
+	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid, notNull, primaryKey int
+			name, columnType         string
+			defaultValue             any
+		)
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return false
+		}
+		if name == column {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *app) backupDatabase(w http.ResponseWriter, r *http.Request) {
