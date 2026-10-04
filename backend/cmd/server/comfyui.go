@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -378,7 +379,12 @@ func pollComfyHistory(ctx context.Context, baseURL, promptID string) (map[string
 }
 
 func downloadComfyImage(ctx context.Context, baseURL, filename, subfolder, imgType string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/view?filename=%s&subfolder=%s&type=%s", baseURL, filename, subfolder, imgType), nil)
+	// 查询串必须逐参数编码：ComfyUI 侧是 aiohttp，原始非 ASCII 字节（中文 SaveImage
+	// 前缀就会造出这种文件名）以及 & # 空格都会在解析层直接被拒，返回
+	// “Invalid char in url query” 的 400，请求根本进不到 handler。表现是图取不回来、
+	// 生成项一直停在 submitted，任务永远 running。
+	query := url.Values{"filename": {filename}, "subfolder": {subfolder}, "type": {imgType}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/view?%s", baseURL, query.Encode()), nil)
 	if err != nil {
 		return nil, err
 	}
