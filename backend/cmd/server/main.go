@@ -48,6 +48,8 @@ type app struct {
 	// 只在 DEBUG 开启时维护，用于每隔一段时间留一次「这个任务还在等」的痕。
 	waiting   map[int64]int
 	waitingMu sync.Mutex
+	// cleanup 是数据整理的回收站。由 initCleanup 赋值，为 nil 时相关接口返回 503。
+	cleanup *cleanupStore
 }
 
 type urlRequest struct {
@@ -84,6 +86,11 @@ func main() {
 		log.Fatal(err)
 	}
 	if err := os.MkdirAll(filepath.Join(cfg.DataDir, "images"), 0o755); err != nil {
+		log.Fatal(err)
+	}
+	// 回收站与索引要在服务对外之前就绪：initCleanup 会建 trash 目录与 cleanup_batches 表，
+	// 并补上条件删除依赖的索引（见 maintenance.go 里的说明）
+	if err := a.initCleanup(); err != nil {
 		log.Fatal(err)
 	}
 	initDebug(cfg.DataDir, a.log)
@@ -147,6 +154,17 @@ func main() {
 	mux.HandleFunc("POST /api/images/batch-delete", a.batchDeleteImages)
 	mux.HandleFunc("POST /api/images/batch-favorite", a.batchFavoriteImages)
 	mux.HandleFunc("PATCH /api/images/{id}/favorite", a.toggleImageFavorite)
+	// 数据整理：条件式批量清理 + 回收站。
+	// preview 只查不删，cleanup 才是破坏性操作且要求 confirm=true。
+	mux.HandleFunc("POST /api/maintenance/preview", a.previewCleanup)
+	mux.HandleFunc("POST /api/maintenance/cleanup", a.runCleanup)
+	mux.HandleFunc("GET /api/maintenance/stats", a.cleanupStatsHandler)
+	mux.HandleFunc("POST /api/maintenance/vacuum", a.runVacuum)
+	mux.HandleFunc("POST /api/maintenance/orphans/purge", a.purgeOrphans)
+	mux.HandleFunc("GET /api/maintenance/trash", a.listTrash)
+	mux.HandleFunc("GET /api/maintenance/trash/{id}", a.trashImages)
+	mux.HandleFunc("POST /api/maintenance/trash/{id}/restore", a.restoreTrash)
+	mux.HandleFunc("DELETE /api/maintenance/trash/{id}", a.purgeTrash)
 	mux.HandleFunc("GET /api/stats", a.getStats)
 	mux.HandleFunc("GET /api/version", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]string{"version": version})

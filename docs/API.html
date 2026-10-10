@@ -236,7 +236,7 @@ mark { background: #fff3a3; color: inherit; padding: 0 2px; border-radius: 2px; 
 <nav id="sidebar">
   <div class="brand">
     <h1>comfyui-server 接口文档</h1>
-    <p>11 章 · 65 节 · 54 个接口 · 153 张表</p>
+    <p>12 章 · 75 节 · 54 个接口 · 158 张表</p>
   </div>
   <div id="search-wrap">
     <input id="search" type="search" placeholder="搜索接口 / 字段…" autocomplete="off">
@@ -328,14 +328,27 @@ mark { background: #fff3a3; color: inherit; padding: 0 2px; border-radius: 2px; 
 <li><a href="#99-切换图片收藏">9.9 切换图片收藏</a></li>
 </ul>
 </li>
-<li><a href="#10-数据导入导出">10. 数据导入导出</a><ul>
-<li><a href="#101-导出-zip">10.1 导出 ZIP</a></li>
-<li><a href="#102-导入-zip">10.2 导入 ZIP</a></li>
+<li><a href="#10-数据整理接口">10. 数据整理接口</a><ul>
+<li><a href="#101-筛选条件">10.1 筛选条件</a></li>
+<li><a href="#102-预览清理结果">10.2 预览清理结果</a></li>
+<li><a href="#103-执行清理">10.3 执行清理</a></li>
+<li><a href="#104-整理数据统计">10.4 整理数据统计</a></li>
+<li><a href="#105-清理孤儿文件">10.5 清理孤儿文件</a></li>
+<li><a href="#106-整理数据库vacuum">10.6 整理数据库（VACUUM）</a></li>
+<li><a href="#107-回收站批次列表">10.7 回收站批次列表</a></li>
+<li><a href="#108-回收站明细">10.8 回收站明细</a></li>
+<li><a href="#109-还原批次">10.9 还原批次</a></li>
+<li><a href="#1010-彻底删除批次">10.10 彻底删除批次</a></li>
 </ul>
 </li>
-<li><a href="#11-附录错误码与行为细节">11. 附录：错误码与行为细节</a><ul>
-<li><a href="#111-状态码汇总">11.1 状态码汇总</a></li>
-<li><a href="#112-值得注意的行为">11.2 值得注意的行为</a></li>
+<li><a href="#11-数据导入导出">11. 数据导入导出</a><ul>
+<li><a href="#111-导出-zip">11.1 导出 ZIP</a></li>
+<li><a href="#112-导入-zip">11.2 导入 ZIP</a></li>
+</ul>
+</li>
+<li><a href="#12-附录错误码与行为细节">12. 附录：错误码与行为细节</a><ul>
+<li><a href="#121-状态码汇总">12.1 状态码汇总</a></li>
+<li><a href="#122-值得注意的行为">12.2 值得注意的行为</a></li>
 </ul>
 </li>
 </ul>
@@ -346,8 +359,8 @@ mark { background: #fff3a3; color: inherit; padding: 0 2px; border-radius: 2px; 
 <h1 id="comfyui-server-接口文档">comfyui-server 接口文档</h1>
 <blockquote>
 <p>后端：Go（<code>net/http</code> + <code>modernc.org/sqlite</code>）｜前端：Vue 3
-文档基于源码逐字段核对（<code>backend/cmd/server/</code>），共 <strong>57 个接口</strong>（54 个常驻 + 3 个仅 <code>DEBUG</code> 开启时注册）。
-最后更新：2026-10-01</p>
+文档基于源码逐字段核对（<code>backend/cmd/server/</code>），共 <strong>66 个接口</strong>（63 个常驻 + 3 个仅 <code>DEBUG</code> 开启时注册）。
+最后更新：2026-10-10</p>
 </blockquote>
 <hr />
 <h2 id="1-概述">1. 概述</h2>
@@ -929,19 +942,79 @@ curl -s $BASE/api/tasks/11
 <td>切换收藏</td>
 </tr>
 <tr>
-<td><strong>导入导出</strong></td>
+<td><strong>数据整理</strong></td>
 <td></td>
 <td></td>
 <td></td>
 </tr>
 <tr>
 <td>53</td>
+<td>POST</td>
+<td><code>/api/maintenance/preview</code></td>
+<td>预览清理结果（只查不删）</td>
+</tr>
+<tr>
+<td>54</td>
+<td>POST</td>
+<td><code>/api/maintenance/cleanup</code></td>
+<td>执行条件清理</td>
+</tr>
+<tr>
+<td>55</td>
+<td>GET</td>
+<td><code>/api/maintenance/stats</code></td>
+<td>整理数据统计</td>
+</tr>
+<tr>
+<td>56</td>
+<td>POST</td>
+<td><code>/api/maintenance/orphans/purge</code></td>
+<td>清理孤儿文件</td>
+</tr>
+<tr>
+<td>57</td>
+<td>POST</td>
+<td><code>/api/maintenance/vacuum</code></td>
+<td>整理数据库（VACUUM）</td>
+</tr>
+<tr>
+<td>58</td>
+<td>GET</td>
+<td><code>/api/maintenance/trash</code></td>
+<td>回收站批次列表</td>
+</tr>
+<tr>
+<td>59</td>
+<td>GET</td>
+<td><code>/api/maintenance/trash/{id}</code></td>
+<td>回收站批次明细</td>
+</tr>
+<tr>
+<td>60</td>
+<td>POST</td>
+<td><code>/api/maintenance/trash/{id}/restore</code></td>
+<td>还原批次</td>
+</tr>
+<tr>
+<td>61</td>
+<td>DELETE</td>
+<td><code>/api/maintenance/trash/{id}</code></td>
+<td>彻底删除批次</td>
+</tr>
+<tr>
+<td><strong>导入导出</strong></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>62</td>
 <td>GET</td>
 <td><code>/api/export</code></td>
 <td>导出 ZIP</td>
 </tr>
 <tr>
-<td>54</td>
+<td>63</td>
 <td>POST</td>
 <td><code>/api/import</code></td>
 <td>导入 ZIP</td>
@@ -953,19 +1026,19 @@ curl -s $BASE/api/tasks/11
 <td></td>
 </tr>
 <tr>
-<td>55</td>
+<td>64</td>
 <td>GET</td>
 <td><code>/api/debug/status</code></td>
 <td>调试状态与文件清单</td>
 </tr>
 <tr>
-<td>56</td>
+<td>65</td>
 <td>GET</td>
 <td><code>/api/debug/files/{name}</code></td>
 <td>下载调试文件</td>
 </tr>
 <tr>
-<td>57</td>
+<td>66</td>
 <td>DELETE</td>
 <td><code>/api/debug/files/{name}</code></td>
 <td>清空调试文件</td>
@@ -5351,8 +5424,296 @@ Content-Type: multipart/form-data
 </tbody>
 </table>
 <hr />
-<h2 id="10-数据导入导出">10. 数据导入导出</h2>
-<h3 id="101-导出-zip">10.1 导出 ZIP</h3>
+<h2 id="10-数据整理接口">10. 数据整理接口</h2>
+<p>按条件批量清理图片、任务、提示词。与 <code>9.7 批量删除图片</code> 的区别：那个要传明确的 <code>ids</code>，这个只传条件，由服务端算出命中集合。</p>
+<p><strong>两条硬规则（前后端都已写死）</strong></p>
+<ol>
+<li><strong>收藏永不删</strong>。<code>only_unfavorite</code> 缺省为 <code>true</code>，且各模式的 <code>where</code> 里都带收藏条件，不是可选项。</li>
+<li><strong>删掉的图片文件进回收站</strong>（<code>data/trash/&lt;批次号&gt;/</code>），不是直接抹掉。</li>
+</ol>
+<p><strong>所有删除必须先预览</strong>。<code>preview</code> 与 <code>cleanup</code> 共用同一个条件解析函数，避免「预览说 100 条、真删 103 条」。</p>
+<h3 id="101-筛选条件">10.1 筛选条件</h3>
+<p><code>preview</code> 与 <code>cleanup</code> 共用同一份请求体：</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>target</code></td>
+<td>string</td>
+<td><strong>必填</strong>。<code>images</code> / <code>tasks</code> / <code>prompts</code></td>
+</tr>
+<tr>
+<td><code>date_from</code></td>
+<td>string</td>
+<td><code>YYYY-MM-DD</code>，闭区间下界</td>
+</tr>
+<tr>
+<td><code>date_to</code></td>
+<td>string</td>
+<td><code>YYYY-MM-DD</code>，闭区间上界（服务端自动补成次日 00:00:00）</td>
+</tr>
+<tr>
+<td><code>keyword</code></td>
+<td>string</td>
+<td>匹配标题 / 正向提示词 / 文件名，<strong>多个词用空格分开且全部命中</strong></td>
+</tr>
+<tr>
+<td><code>group_names</code></td>
+<td>string[]</td>
+<td>提示词分组（导入 JSON 时的文件名）<strong>多选，同维度 OR</strong></td>
+</tr>
+<tr>
+<td><code>group_name</code></td>
+<td>string</td>
+<td>单个分组，兼容命令行调用。<strong><code>group_names</code> 非空时以它为准</strong></td>
+</tr>
+<tr>
+<td><code>workflow_ids</code></td>
+<td>number[]</td>
+<td>按工作流过滤（经 <code>generation_tasks</code> 关联）</td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>string</td>
+<td>任务状态，<strong>仅 <code>target=tasks</code> 有效</strong>，传给其它 target 会 400</td>
+</tr>
+<tr>
+<td><code>only_unfavorite</code></td>
+<td>bool</td>
+<td><strong>缺省 <code>true</code></strong>。<code>false</code> 时收藏内容也会被删</td>
+</tr>
+<tr>
+<td><code>with_prompts</code></td>
+<td>bool</td>
+<td><code>target=tasks</code> 时是否连带删提示词，<strong>缺省 <code>true</code></strong></td>
+</tr>
+<tr>
+<td><code>cascade_images</code></td>
+<td>bool</td>
+<td><code>target=prompts</code> 时是否连带删图，缺省 <code>false</code>（只解绑，图保留）</td>
+</tr>
+<tr>
+<td><code>min_count</code></td>
+<td>number</td>
+<td>安全阀：实际命中少于它就拒绝执行。<code>preview</code> 时只提示，<code>cleanup</code> 时 400</td>
+</tr>
+<tr>
+<td><code>confirm</code></td>
+<td>bool</td>
+<td><strong>仅 <code>cleanup</code></strong>。必须为 <code>true</code>，否则 400</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>⚠️ <strong>时间筛选不用 SQLite 日期函数</strong>。<code>created_at</code> 存的是 Go 的 <code>time.Time.String()</code>（形如 <code>2026-10-01 12:00:00.123456 +0800 CST m=+1.23</code>），<code>date()</code> / <code>strftime()</code> 对它<strong>返回 NULL</strong>。服务端一律用字符串前缀比较，上界取「<code>date_to</code> 的次日 00:00:00」而不是「当日 23:59:59」——后者会漏掉带小数秒的记录。</p>
+</blockquote>
+<p><strong>三种模式的级联行为</strong></p>
+<table>
+<thead>
+<tr>
+<th>target</th>
+<th>删除范围</th>
+<th><code>only_unfavorite</code> 的判定依据</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>images</code></td>
+<td>图片文件 + <code>images</code> 行。<code>generation_items</code> / <code>generation_tasks</code> 保留为空壳</td>
+<td>图片自身的 <code>is_favorite</code></td>
+</tr>
+<tr>
+<td><code>tasks</code></td>
+<td>任务 + 其全部 <code>generation_items</code> + 全部图片文件。<code>running</code> 的任务一律跳过</td>
+<td>该任务名下<strong>没有</strong>收藏图、且不关联收藏提示词</td>
+</tr>
+<tr>
+<td><code>prompts</code></td>
+<td>提示词行；<code>cascade_images=true</code> 时连带删图与生成项，否则只把 <code>items.prompt_id</code> 置 NULL</td>
+<td>提示词自身的 <code>is_favorite</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>with_prompts=true</code>（默认）时，只删「删完之后不再被任何 <code>generation_items</code> 引用」的提示词 —— 否则会误删别的任务还在用的。</p>
+<h3 id="102-预览清理结果">10.2 预览清理结果</h3>
+<pre><code>POST /api/maintenance/preview
+</code></pre>
+<p>只查询，不改任何数据。</p>
+<p><strong>请求体</strong>：见 10.1。</p>
+<p><strong>响应</strong></p>
+<pre><code class="language-json">{
+  &quot;target&quot;: &quot;images&quot;,
+  &quot;primary_count&quot;: 5,
+  &quot;only_unfavorite&quot;: true,
+  &quot;warning&quot;: &quot;已跳过 6 张收藏图片&quot;,
+  &quot;stats&quot;: {
+    &quot;images&quot;: 5, &quot;tasks&quot;: 5, &quot;items&quot;: 5, &quot;prompts&quot;: 0,
+    &quot;bytes&quot;: 6409263, &quot;protected&quot;: 6, &quot;protected_running&quot;: 0, &quot;files_found&quot;: 5
+  },
+  &quot;samples&quot;: [
+    {&quot;id&quot;: 6, &quot;title&quot;: &quot;一只小猫&quot;, &quot;filename&quot;: &quot;221418_00001_.png&quot;,
+     &quot;group&quot;: &quot;手动提交&quot;, &quot;created_at&quot;: &quot;2026-09-11T22:14:18.229809+08:00&quot;}
+  ]
+}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>primary_count</code></td>
+<td>本次操作的主体数量（图片数 / 任务数 / 提示词数，取决于 <code>target</code>）</td>
+</tr>
+<tr>
+<td><code>stats.bytes</code></td>
+<td>能回收的磁盘体积。<code>files_found</code> 可能小于 <code>images</code>（文件早被手工删过）</td>
+</tr>
+<tr>
+<td><code>stats.protected</code></td>
+<td><strong>真正被收藏拦下</strong>的数量，不是「不看收藏的总数」</td>
+</tr>
+<tr>
+<td><code>samples</code></td>
+<td>最多 8 条，供人眼确认</td>
+</tr>
+<tr>
+<td><code>warning</code></td>
+<td>针对当前模式的注意事项；命中为 0 时提示放宽条件</td>
+</tr>
+<tr>
+<td><code>blocked</code></td>
+<td>命中数低于 <code>min_count</code> 时的阻止说明（非必返）</td>
+</tr>
+</tbody>
+</table>
+<h3 id="103-执行清理">10.3 执行清理</h3>
+<pre><code>POST /api/maintenance/cleanup
+</code></pre>
+<p><strong>请求体</strong>：10.1 的全部字段 + <code>"confirm": true</code>。</p>
+<p><strong>响应</strong></p>
+<pre><code class="language-json">{
+  &quot;batch_id&quot;: 1, &quot;images&quot;: 5, &quot;items&quot;: 5, &quot;tasks&quot;: 5, &quot;prompts&quot;: 0,
+  &quot;files_moved&quot;: 5, &quot;bytes&quot;: 6409263, &quot;protected&quot;: 6,
+  &quot;duration_ms&quot;: 2, &quot;trashed&quot;: true, &quot;vacuumed&quot;: false
+}
+</code></pre>
+<p><code>batch_id</code> 用于之后从回收站还原。删掉 500 条以上时会自动跑一次 VACUUM（<code>vacuumed=true</code>）。</p>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>场景</th>
+<th><code>error</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td><code>confirm</code> 不为 true</td>
+<td><code>confirm must be true to run cleanup</code></td>
+</tr>
+<tr>
+<td>400</td>
+<td>条件非法（日期格式、target 等）</td>
+<td>具体原因</td>
+</tr>
+<tr>
+<td>400</td>
+<td>命中数低于 <code>min_count</code></td>
+<td><code>refusing to delete: matched N, minimum required M</code></td>
+</tr>
+<tr>
+<td>400</td>
+<td>一条都没命中</td>
+<td><code>nothing matched</code></td>
+</tr>
+<tr>
+<td>500</td>
+<td>执行失败</td>
+<td>具体原因</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>删除顺序是<strong>先把文件移入回收站，再删库行</strong>。反过来会出现「库记录没了、文件还在」的孤儿文件，界面上再也清理不掉。文件操作在事务外分批做，库行每 500 条一个短事务 —— DSN 用了 <code>_txlock=immediate</code>，一次锁太久会把并发的提交/下载全部堵死。</p>
+</blockquote>
+<h3 id="104-整理数据统计">10.4 整理数据统计</h3>
+<pre><code>GET /api/maintenance/stats
+</code></pre>
+<p><strong>响应</strong></p>
+<pre><code class="language-json">{
+  &quot;counts&quot;: {&quot;workflows&quot;: 5, &quot;json_files&quot;: 1, &quot;prompts&quot;: 19,
+             &quot;generation_tasks&quot;: 21, &quot;generation_items&quot;: 21, &quot;images&quot;: 15},
+  &quot;images_created_range&quot;: [&quot;2026-09-11 21:13:34... &quot;, &quot;2026-10-01 15:21:28... &quot;],
+  &quot;favorite_images&quot;: 0, &quot;favorite_prompts&quot;: 0,
+  &quot;files_on_disk&quot;: 16, &quot;image_bytes&quot;: 28084133,
+  &quot;orphan_files&quot;: [&quot;7.png&quot;],
+  &quot;db_bytes&quot;: 118784, &quot;db_path&quot;: &quot;../data/db/comfyui.db&quot;
+}
+</code></pre>
+<p><code>orphan_files</code> 是磁盘上有、但库里没有任何记录引用的图片文件（历史手工删除或历史 bug 留下的）。最多返回 200 个。</p>
+<h3 id="105-清理孤儿文件">10.5 清理孤儿文件</h3>
+<pre><code>POST /api/maintenance/orphans/purge
+</code></pre>
+<p><strong>请求体</strong>：<code>{"confirm": true}</code></p>
+<p>删除 10.4 报出的孤儿文件。不涉及任何库记录，零风险。</p>
+<table>
+<thead>
+<tr>
+<th>状态码</th>
+<th>场景</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200</td>
+<td><code>{"removed": N}</code>（没有孤儿时 N=0，不需要 confirm）</td>
+</tr>
+<tr>
+<td>400</td>
+<td>有孤儿但未确认，报错里带上数量</td>
+</tr>
+</tbody>
+</table>
+<h3 id="106-整理数据库vacuum">10.6 整理数据库（VACUUM）</h3>
+<pre><code>POST /api/maintenance/vacuum
+</code></pre>
+<p>SQLite 删除记录后不会把空间还给文件系统，<code>VACUUM</code> 可以显著缩小 db 文件。响应 <code>{"vacuumed": true, "duration_ms": N}</code>。</p>
+<p>⚠️ 会重写整个库文件并独占数据库，耗时随数据量线性增长，且需要约 2 倍库大小的临时磁盘空间。批量清理（≥500 条）后会自动执行一次。</p>
+<h3 id="107-回收站批次列表">10.7 回收站批次列表</h3>
+<pre><code>GET /api/maintenance/trash
+</code></pre>
+<p><strong>响应</strong>：<code>{"items": [{"id": 1, "reason": "images时间 2026-09-01~2026-09-30", "deleted_images": 5, "bytes": 6409263, "created_at": "2026-10-10T12:00:01+08:00"}]}</code></p>
+<p><code>reason</code> 是服务端根据当时条件生成的人类可读说明。最多返回最近 100 个批次。</p>
+<h3 id="108-回收站明细">10.8 回收站明细</h3>
+<pre><code>GET /api/maintenance/trash/{id}
+</code></pre>
+<p>返回该批次每一张图片的 <code>image_id</code> / <code>filename</code> / <code>bytes</code> / <code>created_at</code>。</p>
+<h3 id="109-还原批次">10.9 还原批次</h3>
+<pre><code>POST /api/maintenance/trash/{id}/restore
+</code></pre>
+<p>把该批次的图片文件移回 <code>data/images/</code>。</p>
+<p><strong>响应</strong>：<code>{"batch_id": 1, "files_restored": 5, "files_skipped": 0, "note": "..."}</code></p>
+<blockquote>
+<p>⚠️ <strong>只还原文件，不还原库记录</strong>。清理时 <code>generation_items</code> 已被级联删除且未留快照，因此无法重建 <code>images</code> 行 —— 图片会回到磁盘目录，但不会出现在图片库里。响应里的 <code>note</code> 字段就是提醒这件事的。</p>
+</blockquote>
+<h3 id="1010-彻底删除批次">10.10 彻底删除批次</h3>
+<pre><code>DELETE /api/maintenance/trash/{id}
+</code></pre>
+<p>删除 <code>data/trash/&lt;id&gt;/</code> 整个目录与相关记录，<strong>不可恢复</strong>。</p>
+<hr />
+<h2 id="11-数据导入导出">11. 数据导入导出</h2>
+<h3 id="111-导出-zip">11.1 导出 ZIP</h3>
 <pre><code>GET /api/export?favorite=1&amp;group=风景&amp;status=completed&amp;search=cat
 </code></pre>
 <p><strong>Query 参数</strong></p>
@@ -5522,7 +5883,7 @@ Content-Type: multipart/form-data
 </tr>
 </tbody>
 </table>
-<h3 id="102-导入-zip">10.2 导入 ZIP</h3>
+<h3 id="112-导入-zip">11.2 导入 ZIP</h3>
 <pre><code>POST /api/import
 Content-Type: multipart/form-data
 </code></pre>
@@ -5631,8 +5992,8 @@ Content-Type: multipart/form-data
 <p>ZIP 内的文件名会被收敛为纯文件名，含路径分隔符或 <code>..</code> 的条目直接跳过（防止路径穿越）。</p>
 </blockquote>
 <hr />
-<h2 id="11-附录错误码与行为细节">11. 附录：错误码与行为细节</h2>
-<h3 id="111-状态码汇总">11.1 状态码汇总</h3>
+<h2 id="12-附录错误码与行为细节">12. 附录：错误码与行为细节</h2>
+<h3 id="121-状态码汇总">12.1 状态码汇总</h3>
 <table>
 <thead>
 <tr>
@@ -5697,7 +6058,7 @@ Content-Type: multipart/form-data
 <blockquote>
 <p>「未开启 <code>DEBUG</code> 时 <code>/api/debug/*</code> 返回 404」是<strong>路由不存在</strong>，不是资源不存在，错误体是 Go 默认的 <code>404 page not found</code> 纯文本，而非 <code>{"error": ...}</code>。</p>
 </blockquote>
-<h3 id="112-值得注意的行为">11.2 值得注意的行为</h3>
+<h3 id="122-值得注意的行为">12.2 值得注意的行为</h3>
 <p><strong>工作流</strong></p>
 <ul>
 <li>落点自动识别在<strong>导入时</strong>完成，无需手工配置；手工选择的一侧优先，未选的一侧由自动识别补全。</li>

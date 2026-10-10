@@ -6,6 +6,10 @@ backend/server
 backend/cmd/server/server
 frontend/dist/
 
+# 依赖与系统文件，不进版本库
+node_modules/
+.DS_Store
+
 # 构建产物：镜像 tar 包与编译出的二进制（单个 14–98MB，误提交后很难从历史里清掉）
 *.tar
 /server

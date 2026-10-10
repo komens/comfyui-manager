@@ -450,11 +450,14 @@ img { display: block; max-width: 100%; }
   margin-top: 4px;
 }
 
-input[type="text"],
-input[type="number"],
-input[type="url"],
-textarea,
-select {
+/* ⚠️ 原生表单全局样式：必须排除 Element Plus 内部输入框（class 含 el-），
+   否则会漏进组件内部的原生 <input>/<textarea>，和 Element wrapper 边框叠成双框，
+   还可能被 CSS minifier 与 Element 基础规则合并后丢掉 width 等属性。 */
+input[type="text"]:not([class*="el-"]),
+input[type="number"]:not([class*="el-"]),
+input[type="url"]:not([class*="el-"]),
+textarea:not([class*="el-"]),
+select:not([class*="el-"]) {
   width: 100%;
   padding: 10px 14px;
   border: 1px solid var(--c-border);
@@ -467,9 +470,11 @@ select {
   outline: none;
 }
 
-input:focus,
-textarea:focus,
-select:focus {
+input[type="text"]:not([class*="el-"]):focus,
+input[type="number"]:not([class*="el-"]):focus,
+input[type="url"]:not([class*="el-"]):focus,
+textarea:not([class*="el-"]):focus,
+select:not([class*="el-"]):focus {
   border-color: var(--c-primary);
   box-shadow: 0 0 0 3px rgba(37,99,235,.12);
 }
@@ -480,7 +485,7 @@ textarea {
   line-height: 1.6;
 }
 
-select {
+select:not([class*="el-"]) {
   appearance: none;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
   background-repeat: no-repeat;

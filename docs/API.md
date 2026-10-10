@@ -1,8 +1,8 @@
 # comfyui-server 接口文档
 
 > 后端：Go（`net/http` + `modernc.org/sqlite`）｜前端：Vue 3
-> 文档基于源码逐字段核对（`backend/cmd/server/`），共 **57 个接口**（54 个常驻 + 3 个仅 `DEBUG` 开启时注册）。
-> 最后更新：2026-10-01
+> 文档基于源码逐字段核对（`backend/cmd/server/`），共 **66 个接口**（63 个常驻 + 3 个仅 `DEBUG` 开启时注册）。
+> 最后更新：2026-10-10
 
 ---
 
@@ -17,8 +17,9 @@
 - [7. 提示词接口](#7-提示词接口)
 - [8. JSON 导入接口](#8-json-导入接口)
 - [9. 图片接口](#9-图片接口)
-- [10. 数据导入导出](#10-数据导入导出)
-- [11. 附录：错误码与行为细节](#11-附录错误码与行为细节)
+- [10. 数据整理接口](#10-数据整理接口)
+- [11. 数据导入导出](#11-数据导入导出)
+- [12. 附录：错误码与行为细节](#12-附录错误码与行为细节)
 
 ---
 
@@ -213,13 +214,23 @@ curl -s $BASE/api/tasks/11
 | 50 | POST | `/api/images/batch-delete` | 批量删除 |
 | 51 | POST | `/api/images/batch-favorite` | 批量收藏 |
 | 52 | PATCH | `/api/images/{id}/favorite` | 切换收藏 |
+| **数据整理** | | | |
+| 53 | POST | `/api/maintenance/preview` | 预览清理结果（只查不删） |
+| 54 | POST | `/api/maintenance/cleanup` | 执行条件清理 |
+| 55 | GET | `/api/maintenance/stats` | 整理数据统计 |
+| 56 | POST | `/api/maintenance/orphans/purge` | 清理孤儿文件 |
+| 57 | POST | `/api/maintenance/vacuum` | 整理数据库（VACUUM） |
+| 58 | GET | `/api/maintenance/trash` | 回收站批次列表 |
+| 59 | GET | `/api/maintenance/trash/{id}` | 回收站批次明细 |
+| 60 | POST | `/api/maintenance/trash/{id}/restore` | 还原批次 |
+| 61 | DELETE | `/api/maintenance/trash/{id}` | 彻底删除批次 |
 | **导入导出** | | | |
-| 53 | GET | `/api/export` | 导出 ZIP |
-| 54 | POST | `/api/import` | 导入 ZIP |
+| 62 | GET | `/api/export` | 导出 ZIP |
+| 63 | POST | `/api/import` | 导入 ZIP |
 | **调试**（**仅 `DEBUG` 开启时注册**，关闭时均 404） | | | |
-| 55 | GET | `/api/debug/status` | 调试状态与文件清单 |
-| 56 | GET | `/api/debug/files/{name}` | 下载调试文件 |
-| 57 | DELETE | `/api/debug/files/{name}` | 清空调试文件 |
+| 64 | GET | `/api/debug/status` | 调试状态与文件清单 |
+| 65 | GET | `/api/debug/files/{name}` | 下载调试文件 |
+| 66 | DELETE | `/api/debug/files/{name}` | 清空调试文件 |
 
 ---
 
@@ -1959,9 +1970,207 @@ PATCH /api/images/{id}/favorite
 
 ---
 
-## 10. 数据导入导出
+## 10. 数据整理接口
 
-### 10.1 导出 ZIP
+按条件批量清理图片、任务、提示词。与 `9.7 批量删除图片` 的区别：那个要传明确的 `ids`，这个只传条件，由服务端算出命中集合。
+
+**两条硬规则（前后端都已写死）**
+
+1. **收藏永不删**。`only_unfavorite` 缺省为 `true`，且各模式的 `where` 里都带收藏条件，不是可选项。
+2. **删掉的图片文件进回收站**（`data/trash/<批次号>/`），不是直接抹掉。
+
+**所有删除必须先预览**。`preview` 与 `cleanup` 共用同一个条件解析函数，避免「预览说 100 条、真删 103 条」。
+
+### 10.1 筛选条件
+
+`preview` 与 `cleanup` 共用同一份请求体：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `target` | string | **必填**。`images` / `tasks` / `prompts` |
+| `date_from` | string | `YYYY-MM-DD`，闭区间下界 |
+| `date_to` | string | `YYYY-MM-DD`，闭区间上界（服务端自动补成次日 00:00:00） |
+| `keyword` | string | 匹配标题 / 正向提示词 / 文件名，**多个词用空格分开且全部命中** |
+| `group_names` | string[] | 提示词分组（导入 JSON 时的文件名）**多选，同维度 OR** |
+| `group_name` | string | 单个分组，兼容命令行调用。**`group_names` 非空时以它为准** |
+| `workflow_ids` | number[] | 按工作流过滤（经 `generation_tasks` 关联） |
+| `status` | string | 任务状态，**仅 `target=tasks` 有效**，传给其它 target 会 400 |
+| `only_unfavorite` | bool | **缺省 `true`**。`false` 时收藏内容也会被删 |
+| `with_prompts` | bool | `target=tasks` 时是否连带删提示词，**缺省 `true`** |
+| `cascade_images` | bool | `target=prompts` 时是否连带删图，缺省 `false`（只解绑，图保留） |
+| `min_count` | number | 安全阀：实际命中少于它就拒绝执行。`preview` 时只提示，`cleanup` 时 400 |
+| `confirm` | bool | **仅 `cleanup`**。必须为 `true`，否则 400 |
+
+> ⚠️ **时间筛选不用 SQLite 日期函数**。`created_at` 存的是 Go 的 `time.Time.String()`（形如 `2026-10-01 12:00:00.123456 +0800 CST m=+1.23`），`date()` / `strftime()` 对它**返回 NULL**。服务端一律用字符串前缀比较，上界取「`date_to` 的次日 00:00:00」而不是「当日 23:59:59」——后者会漏掉带小数秒的记录。
+
+**三种模式的级联行为**
+
+| target | 删除范围 | `only_unfavorite` 的判定依据 |
+|---|---|---|
+| `images` | 图片文件 + `images` 行。`generation_items` / `generation_tasks` 保留为空壳 | 图片自身的 `is_favorite` |
+| `tasks` | 任务 + 其全部 `generation_items` + 全部图片文件。`running` 的任务一律跳过 | 该任务名下**没有**收藏图、且不关联收藏提示词 |
+| `prompts` | 提示词行；`cascade_images=true` 时连带删图与生成项，否则只把 `items.prompt_id` 置 NULL | 提示词自身的 `is_favorite` |
+
+`with_prompts=true`（默认）时，只删「删完之后不再被任何 `generation_items` 引用」的提示词 —— 否则会误删别的任务还在用的。
+
+### 10.2 预览清理结果
+
+```
+POST /api/maintenance/preview
+```
+
+只查询，不改任何数据。
+
+**请求体**：见 10.1。
+
+**响应**
+
+```json
+{
+  "target": "images",
+  "primary_count": 5,
+  "only_unfavorite": true,
+  "warning": "已跳过 6 张收藏图片",
+  "stats": {
+    "images": 5, "tasks": 5, "items": 5, "prompts": 0,
+    "bytes": 6409263, "protected": 6, "protected_running": 0, "files_found": 5
+  },
+  "samples": [
+    {"id": 6, "title": "一只小猫", "filename": "221418_00001_.png",
+     "group": "手动提交", "created_at": "2026-09-11T22:14:18.229809+08:00"}
+  ]
+}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `primary_count` | 本次操作的主体数量（图片数 / 任务数 / 提示词数，取决于 `target`） |
+| `stats.bytes` | 能回收的磁盘体积。`files_found` 可能小于 `images`（文件早被手工删过） |
+| `stats.protected` | **真正被收藏拦下**的数量，不是「不看收藏的总数」 |
+| `samples` | 最多 8 条，供人眼确认 |
+| `warning` | 针对当前模式的注意事项；命中为 0 时提示放宽条件 |
+| `blocked` | 命中数低于 `min_count` 时的阻止说明（非必返） |
+
+### 10.3 执行清理
+
+```
+POST /api/maintenance/cleanup
+```
+
+**请求体**：10.1 的全部字段 + `"confirm": true`。
+
+**响应**
+
+```json
+{
+  "batch_id": 1, "images": 5, "items": 5, "tasks": 5, "prompts": 0,
+  "files_moved": 5, "bytes": 6409263, "protected": 6,
+  "duration_ms": 2, "trashed": true, "vacuumed": false
+}
+```
+
+`batch_id` 用于之后从回收站还原。删掉 500 条以上时会自动跑一次 VACUUM（`vacuumed=true`）。
+
+| 状态码 | 场景 | `error` |
+|---|---|---|
+| 400 | `confirm` 不为 true | `confirm must be true to run cleanup` |
+| 400 | 条件非法（日期格式、target 等） | 具体原因 |
+| 400 | 命中数低于 `min_count` | `refusing to delete: matched N, minimum required M` |
+| 400 | 一条都没命中 | `nothing matched` |
+| 500 | 执行失败 | 具体原因 |
+
+> 删除顺序是**先把文件移入回收站，再删库行**。反过来会出现「库记录没了、文件还在」的孤儿文件，界面上再也清理不掉。文件操作在事务外分批做，库行每 500 条一个短事务 —— DSN 用了 `_txlock=immediate`，一次锁太久会把并发的提交/下载全部堵死。
+
+### 10.4 整理数据统计
+
+```
+GET /api/maintenance/stats
+```
+
+**响应**
+
+```json
+{
+  "counts": {"workflows": 5, "json_files": 1, "prompts": 19,
+             "generation_tasks": 21, "generation_items": 21, "images": 15},
+  "images_created_range": ["2026-09-11 21:13:34... ", "2026-10-01 15:21:28... "],
+  "favorite_images": 0, "favorite_prompts": 0,
+  "files_on_disk": 16, "image_bytes": 28084133,
+  "orphan_files": ["7.png"],
+  "db_bytes": 118784, "db_path": "../data/db/comfyui.db"
+}
+```
+
+`orphan_files` 是磁盘上有、但库里没有任何记录引用的图片文件（历史手工删除或历史 bug 留下的）。最多返回 200 个。
+
+### 10.5 清理孤儿文件
+
+```
+POST /api/maintenance/orphans/purge
+```
+
+**请求体**：`{"confirm": true}`
+
+删除 10.4 报出的孤儿文件。不涉及任何库记录，零风险。
+
+| 状态码 | 场景 |
+|---|---|
+| 200 | `{"removed": N}`（没有孤儿时 N=0，不需要 confirm） |
+| 400 | 有孤儿但未确认，报错里带上数量 |
+
+### 10.6 整理数据库（VACUUM）
+
+```
+POST /api/maintenance/vacuum
+```
+
+SQLite 删除记录后不会把空间还给文件系统，`VACUUM` 可以显著缩小 db 文件。响应 `{"vacuumed": true, "duration_ms": N}`。
+
+⚠️ 会重写整个库文件并独占数据库，耗时随数据量线性增长，且需要约 2 倍库大小的临时磁盘空间。批量清理（≥500 条）后会自动执行一次。
+
+### 10.7 回收站批次列表
+
+```
+GET /api/maintenance/trash
+```
+
+**响应**：`{"items": [{"id": 1, "reason": "images时间 2026-09-01~2026-09-30", "deleted_images": 5, "bytes": 6409263, "created_at": "2026-10-10T12:00:01+08:00"}]}`
+
+`reason` 是服务端根据当时条件生成的人类可读说明。最多返回最近 100 个批次。
+
+### 10.8 回收站明细
+
+```
+GET /api/maintenance/trash/{id}
+```
+
+返回该批次每一张图片的 `image_id` / `filename` / `bytes` / `created_at`。
+
+### 10.9 还原批次
+
+```
+POST /api/maintenance/trash/{id}/restore
+```
+
+把该批次的图片文件移回 `data/images/`。
+
+**响应**：`{"batch_id": 1, "files_restored": 5, "files_skipped": 0, "note": "..."}`
+
+> ⚠️ **只还原文件，不还原库记录**。清理时 `generation_items` 已被级联删除且未留快照，因此无法重建 `images` 行 —— 图片会回到磁盘目录，但不会出现在图片库里。响应里的 `note` 字段就是提醒这件事的。
+
+### 10.10 彻底删除批次
+
+```
+DELETE /api/maintenance/trash/{id}
+```
+
+删除 `data/trash/<id>/` 整个目录与相关记录，**不可恢复**。
+
+---
+
+## 11. 数据导入导出
+
+### 11.1 导出 ZIP
 
 ```
 GET /api/export?favorite=1&group=风景&status=completed&search=cat
@@ -2025,7 +2234,7 @@ export-20261001_183000.zip
 |---|---|---|
 | 500 | 提示词查询失败 | `query prompts failed` |
 
-### 10.2 导入 ZIP
+### 11.2 导入 ZIP
 
 ```
 POST /api/import
@@ -2065,9 +2274,9 @@ Content-Type: multipart/form-data
 
 ---
 
-## 11. 附录：错误码与行为细节
+## 12. 附录：错误码与行为细节
 
-### 11.1 状态码汇总
+### 12.1 状态码汇总
 
 | 状态码 | 含义 | 典型场景 |
 |---|---|---|
@@ -2084,7 +2293,7 @@ Content-Type: multipart/form-data
 
 > 「未开启 `DEBUG` 时 `/api/debug/*` 返回 404」是**路由不存在**，不是资源不存在，错误体是 Go 默认的 `404 page not found` 纯文本，而非 `{"error": ...}`。
 
-### 11.2 值得注意的行为
+### 12.2 值得注意的行为
 
 **工作流**
 

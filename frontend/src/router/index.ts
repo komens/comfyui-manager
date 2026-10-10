@@ -52,6 +52,11 @@ export default createRouter({
     { path: '/tasks', component: TaskListView },
     { path: '/tasks/:id', component: TaskDetailView },
     { path: '/gallery', component: GalleryView },
+    // 条件式批量清理 + 回收站。破坏性操作，但走「预览 → 确认」两步且有回收站兜底。
+    // 懒加载：这个页面是全项目唯一用 Element Plus 的，Element 的 chunk 约 400 kB，
+    // 静态 import 会让**所有页面**的首屏都背上它。改成动态 import 后，
+    // 只有真正进这个页面才会下载，其它页面完全不受影响。
+    { path: '/maintenance', component: () => import('../views/MaintenanceView.vue') },
     { path: '/settings', component: SettingsView },
     // 只在后端 DEBUG 开启时才有内容；没开时页面会给一份开启说明，
     // 侧边栏入口也不会出现

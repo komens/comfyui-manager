@@ -150,3 +150,50 @@ export type DebugStatus = {
   dir: string
   files: DebugFile[]
 }
+
+/** 数据整理：各表当前规模 + 磁盘占用 + 孤儿文件。 */
+export type CleanupStats = {
+  counts: Record<string, number>
+  /** images.created_at 的最早/最新值（Go 的 time 字符串，不能直接喂给 Date） */
+  images_created_range: [string, string]
+  favorite_images: number
+  favorite_prompts: number
+  files_on_disk: number
+  image_bytes: number
+  /** 磁盘上有、但库里没有任何记录引用的图片文件名 */
+  orphan_files: string[]
+  db_bytes: number
+  db_path: string
+}
+
+/** 数据整理预览的结果。blocked 非空表示命中数低于安全阀，已阻止执行。 */
+export type CleanupPreview = {
+  target: 'images' | 'tasks' | 'prompts'
+  stats: {
+    images: number
+    tasks: number
+    items: number
+    prompts: number
+    bytes: number
+    /** 因收藏被保护而没删的数量 */
+    protected: number
+    protected_running: number
+    files_found: number
+  }
+  /** 本次操作的主体数量（图片数/任务数/提示词数，取决于 target） */
+  primary_count: number
+  samples: { id: number; title: string; filename: string; group: string; created_at: string }[]
+  only_unfavorite: boolean
+  warning: string
+  blocked?: string
+}
+
+/** 回收站里的一个清理批次。 */
+export type TrashBatch = {
+  id: number
+  /** 人类可读的条件说明，如 "images时间 2026-09-01~2026-09-30" */
+  reason: string
+  deleted_images: number
+  bytes: number
+  created_at: string
+}

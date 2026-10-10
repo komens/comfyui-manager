@@ -35,9 +35,12 @@ const baseItems = [
   { path: '/gallery', label: '图片库', icon: '&#128247;' },
 ]
 
-// 系统区永远有「设置」；调试项按需追加，开启 DEBUG 后才出现
+// 系统区永远有「设置」与「数据整理」；调试项按需追加，开启 DEBUG 后才出现
 const systemItems = computed(() => {
-  const items = [{ path: '/settings', label: '设置', icon: '&#9881;' }]
+  const items = [
+    { path: '/settings', label: '设置', icon: '&#9881;' },
+    { path: '/maintenance', label: '数据整理', icon: '&#128465;' },
+  ]
   if (debugOn.value) {
     items.push({ path: '/debug', label: '调试日志', icon: '&#128295;' })
   }

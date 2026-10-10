@@ -1,0 +1,103 @@
+/*
+ * Element Plus 主题对齐层
+ *
+ * Element Plus 默认主色 #409EFF、圆角 4px、边框 #DCDFE6，
+ * 而 style.css 的设计系统是主色 #2563eb、圆角 10-14px、边框 #e4e7ec。
+ * 两者并排时会看到「同一屏两套蓝、两套圆角」的割裂感。
+ *
+ * 这里只覆盖 Element Plus 用到的 CSS 变量（走它的 CSS 变量体系，
+ * 不需要引入整份 SCSS 主题），让它自动继承 style.css 的取色。
+ * ⚠️ 必须在 style.css **之后**引入——同特异度下后者胜出，顺序反了会被盖掉。
+ */
+
+:root {
+  /* 主色：与 --c-primary 对齐 */
+  --el-color-primary: #2563eb;
+  --el-color-primary-light-3: #6d96f0;
+  --el-color-primary-light-5: #9bb6f5;
+  --el-color-primary-light-7: #c9d6fa;
+  --el-color-primary-light-8: #dde6fc;
+  --el-color-primary-light-9: #eef3fe;
+  --el-color-primary-dark-2: #1d4ed8;
+
+  /* 功能色：与 style.css 的 --c-success / --c-danger / --c-warning 对齐 */
+  --el-color-success: #16a34a;
+  --el-color-success-light-9: #f0fdf4;
+  --el-color-success-border: #bbf7d0;
+  --el-color-danger: #dc2626;
+  --el-color-danger-light-9: #fef2f2;
+  --el-color-danger-border: #fecaca;
+  --el-color-warning: #d97706;
+  --el-color-warning-light-9: #fffbeb;
+  --el-color-warning-border: #fde68a;
+  --el-color-info: #6b7280;
+
+  /* 圆角：Element 默认 4px 太小，跟不上 style.css 的 10-14px */
+  --el-border-radius-base: 6px;
+  --el-border-radius-small: 4px;
+  --el-border-radius-round: 100px;
+
+  /* 边框与底色 */
+  --el-border-color: #e4e7ec;
+  --el-border-color-light: #e4e7ec;
+  --el-border-color-lighter: #f0f2f5;
+  --el-border-color-extra-light: #f0f2f5;
+  --el-fill-color-blank: #ffffff;
+  --el-fill-color-light: #f5f6f8;
+  --el-fill-color-lighter: #fafbfc;
+  --el-bg-color: #ffffff;
+  --el-bg-color-page: #f0f2f5;
+
+  /* 文字 */
+  --el-text-color-primary: #1a1d23;
+  --el-text-color-regular: #374151;
+  --el-text-color-secondary: #6b7280;
+  --el-text-color-placeholder: #9ca3af;
+
+  --el-font-size-base: 14px;
+  --el-font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+/*
+ * 组件级微调。
+ * 这一段是「让它看起来像这个项目的一部分」，而不是「换个主题」——
+ * 改动范围控制在尺寸与间距，不动 Element 的内部结构。
+ */
+
+/* 表格：头行用 style.css 的 --c-surface-hover，边框用 --c-border */
+.el-table th.el-table__cell {
+  background: var(--c-surface-hover) !important;
+  color: var(--c-text-secondary);
+  font-weight: 600;
+}
+.el-table .el-table__cell {
+  border-bottom-color: var(--c-border-light);
+}
+
+/* 折叠面板：边框圆角与 style.css 的 --radius-md 一致 */
+.el-collapse {
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+.el-collapse > .el-collapse-item > .el-collapse-item__header {
+  border-bottom-color: var(--c-border-light);
+}
+.el-collapse > .el-collapse-item:last-child > .el-collapse-item__header {
+  border-bottom: none;
+}
+
+/* 下拉浮层：必须显式给 z-index，否则会被 .card 的 overflow:hidden 裁掉 */
+.el-select__popper,
+.el-picker__popper {
+  z-index: 3000;
+}
+
+/* 多选标签：让长选项名能省略号截断，否则会把面板撑得很难看 */
+.el-select__selection .el-select__selected-item {
+  max-width: 100%;
+}
+.el-select__selected-item {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
