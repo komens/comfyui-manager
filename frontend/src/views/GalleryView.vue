@@ -224,10 +224,20 @@ async function batchDelete() {
 
 function openViewer(index: number) {
   const ids = images.value.map(i => i.id)
-  openImageViewer(ids, index, {
-    goToPrompt: id => router.push(`/prompts/${id}`),
-    mutated: () => load(),
-  })
+  openImageViewer(
+    ids,
+    index,
+    {
+      goToPrompt: id => router.push(`/prompts/${id}`),
+      mutated: () => load(),
+    },
+    {
+      page: state.page,
+      pageSize: state.page_size,
+      total: total.value,
+      filters: { favorite: state.favorite, q: state.q, group: state.group },
+    },
+  )
 }
 
 async function toggleFavorite(image: ImageItem) {

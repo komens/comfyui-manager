@@ -692,6 +692,53 @@ select:not([class*="el-"]) {
   .ps-caps-text { max-height: 120px; }
 }
 
+/* 大图预览右下角浮动操作列（收藏 / 删除），常驻、不依赖展开详情 */
+.ps-action-fab {
+  position: absolute;
+  right: 16px;
+  bottom: 96px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  z-index: 99999;
+}
+.ps-fab-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 86px;
+  padding: 10px 14px;
+  border: 1px solid rgba(255, 255, 255, .28);
+  background: rgba(24, 24, 27, .62);
+  color: #fff;
+  border-radius: 12px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .35);
+  transition: background .15s, transform .1s;
+}
+.ps-fab-btn:hover { background: rgba(40, 40, 45, .78); }
+.ps-fab-btn:active { transform: scale(.96); }
+.ps-fab-btn.active {
+  background: rgba(250, 204, 21, .18);
+  border-color: rgba(250, 204, 21, .7);
+  color: #fde68a;
+}
+.ps-fab-btn.danger {
+  border-color: rgba(253, 164, 175, .5);
+  color: #fda4af;
+}
+.ps-fab-btn.danger:hover { background: rgba(225, 29, 72, .32); }
+
+@media (max-width: 768px) {
+  .ps-action-fab { right: 12px; bottom: 84px; gap: 8px; }
+  .ps-fab-btn { min-width: 76px; padding: 9px 12px; font-size: 12px; }
+}
+
 /* ===== Progress Bar ===== */
 .progress-bar {
   width: 100%;
