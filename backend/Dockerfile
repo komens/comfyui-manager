@@ -3,6 +3,10 @@
 # docker-compose.yml 用的也是那一份。
 #
 # 注意：这里没有 -X main.version=...，所以 GET /api/version 会返回 "dev"。
+#
+# 注意：distroless/static 里没有 shell 也没有 python3，所以 **ENABLE_SCRIPTS 在这份
+# 镜像上没有意义**（打开后所有运行都会报「容器内没有解释器」）。要脚本运行台请用仓库
+# 根目录那份 Dockerfile。
 FROM golang:1.23 AS build
 WORKDIR /src
 COPY go.mod go.sum* ./

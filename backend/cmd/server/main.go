@@ -50,6 +50,9 @@ type app struct {
 	waitingMu sync.Mutex
 	// cleanup 是数据整理的回收站。由 initCleanup 赋值，为 nil 时相关接口返回 503。
 	cleanup *cleanupStore
+	// scripts 是脚本运行台。由 initScripts 赋值；为 nil 表示 ENABLE_SCRIPTS 未开启，
+	// 此时相关路由压根不注册（不是返 403，是这个能力不存在）。
+	scripts *scriptRunner
 }
 
 type urlRequest struct {
@@ -94,6 +97,10 @@ func main() {
 		log.Fatal(err)
 	}
 	initDebug(cfg.DataDir, a.log)
+	// 脚本运行台：ENABLE_SCRIPTS 未开启时这里是空操作，不建目录、不起 worker
+	if err := a.initScripts(cfg); err != nil {
+		log.Fatal(err)
+	}
 	// 启动快照要等库和 settings 都可用之后才写得出来，所以放在这里
 	dumpStartupSnapshot(a.startupSnapshot(cfg))
 
@@ -176,6 +183,20 @@ func main() {
 		mux.HandleFunc("GET /api/debug/status", a.debugStatus)
 		mux.HandleFunc("GET /api/debug/files/{name}", a.debugDownload)
 		mux.HandleFunc("DELETE /api/debug/files/{name}", a.debugClear)
+	}
+	// 脚本运行台：ENABLE_SCRIPTS 开启时才注册。关闭时这些路径落到下面的
+	// 「/api/ 一律 404」，前端据此把入口也藏起来。
+	// 注意这是**代码执行**能力，别在不做鉴权的前提下把它暴露到公网。
+	if a.scripts != nil {
+		mux.HandleFunc("GET /api/scripts/status", a.scriptStatus)
+		mux.HandleFunc("POST /api/scripts/runs", a.createScriptRun)
+		mux.HandleFunc("GET /api/scripts/runs", a.listScriptRuns)
+		mux.HandleFunc("GET /api/scripts/runs/{id}", a.getScriptRun)
+		mux.HandleFunc("GET /api/scripts/runs/{id}/events", a.runScriptEvents)
+		mux.HandleFunc("POST /api/scripts/runs/{id}/cancel", a.cancelScriptRun)
+		mux.HandleFunc("GET /api/scripts/runs/{id}/files", a.listScriptRunFiles)
+		mux.HandleFunc("GET /api/scripts/runs/{id}/files/download", a.downloadScriptRunFile)
+		mux.HandleFunc("DELETE /api/scripts/runs/{id}", a.deleteScriptRun)
 	}
 	go a.submitter()
 	go a.downloader()
@@ -317,6 +338,24 @@ CREATE TABLE IF NOT EXISTS images (
   created_at DATETIME NOT NULL,
   FOREIGN KEY(generation_item_id) REFERENCES generation_items(id)
 );
+CREATE TABLE IF NOT EXISTS script_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL DEFAULT '',
+  language TEXT NOT NULL DEFAULT 'python',
+  code TEXT NOT NULL,
+  args TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL,
+  exit_code INTEGER NOT NULL DEFAULT 0,
+  duration_ms INTEGER NOT NULL DEFAULT 0,
+  output TEXT NOT NULL DEFAULT '',
+  output_truncated INTEGER NOT NULL DEFAULT 0,
+  work_dir TEXT NOT NULL DEFAULT '',
+  error TEXT NOT NULL DEFAULT '',
+  created_at DATETIME NOT NULL,
+  started_at DATETIME,
+  finished_at DATETIME
+);
+CREATE INDEX IF NOT EXISTS idx_script_runs_status ON script_runs(status);
 INSERT OR IGNORE INTO settings(key, value, updated_at)
 VALUES ('comfyui_url', ?, CURRENT_TIMESTAMP);
 `

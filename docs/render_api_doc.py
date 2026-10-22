@@ -66,7 +66,7 @@ TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>comfyui-server 接口文档</title>
+<title>素材管理平台 接口文档</title>
 <style>
 :root {
   --bg: #ffffff;
@@ -298,7 +298,7 @@ mark { background: #fff3a3; color: inherit; padding: 0 2px; border-radius: 2px; 
 <body>
 <nav id="sidebar">
   <div class="brand">
-    <h1>comfyui-server 接口文档</h1>
+    <h1>素材管理平台 接口文档</h1>
     <p>__CHAPTER__ 章 · __SECTION__ 节 · 54 个接口 · __TABLE__ 张表</p>
   </div>
   <div id="search-wrap">

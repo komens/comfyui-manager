@@ -9,6 +9,8 @@ const sidebarOpen = ref(false)
 const version = ref('')
 // 调试入口只在后端 DEBUG 开启时出现（接口 404 即视为未开启）
 const debugOn = ref(false)
+// 脚本运行台同理：ENABLE_SCRIPTS 未开启时接口 404，入口不出现
+const scriptsOn = ref(false)
 
 onMounted(async () => {
   try {
@@ -23,6 +25,12 @@ onMounted(async () => {
   } catch {
     // 未开启 DEBUG 时接口不存在，属正常状态
   }
+  try {
+    const data = await api<{ enabled: boolean }>('/api/scripts/status')
+    scriptsOn.value = !!data.enabled
+  } catch {
+    // 未开启 ENABLE_SCRIPTS 时接口不存在，属正常状态
+  }
 })
 
 const baseItems = [
@@ -35,12 +43,15 @@ const baseItems = [
   { path: '/gallery', label: '图片库', icon: '&#128247;' },
 ]
 
-// 系统区永远有「设置」与「数据整理」；调试项按需追加，开启 DEBUG 后才出现
+// 系统区永远有「设置」与「数据整理」；调试与脚本按需追加，对应开关打开后才出现
 const systemItems = computed(() => {
   const items = [
     { path: '/settings', label: '设置', icon: '&#9881;' },
     { path: '/maintenance', label: '数据整理', icon: '&#128465;' },
   ]
+  if (scriptsOn.value) {
+    items.push({ path: '/scripts', label: '脚本运行台', icon: '&#128187;' })
+  }
   if (debugOn.value) {
     items.push({ path: '/debug', label: '调试日志', icon: '&#128295;' })
   }
@@ -54,7 +65,7 @@ function closeSidebar() { sidebarOpen.value = false }
   <!-- Mobile Header -->
   <div class="mobile-header">
     <button class="hamburger" @click="sidebarOpen = !sidebarOpen">&#9776;</button>
-    <strong>ComfyUI Server</strong>
+    <strong>素材管理平台</strong>
     <div style="width:36px"></div>
   </div>
 
@@ -65,10 +76,10 @@ function closeSidebar() { sidebarOpen.value = false }
     <!-- Sidebar -->
     <aside class="sidebar" :class="{ open: sidebarOpen }">
       <div class="brand">
-        <div class="brand-icon">C</div>
+        <div class="brand-icon">素</div>
         <div class="brand-text">
-          <strong>ComfyUI</strong>
-          <small>作图服务控制台</small>
+          <strong>素材管理平台</strong>
+          <small>工作流 · 提示词 · 图片</small>
         </div>
       </div>
 
@@ -99,7 +110,7 @@ function closeSidebar() { sidebarOpen.value = false }
       </nav>
 
       <div class="sidebar-footer">
-        ComfyUI Server{{ version ? ` v${version}` : '' }}
+        素材管理平台{{ version ? ` v${version}` : '' }}
       </div>
     </aside>
 

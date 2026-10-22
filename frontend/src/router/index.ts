@@ -57,6 +57,9 @@ export default createRouter({
     // 静态 import 会让**所有页面**的首屏都背上它。改成动态 import 后，
     // 只有真正进这个页面才会下载，其它页面完全不受影响。
     { path: '/maintenance', component: () => import('../views/MaintenanceView.vue') },
+    // 脚本运行台：只在后端 ENABLE_SCRIPTS 开启时有内容，关闭时页面给开启说明、
+    // 侧边栏也不出现。同样懒加载（这一页载入频率低，没必要进首屏包）。
+    { path: '/scripts', component: () => import('../views/ScriptsView.vue') },
     { path: '/settings', component: SettingsView },
     // 只在后端 DEBUG 开启时才有内容；没开时页面会给一份开启说明，
     // 侧边栏入口也不会出现

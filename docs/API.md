@@ -1,8 +1,9 @@
-# comfyui-server 接口文档
+# 素材管理平台 接口文档
 
 > 后端：Go（`net/http` + `modernc.org/sqlite`）｜前端：Vue 3
-> 文档基于源码逐字段核对（`backend/cmd/server/`），共 **66 个接口**（63 个常驻 + 3 个仅 `DEBUG` 开启时注册）。
-> 最后更新：2026-10-10
+> 文档基于源码逐字段核对（`backend/cmd/server/`），共 **75 个接口**（72 个常驻 + 3 个仅 `DEBUG` 开启时注册）。
+> 其中脚本运行台的 9 个接口仅在 `ENABLE_SCRIPTS=1` 时注册，关闭时一律 404。
+> 最后更新：2026-10-22
 
 ---
 
@@ -18,8 +19,9 @@
 - [8. JSON 导入接口](#8-json-导入接口)
 - [9. 图片接口](#9-图片接口)
 - [10. 数据整理接口](#10-数据整理接口)
-- [11. 数据导入导出](#11-数据导入导出)
-- [12. 附录：错误码与行为细节](#12-附录错误码与行为细节)
+- [11. 脚本运行台接口（`ENABLE_SCRIPTS`）](#11-脚本运行台接口enable_scripts)
+- [12. 数据导入导出](#12-数据导入导出)
+- [13. 附录：错误码与行为细节](#13-附录错误码与行为细节)
 
 ---
 
@@ -224,13 +226,23 @@ curl -s $BASE/api/tasks/11
 | 59 | GET | `/api/maintenance/trash/{id}` | 回收站批次明细 |
 | 60 | POST | `/api/maintenance/trash/{id}/restore` | 还原批次 |
 | 61 | DELETE | `/api/maintenance/trash/{id}` | 彻底删除批次 |
+| **脚本**（**仅 `ENABLE_SCRIPTS` 开启时注册**，关闭时均 404） | | | |
+| 62 | GET | `/api/scripts/status` | 功能状态与可用解释器 |
+| 63 | POST | `/api/scripts/runs` | 提交一次运行 |
+| 64 | GET | `/api/scripts/runs` | 运行历史 |
+| 65 | GET | `/api/scripts/runs/{id}` | 运行详情（含代码与输出） |
+| 66 | GET | `/api/scripts/runs/{id}/events` | 运行输出（SSE） |
+| 67 | POST | `/api/scripts/runs/{id}/cancel` | 取消运行 |
+| 68 | GET | `/api/scripts/runs/{id}/files` | 产出文件列表 |
+| 69 | GET | `/api/scripts/runs/{id}/files/download` | 下载产出文件 |
+| 70 | DELETE | `/api/scripts/runs/{id}` | 删除运行记录 |
 | **导入导出** | | | |
-| 62 | GET | `/api/export` | 导出 ZIP |
-| 63 | POST | `/api/import` | 导入 ZIP |
+| 71 | GET | `/api/export` | 导出 ZIP |
+| 72 | POST | `/api/import` | 导入 ZIP |
 | **调试**（**仅 `DEBUG` 开启时注册**，关闭时均 404） | | | |
-| 64 | GET | `/api/debug/status` | 调试状态与文件清单 |
-| 65 | GET | `/api/debug/files/{name}` | 下载调试文件 |
-| 66 | DELETE | `/api/debug/files/{name}` | 清空调试文件 |
+| 73 | GET | `/api/debug/status` | 调试状态与文件清单 |
+| 74 | GET | `/api/debug/files/{name}` | 下载调试文件 |
+| 75 | DELETE | `/api/debug/files/{name}` | 清空调试文件 |
 
 ---
 
@@ -2168,9 +2180,194 @@ DELETE /api/maintenance/trash/{id}
 
 ---
 
-## 11. 数据导入导出
+## 11. 脚本运行台接口（`ENABLE_SCRIPTS`）
 
-### 11.1 导出 ZIP
+一次性脚本的执行通道：贴代码 → 运行 → 看输出 → 下载产出。**不是**脚本库，
+没有命名保存的概念；每次运行的代码快照存在运行记录里，需要复用就「载入」那条历史。
+
+### 11.1 开关与安全边界
+
+| 项 | 说明 |
+|---|---|
+| 开关 | 环境变量 `ENABLE_SCRIPTS`。未设置 / 空 / `off` / `0` / `false` / `no` = 关闭 |
+| 关闭时 | 本节 9 个路由**不注册**，一律 404；前端入口也不出现；不建目录、不起 worker |
+| 超时 | `SCRIPT_TIMEOUT`（秒），默认 `300` |
+| 执行身份 | **容器内的服务进程用户**（当前 Dockerfile 未降权，即 root） |
+| 可访问范围 | 整个 `DATA_DIR`：图片、JSON、SQLite 库、工作流文件 |
+| ⚠️ 风险 | 本服务**无鉴权**。开启后任何能访问该端口的人都能执行任意代码，只在可信内网开 |
+
+脚本拿到的环境变量：
+
+| 变量 | 含义 |
+|---|---|
+| `DATA_DIR` / `DB_PATH` | 数据目录与库文件的绝对路径 |
+| `API_BASE` | `http://127.0.0.1:<SERVER_PORT>`，脚本内调本服务接口用 |
+| `RUN_DIR` | 本次运行的专属目录（也是 cwd），产出放 `RUN_DIR/out/` |
+| `RUN_ID` | 本次运行 id |
+| `PYTHONUNBUFFERED=1` | 保证 print 实时可见 |
+
+环境变量是**白名单**，不继承宿主的 `DEBUG`、代理变量等。
+
+### 11.2 运行时约束
+
+- 单次运行的输出上限 **2 MB**，超出部分丢弃并置 `output_truncated`。
+- stdout 与 stderr **合并**成一路流（分流会打乱真实顺序）。
+- 全局并发 **1**：后提交的排队，排队深度 32，超出返回 429。
+- 只保留最近 **50** 次运行（记录 + 目录），更早的自动删除。
+- 每次运行写 `<DATA_DIR>/scripts/runs/<id>/`：`main.py`（或 `main.sh`）、`wfkit.py`、`meta.json`、`out/`。
+- 支持 `python`（python3）与 `sh` 两种；镜像里没有对应解释器时提交直接 400。
+
+### 11.3 脚本工具箱 `wfkit`
+
+每次运行都会把 `wfkit.py` 写进工作目录，`import wfkit` 即用：
+
+| 函数 | 作用 |
+|---|---|
+| `wfkit.query(sql, *params)` | 查询，返回 `list[dict]`。连接是 **`mode=ro` 只读** |
+| `wfkit.one(sql, *params)` | 只要第一行 |
+| `wfkit.image_file(row)` / `wfkit.data_file(row, subdir)` | 解析 `storage_path`：先试 `DATA_DIR/<subdir>/<basename>`，再退回绝对路径 |
+| `wfkit.json_files()` | `json_files` 表 + 解析出的真实路径 |
+| `wfkit.save_output(name, data)` | 写进 `out/`（dict/list 自动 JSON 序列化） |
+| `wfkit.api(method, path, body=None)` | 调本服务接口，非 2xx 抛 `RuntimeError` 并带服务端原话 |
+| `wfkit.log(msg)` / `wfkit.ARGS` | 带前缀打印 / 命令行参数 |
+
+> 为什么库是只读的：库用 WAL + `_txlock=immediate`，脚本里跑长事务会和提交、下载抢写锁
+> （`busy_timeout` 只有 5 秒）；而且直接改行会绕过收藏级联和回收站，删完图只剩孤儿文件。
+> **要写数据请用 `wfkit.api()`。**
+
+### 11.4 功能状态
+
+```
+GET /api/scripts/status
+```
+
+```json
+{
+  "enabled": true,
+  "runtimes": [
+    { "language": "python", "path": "/usr/bin/python3", "version": "Python 3.11.2" },
+    { "language": "sh", "path": "/bin/bash", "version": "bash" }
+  ],
+  "limits": { "timeout_seconds": 300, "output_bytes": 2097152, "max_keep": 50, "code_bytes": 262144 },
+  "data_dir": "/app/data"
+}
+```
+
+关闭时该路径 404（不是 `{"enabled": false}`）——前端据此隐藏入口，与 `/api/debug/status` 同一套约定。
+
+### 11.5 提交运行
+
+```
+POST /api/scripts/runs
+Content-Type: application/json
+
+{ "code": "print('hi')", "language": "python", "args": "--days 7", "title": "清理临时图" }
+```
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `code` | 是 | 脚本全文，上限 256 KB |
+| `language` | 否 | `python`（默认）/ `sh`，兼容 `py`、`python3`、`shell`、`bash` |
+| `args` | 否 | 传给脚本的参数，按空白切分，支持单双引号包住带空格的值 |
+| `title` | 否 | 留空则自动生成 `python · 10-22 17:20` |
+
+返回 `202`：
+
+```json
+{ "run_id": 12, "status": "queued" }
+```
+
+错误：`400`（代码为空 / 超长 / 语言不支持 / 解释器缺失）、`429`（排队已满）。
+
+### 11.6 运行历史
+
+```
+GET /api/scripts/runs?page=1&page_size=10
+```
+
+```json
+{
+  "items": [
+    { "id": 12, "title": "清理临时图", "language": "python", "status": "succeeded",
+      "exit_code": 0, "duration_ms": 842, "output_truncated": false,
+      "error": "", "created_at": "2026-10-22T17:20:11.2+08:00", "finished_at": "2026-10-22T17:20:12.0+08:00" }
+  ],
+  "total": 12, "page": 1, "page_size": 10
+}
+```
+
+列表不含 `code` 与 `output`（可能很大），需要就取详情。
+
+### 11.7 运行详情
+
+```
+GET /api/scripts/runs/{id}
+```
+
+在列表字段之外多返回 `code`、`args`、`output`、`work_dir`、`started_at`。
+
+状态取值：`queued` / `running` / `succeeded` / `failed` / `timeout` / `cancelled`。
+运行中的 `output` 取自内存缓冲（库里的 `output` 只在结束时写一次）。
+
+### 11.8 输出流（SSE）
+
+```
+GET /api/scripts/runs/{id}/events?since=0
+```
+
+两种帧：
+
+```
+data: {"type":"chunk","data":"tick 0\n"}
+
+data: {"type":"done","status":"succeeded","exit_code":0,"duration_ms":2036,
+       "error":"","truncated":false,"output":"tick 0\nbye\n"}
+```
+
+- `since` 是字节偏移，默认 0；断线重连时可只补后面那段。前端固定传 0。
+- **已结束的运行**进来只发一帧 `done`（带全文）就关闭，前端不用区分「直播」与「回放」。
+- 每 15 秒发一行 `: ping` 注释保活。
+- 订阅者跟不上时丢弃增量帧（非阻塞发送），不拖慢脚本本身。
+
+### 11.9 取消运行
+
+```
+POST /api/scripts/runs/{id}/cancel
+```
+
+- `queued` → 直接置 `cancelled`，worker 取到会跳过；
+- `running` → 返回 `{"status":"cancelling"}`，随后收到 SIGTERM（**整个进程组**），
+  3 秒后 SIGKILL 兜底，最终状态 `cancelled`；
+- 已结束 → `409`。
+
+### 11.10 产出文件
+
+```
+GET  /api/scripts/runs/{id}/files
+GET  /api/scripts/runs/{id}/files/download?name=result.json
+```
+
+`files` 返回 `out/` 下的文件（含子目录的相对路径）：
+
+```json
+{ "items": [{ "name": "result.json", "size": 36 }], "dir": "/app/data/scripts/runs/12/out" }
+```
+
+下载接口对 `name` 做路径归一化，越出 `out/` 的请求返回 400/404。
+
+### 11.11 删除运行记录
+
+```
+DELETE /api/scripts/runs/{id}
+```
+
+删除记录与整个工作目录，不可恢复。运行中（`queued` / `running`）返回 `409`，需先取消。
+
+---
+
+## 12. 数据导入导出
+
+### 12.1 导出 ZIP
 
 ```
 GET /api/export?favorite=1&group=风景&status=completed&search=cat
@@ -2234,7 +2431,7 @@ export-20261001_183000.zip
 |---|---|---|
 | 500 | 提示词查询失败 | `query prompts failed` |
 
-### 11.2 导入 ZIP
+### 12.2 导入 ZIP
 
 ```
 POST /api/import
@@ -2274,9 +2471,9 @@ Content-Type: multipart/form-data
 
 ---
 
-## 12. 附录：错误码与行为细节
+## 13. 附录：错误码与行为细节
 
-### 12.1 状态码汇总
+### 13.1 状态码汇总
 
 | 状态码 | 含义 | 典型场景 |
 |---|---|---|
@@ -2293,7 +2490,7 @@ Content-Type: multipart/form-data
 
 > 「未开启 `DEBUG` 时 `/api/debug/*` 返回 404」是**路由不存在**，不是资源不存在，错误体是 Go 默认的 `404 page not found` 纯文本，而非 `{"error": ...}`。
 
-### 12.2 值得注意的行为
+### 13.2 值得注意的行为
 
 **工作流**
 
@@ -2330,6 +2527,16 @@ Content-Type: multipart/form-data
 - **无鉴权**：接口不做认证，请勿直接暴露到公网。
 - **CORS 实际不生效**：白名单配置项未被读取，不会输出跨域头；跨域访问需自建反向代理。
 - `POST /api/prompts/batch-delete` 与 `POST /api/prompts/batch-run` 不校验 500 条上限。
+- **脚本能做的事等于「以容器用户身份执行任意命令」**：没有沙箱、没有 cgroup 限额、
+  没有只读挂载。`ENABLE_SCRIPTS` 默认关闭，开启即视为接受这个前提。
+
+**脚本（`ENABLE_SCRIPTS` 开启时）**
+
+- 关闭时：9 个路由不注册（404）、不建 `scripts/` 目录、不起 worker，代码路径与开启前一致。
+- 脚本对库是只读连接；写操作走 `/api/*`，才能保住收藏级联与回收站。
+- 取消/超时杀的是**进程组**，脚本里 `subprocess.Popen` 起的子进程会一起收掉。
+- 产出文件不设容量上限（脚本本来就有权写 `DATA_DIR`），只有**输出文本**有 2 MB 上限。
+- 进程崩溃（如 OOM 被内核杀掉）会记为 `failed` 且 `exit_code = -1`。
 
 **调试（`DEBUG` 开启时）**
 

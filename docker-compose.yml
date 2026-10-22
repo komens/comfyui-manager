@@ -1,6 +1,6 @@
 services:
   comfyui-server:
-    image: comfyui-server:1.10.0
+    image: comfyui-server:1.11.0
     build:
       context: .
       dockerfile: Dockerfile
@@ -13,6 +13,12 @@ services:
       DB_PATH: /app/data/db/comfyui.db
       STATIC_DIR: /app/static
       DEBUG: ${DEBUG:-}
+      # 脚本运行台。默认关闭：关闭时相关接口不注册，等于这个能力不存在。
+      # 开了之后脚本以容器内服务用户身份执行，能读写整个 /app/data ——
+      # 这个服务没有登录鉴权，只在可信内网里开。
+      ENABLE_SCRIPTS: ${ENABLE_SCRIPTS:-}
+      # 单次运行超时（秒），仅 ENABLE_SCRIPTS 开启时生效
+      SCRIPT_TIMEOUT: ${SCRIPT_TIMEOUT:-300}
     volumes:
       - ./data:/app/data
     restart: unless-stopped

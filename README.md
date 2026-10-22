@@ -1,6 +1,6 @@
-# ComfyUI 可视化作图服务
+# 素材管理平台
 
-基于 Vue 3 + Go + SQLite 的 ComfyUI 作图管理工具，适用于个人 NAS 环境。支持提示词管理、批量提交、任务跟踪、图片浏览和工作流配置。
+基于 Vue 3 + Go + SQLite 的素材管理平台，适用于个人 NAS 环境：统一管理工作流、提示词、生成任务与图片，底层对接 ComfyUI 执行出图。
 
 ## 功能概览
 
@@ -13,6 +13,7 @@
 - **负面提示词** - 绑定到工作流，每个工作流一份通用负面提示词
 - **ComfyUI UI 格式兼容** - 自动将 ComfyUI UI 导出格式转换为 API 格式
 - **断点恢复** - 服务重启后自动恢复未完成任务
+- **脚本运行台** - 贴一段一次性 Python/shell 代码直接跑，看实时输出、下载产出（默认关闭，见下文）
 
 ## 环境要求
 
@@ -41,6 +42,8 @@ SERVER_PORT=8080        # 监听端口，默认 8080
 DATA_DIR=../data        # 数据目录，默认 ../data（相对启动目录，即项目根目录的 data/）
 COMFYUI_URL=http://127.0.0.1:8188  # ComfyUI 地址
 DEBUG=                  # debug 模式总开关（默认关闭）：1 开启；其它值 = 提交载荷落盘文件路径
+ENABLE_SCRIPTS=          # 脚本运行台开关（默认关闭）：1 开启
+SCRIPT_TIMEOUT=300       # 单次脚本运行超时秒数，仅 ENABLE_SCRIPTS 开启时生效
 ```
 
 > `DEBUG` 是调试能力的总开关，后续新增的 debug 输出都归它控制。当前能力：把每次发给
@@ -149,7 +152,7 @@ docker compose up -d --build
 
 ```bash
 # 构建镜像（NAS 部署，x86_64）
-docker build --platform linux/amd64 -t comfyui-server:1.10.0 .
+docker build --platform linux/amd64 -t comfyui-server:1.11.0 .
 
 # 运行容器
 docker run -d --name comfyui-server \
@@ -157,17 +160,17 @@ docker run -d --name comfyui-server \
   -v /volume1/docker/comfyui-server/data:/app/data \
   -e COMFYUI_URL=http://192.168.1.20:8188 \
   --restart unless-stopped \
-  comfyui-server:1.10.0
+  comfyui-server:1.11.0
 
 # 导出镜像（传输到 NAS；文件名带版本号，便于多版本归档）
-docker save comfyui-server:1.10.0 -o comfyui-server-1.10.0.tar
+docker save comfyui-server:1.11.0 -o comfyui-server-1.11.0.tar
 ```
 
 **说明：**
 - `--platform linux/amd64`：指定构建平台为 x86_64 架构（适用于大多数 NAS）
 - `-p 18080:8080`：将宿主机的 18080 端口映射到容器的 8080 端口
 - `-v <宿主目录>:/app/data`：挂载数据目录，持久化数据库、图片和工作流
-- `docker save` / `docker load`：导出 tar 传到 NAS 后，用 `docker load -i comfyui-server-1.10.0.tar` 导入
+- `docker save` / `docker load`：导出 tar 传到 NAS 后，用 `docker load -i comfyui-server-1.11.0.tar` 导入
 
 ### 环境变量
 
@@ -250,6 +253,46 @@ docker compose down
 docker compose up -d --build
 ```
 
+## 脚本运行台
+
+数据整理的需求一次一个样，做成固定功能每加一种场景都要改后端、重建镜像。所以这里留了一条
+「跑一次性脚本」的路：网页里贴代码 → 运行 → 看实时输出 → 把 `out/` 里的产出下载走。
+
+**默认关闭。** 开启方式（`docker-compose.yml` 同目录的 `.env`）：
+
+```bash
+ENABLE_SCRIPTS=1
+```
+
+关闭时这 9 个接口**不注册**（一律 404），侧栏入口也不出现，不会留下任何可执行面。
+
+> ⚠️ 这是**代码执行**能力：脚本以容器内服务进程的身份运行，能读写整个 `data/`。
+> 本服务没有登录鉴权，**只在可信内网里开**，不要映射到公网。
+
+脚本里可用 `import wfkit`（每次运行自动写入工作目录）：
+
+```python
+import wfkit
+
+# 只读查库：写成只读连接是故意的，长事务会和提交抢 WAL 写锁
+for row in wfkit.query("SELECT id, filename FROM images WHERE id > ?", 100):
+    print(row["id"], wfkit.image_file(row))
+
+# 要改数据走接口，才会经过收藏级联与回收站
+wfkit.api("DELETE", f"/api/images/{123}")
+
+# 产出放 out/，跑完在页面上直接下载
+wfkit.save_output("report.json", {"ok": True})
+```
+
+要点：
+
+- 每次运行一个独立目录 `data/scripts/runs/<id>/`，cwd 就在那里，产出写 `out/`。
+- 输出（stdout+stderr 合并）上限 2 MB，超出截断；全局同时只跑一个，其余排队。
+- 取消/超时杀**整个进程组**，脚本里起的子进程不会残留。
+- 只保留最近 50 次运行，更早的记录与目录自动清理。
+- 代码快照存在运行记录里，历史里点「载入」就能改两行重跑。
+
 ## 项目结构
 
 ```
@@ -274,6 +317,9 @@ comfyui-server/
 │       ├── debug.go           # DEBUG 开关、落盘路径、事件流、启动快照
 │       ├── debugtrace.go      # 出站请求统一留痕（tracedDo）
 │       ├── debugapi.go        # 调试文件查看/下载/清空接口
+│       ├── maintenance.go     # 条件式批量清理 + 回收站
+│       ├── scripts.go         # 脚本运行台：调度、进程组控制、SSE 输出、保留策略
+│       ├── scripts_wfkit.go   # 随每次运行下发的 wfkit.py（只读库 + 调接口 + 存产出）
 │       └── ...
 ├── frontend/
 │   ├── vite.config.ts         # Vite 配置，/api 代理到 localhost:8080
@@ -295,6 +341,8 @@ comfyui-server/
 │       │   ├── GalleryView.vue      # 图片库（分页、灯箱预览）
 │       │   ├── JsonFilesView.vue    # JSON 文件管理（分页）
 │       │   ├── DebugView.vue        # 调试日志（仅 DEBUG 开启时出现在侧栏）
+│       │   ├── MaintenanceView.vue  # 数据整理（条件清理 + 回收站）
+│       │   ├── ScriptsView.vue      # 脚本运行台（仅 ENABLE_SCRIPTS 开启时出现）
 │       │   └── SettingsView.vue     # 设置页
 │       ├── router/index.ts    # 路由配置
 │       ├── style.css          # 全局设计系统样式

@@ -197,3 +197,58 @@ export type TrashBatch = {
   bytes: number
   created_at: string
 }
+
+/** 脚本运行台：容器内可用的解释器。 */
+export type ScriptRuntime = {
+  language: string
+  path: string
+  version: string
+}
+
+/**
+ * 脚本功能的状态。
+ * ENABLE_SCRIPTS 未设置时接口返回 404（路由没注册），
+ * 调用方据此判定「未开启」，不要当成错误弹红字。
+ */
+export type ScriptStatus = {
+  enabled: boolean
+  runtimes: ScriptRuntime[]
+  limits: {
+    timeout_seconds: number
+    output_bytes: number
+    max_keep: number
+    code_bytes: number
+  }
+  data_dir: string
+}
+
+export type ScriptRunState = 'queued' | 'running' | 'succeeded' | 'failed' | 'timeout' | 'cancelled'
+
+/** 历史列表里的一条（不含代码与全文输出，那两条只在详情里给）。 */
+export type ScriptRunSummary = {
+  id: number
+  title: string
+  language: string
+  status: ScriptRunState
+  exit_code: number
+  duration_ms: number
+  output_truncated: boolean
+  error: string
+  created_at: string
+  finished_at: string
+}
+
+/** 一次运行的完整记录。code 是快照，工作目录被清掉之后仍能载入重跑。 */
+export type ScriptRun = ScriptRunSummary & {
+  code: string
+  args: string
+  output: string
+  work_dir: string
+  started_at: string
+}
+
+export type ScriptFile = {
+  name: string
+  size: number
+}
+
