@@ -1,5 +1,7 @@
 # Stage 1: Build frontend
-FROM node:18-alpine AS frontend-build
+# 必须 Node 20.11+：unplugin 3.x 用 import.meta.dirname，Node 18 下是 undefined，
+# 会在加载 vite.config.ts 时报 "The paths[0] argument must be of type string"。
+FROM node:22-alpine AS frontend-build
 WORKDIR /app
 COPY frontend/package.json frontend/package-lock.json* ./
 RUN npm ci --ignore-scripts 2>/dev/null || npm install
