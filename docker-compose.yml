@@ -1,18 +1,21 @@
 services:
   comfyui-server:
-    image: comfyui-server:1.11.0
+    image: comfyui-server:1.11.2
     build:
       context: .
       dockerfile: Dockerfile
+    container_name: comfyui-server
     ports:
-      - "${SERVER_PORT:-8080}:${SERVER_PORT:-8080}"
+      # 宿主端口对齐实机 40016，容器内端口由 SERVER_PORT 控制（始终 1:1 指向容器监听口）
+      - "${HOST_PORT:-40016}:${SERVER_PORT:-8080}"
     environment:
       COMFYUI_URL: ${COMFYUI_URL:-http://127.0.0.1:8188}
       SERVER_PORT: ${SERVER_PORT:-8080}
       DATA_DIR: /app/data
       DB_PATH: /app/data/db/comfyui.db
       STATIC_DIR: /app/static
-      DEBUG: ${DEBUG:-}
+      # 与实机一致默认开启，日志落在 data/debug/；排查完在 .env 里写 DEBUG= 关掉
+      DEBUG: ${DEBUG:-1}
       # 脚本运行台。默认关闭：关闭时相关接口不注册，等于这个能力不存在。
       # 开了之后脚本以容器内服务用户身份执行，能读写整个 /app/data ——
       # 这个服务没有登录鉴权，只在可信内网里开。
@@ -20,5 +23,8 @@ services:
       # 单次运行超时（秒），仅 ENABLE_SCRIPTS 开启时生效
       SCRIPT_TIMEOUT: ${SCRIPT_TIMEOUT:-300}
     volumes:
-      - ./data:/app/data
-    restart: unless-stopped
+      # 默认指向 NAS 上的既有数据目录；本机调试时在 .env 里写 DATA_HOST_DIR=./data
+      - "${DATA_HOST_DIR:-/volume4/Docker存储/dy_xhs/comfyui}:/app/data"
+    security_opt:
+      - no-new-privileges:true
+    restart: no

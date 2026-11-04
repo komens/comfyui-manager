@@ -118,9 +118,22 @@ docker compose up -d --build
 
 项目使用多阶段构建，前后端打包成单个 Docker 镜像：
 
-1. **Stage 1** - `node:18-alpine` 构建前端（Vite build）
+1. **Stage 1** - `node:22-alpine` 构建前端（Vite build）
 2. **Stage 2** - `golang:1.23` 构建后端（CGO_ENABLED=0 静态编译）
-3. **Stage 3** - `debian:bookworm-slim` 最终镜像，包含后端二进制 + 前端静态文件
+3. **Stage 3** - `alpine:3.22` 最终镜像，包含后端二进制 + 前端静态文件
+
+最终镜像约 **63MB**。构成大致是：alpine 基础 8MB + `python3`/`bash`/`tzdata` 42MB + Go 二进制 11MB + 前端静态文件 1MB。
+
+如果不用脚本运行台，可以再省 40MB（约 **23MB**）：
+
+```bash
+docker build --platform linux/amd64 --build-arg WITH_PYTHON=0 -t comfyui-server:变体号 .
+```
+
+这个变体里 `ENABLE_SCRIPTS` 即使打开也没有解释器可用，其余功能完全一致。
+
+> alpine 用的是 musl libc，脚本里 `pip install` 拉到的 manylinux 预编译 wheel（numpy、pandas 等）装不上。
+> 需要第三方库请直接在 Dockerfile 的 `apk add` 里加 `py3-numpy`、`py3-pillow`、`py3-pip` 这类现成包。
 
 ### 🐳 NAS Docker 部署
 
@@ -152,7 +165,7 @@ docker compose up -d --build
 
 ```bash
 # 构建镜像（NAS 部署，x86_64）
-docker build --platform linux/amd64 -t comfyui-server:1.11.0 .
+docker build --platform linux/amd64 -t comfyui-server:1.11.2 .
 
 # 运行容器
 docker run -d --name comfyui-server \
@@ -160,17 +173,17 @@ docker run -d --name comfyui-server \
   -v /volume1/docker/comfyui-server/data:/app/data \
   -e COMFYUI_URL=http://192.168.1.20:8188 \
   --restart unless-stopped \
-  comfyui-server:1.11.0
+  comfyui-server:1.11.2
 
 # 导出镜像（传输到 NAS；文件名带版本号，便于多版本归档）
-docker save comfyui-server:1.11.0 -o comfyui-server-1.11.0.tar
+docker save comfyui-server:1.11.2 -o comfyui-server-1.11.2.tar
 ```
 
 **说明：**
 - `--platform linux/amd64`：指定构建平台为 x86_64 架构（适用于大多数 NAS）
 - `-p 18080:8080`：将宿主机的 18080 端口映射到容器的 8080 端口
 - `-v <宿主目录>:/app/data`：挂载数据目录，持久化数据库、图片和工作流
-- `docker save` / `docker load`：导出 tar 传到 NAS 后，用 `docker load -i comfyui-server-1.11.0.tar` 导入
+- `docker save` / `docker load`：导出 tar 传到 NAS 后，用 `docker load -i comfyui-server-1.11.2.tar` 导入
 
 ### 环境变量
 
