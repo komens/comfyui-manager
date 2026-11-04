@@ -3,14 +3,21 @@
 # 会在加载 vite.config.ts 时报 "The paths[0] argument must be of type string"。
 FROM node:22-alpine AS frontend-build
 WORKDIR /app
+# npm 源：构建容器里没有宿主代理，直连 registry.npmjs.org 会被 TLS reset（卡在 npm ci 不动）。
+# 默认走国内镜像；需要官方源时 --build-arg NPM_REGISTRY=https://registry.npmjs.org/
+ARG NPM_REGISTRY=https://registry.npmmirror.com
 COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm ci --ignore-scripts 2>/dev/null || npm install
+RUN npm config set registry "$NPM_REGISTRY" \
+ && (npm ci --ignore-scripts || npm install)
 COPY frontend/ ./
 RUN npm run build
 
 # Stage 2: Build backend
 FROM golang:1.23 AS backend-build
 WORKDIR /src
+# 同上：容器内访问 proxy.golang.org 不通，默认用 goproxy.cn
+ARG GOPROXY_URL=https://goproxy.cn,direct
+ENV GOPROXY=${GOPROXY_URL}
 COPY backend/go.mod backend/go.sum* ./
 RUN go mod download
 COPY backend/ ./
@@ -39,12 +46,16 @@ RUN CGO_ENABLED=0 GOOS=linux go build -tags nodynamic -ldflags="-s -w -X main.ve
 FROM alpine:3.22
 
 ARG WITH_PYTHON=1
+# apk 源：dl-cdn.alpinelinux.org 在国内经常几 MB 的包拉几分钟还断（python3-pycache 报 IO ERROR），
+# 换成阿里云镜像。要回到官方源：--build-arg APK_MIRROR=dl-cdn.alpinelinux.org
+ARG APK_MIRROR=mirrors.aliyun.com
 
 LABEL org.opencontainers.image.title="comfyui-server" \
       org.opencontainers.image.version="1.11.2" \
       org.opencontainers.image.description="ComfyUI workflow management and prompt library"
 
-RUN apk add --no-cache \
+RUN sed -i "s|dl-cdn.alpinelinux.org|${APK_MIRROR}|g" /etc/apk/repositories \
+    && apk add --no-cache \
       ca-certificates \
       tzdata \
       bash \
