@@ -165,7 +165,7 @@ docker build --platform linux/amd64 --build-arg WITH_PYTHON=0 -t comfyui-server:
 
 ```bash
 # 构建镜像（NAS 部署，x86_64）
-docker build --platform linux/amd64 -t comfyui-server:1.11.2 .
+docker build --platform linux/amd64 -t comfyui-server:1.11.3 .
 
 # 运行容器
 docker run -d --name comfyui-server \
@@ -173,17 +173,17 @@ docker run -d --name comfyui-server \
   -v /volume1/docker/comfyui-server/data:/app/data \
   -e COMFYUI_URL=http://192.168.1.20:8188 \
   --restart unless-stopped \
-  comfyui-server:1.11.2
+  comfyui-server:1.11.3
 
 # 导出镜像（传输到 NAS；文件名带版本号，便于多版本归档）
-docker save comfyui-server:1.11.2 -o comfyui-server-1.11.2.tar
+docker save comfyui-server:1.11.3 -o comfyui-server-1.11.3.tar
 ```
 
 **说明：**
 - `--platform linux/amd64`：指定构建平台为 x86_64 架构（适用于大多数 NAS）
 - `-p 18080:8080`：将宿主机的 18080 端口映射到容器的 8080 端口
 - `-v <宿主目录>:/app/data`：挂载数据目录，持久化数据库、图片和工作流
-- `docker save` / `docker load`：导出 tar 传到 NAS 后，用 `docker load -i comfyui-server-1.11.2.tar` 导入
+- `docker save` / `docker load`：导出 tar 传到 NAS 后，用 `docker load -i comfyui-server-1.11.3.tar` 导入
 
 ### 环境变量
 
