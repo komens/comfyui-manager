@@ -146,14 +146,14 @@ func (a *app) getPrompt(w http.ResponseWriter, r *http.Request) {
 			var workflowName string
 			_ = rows.Scan(&itemID, &taskID, &itemStatus, &promptID, &errorMsg, &workflowID, &workflowName)
 			// Get images for this item
-			imgRows, _ := a.db.QueryContext(r.Context(), `SELECT id, filename FROM images WHERE generation_item_id=?`, itemID)
+			imgRows, _ := a.db.QueryContext(r.Context(), `SELECT id, filename, width, height FROM images WHERE generation_item_id=?`, itemID)
 			images := make([]map[string]any, 0)
 			if imgRows != nil {
 				for imgRows.Next() {
-					var imgID int
+					var imgID, imgW, imgH int
 					var filename string
-					_ = imgRows.Scan(&imgID, &filename)
-					images = append(images, map[string]any{"id": imgID, "filename": filename})
+					_ = imgRows.Scan(&imgID, &filename, &imgW, &imgH)
+					images = append(images, map[string]any{"id": imgID, "filename": filename, "width": imgW, "height": imgH})
 				}
 				imgRows.Close()
 			}

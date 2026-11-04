@@ -3,6 +3,7 @@ import { onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import { api, type Task } from '../api/client'
+import { thumbUrl } from '../utils/imageUrls'
 import { openImageViewer } from '../utils/imageViewer'
 
 type Stats = { total_tasks: number; total_images: number; pending_entries: number; running_tasks: number }
@@ -132,7 +133,7 @@ function formatTime(t: string) {
         :to="`/tasks/${task.id}`"
         class="list-row list-row-clickable recent-task-row"
       >
-        <img v-if="task.image_id" class="recent-thumb" :src="`/api/images/${task.image_id}/file`" alt="结果图" loading="lazy" @click="openResult(task, $event)" />
+        <img v-if="task.image_id" class="recent-thumb" :src="thumbUrl(task.image_id)" alt="结果图" loading="lazy" decoding="async" @click="openResult(task, $event)" />
         <div v-else class="recent-thumb recent-thumb-empty">无图</div>
         <div class="flex-1 truncate">
           <div class="recent-line1">

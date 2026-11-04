@@ -193,7 +193,7 @@ func (a *app) recoverScriptRuns() {
 }
 
 // detectScriptRuntimes 探测可用解释器。容器里默认只有 sh；
-// python3 需要 Dockerfile 里装（见 Dockerfile 的 apt 列表）。
+// python3 需要 Dockerfile 里装（见 Dockerfile 的 apk 列表）。
 func detectScriptRuntimes() map[string]scriptRuntime {
 	found := map[string]scriptRuntime{}
 	python := ""

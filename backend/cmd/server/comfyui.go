@@ -560,7 +560,9 @@ func (a *app) checkAndDownload(itemID, taskID int64, comfyPromptID, baseURL stri
 				saveErr = dlErr
 				continue
 			}
-			res, insertErr := a.db.Exec(`INSERT INTO images(generation_item_id, filename, storage_path, created_at) VALUES(?,?,'',?)`, itemID, filename, time.Now())
+			// 尺寸直接从内存里的原始字节解（只读文件头），预览端才能拿到真比例
+			imgW, imgH := imageSizeFromBytes(imgData)
+			res, insertErr := a.db.Exec(`INSERT INTO images(generation_item_id, filename, storage_path, width, height, created_at) VALUES(?,?,'',?,?,?)`, itemID, filename, imgW, imgH, time.Now())
 			if insertErr != nil {
 				a.log.Printf("insert image record failed: %v", insertErr)
 				saveErr = insertErr
@@ -575,6 +577,9 @@ func (a *app) checkAndDownload(itemID, taskID int64, comfyPromptID, baseURL stri
 				continue
 			}
 			_, _ = a.db.Exec(`UPDATE images SET storage_path=? WHERE id=?`, target, imageID)
+			// 缩略图异步生成：不阻塞出图流程，失败也不影响这张图本身可用
+			// （前端请求缩略图时会按需补生成）。
+			a.queueThumbBuild(imageID, target)
 			found = true
 		}
 	}

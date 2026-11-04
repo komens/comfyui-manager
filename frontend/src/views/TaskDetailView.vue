@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import { api, type Task } from '../api/client'
+import { thumbUrl } from '../utils/imageUrls'
 import { openImageViewer } from '../utils/imageViewer'
 import { backToListOr } from '../utils/nav'
 
@@ -11,7 +12,7 @@ function backToList() {
   backToListOr(router, '/tasks')
 }
 
-type TaskItem = { id: number; status: string; positive_prompt: string; negative_prompt: string; error_message: string; notes?: string; images?: { id: number; filename: string }[] }
+type TaskItem = { id: number; status: string; positive_prompt: string; negative_prompt: string; error_message: string; notes?: string; images?: { id: number; filename: string; width?: number; height?: number }[] }
 
 const route = useRoute()
 const router = useRouter()
@@ -23,14 +24,14 @@ let stream: EventSource | undefined
 let retryCount = 0
 const maxRetries = 5
 
-// 任务全部结果图摊平：点开某张图后可跨生成项前后翻页浏览
-const allImageIds = computed(() => items.value.flatMap(i => (i.images || []).map(img => img.id)))
+// 任务全部结果图摊平：点开某张图后可跨生成项前后翻页浏览（带尺寸，按真比例展示）
+const allImageRefs = computed(() => items.value.flatMap(i => (i.images || []).map(img => ({ id: img.id, width: img.width, height: img.height }))))
 
 function openItemImage(item: TaskItem, index: number) {
   const ids = (item.images || []).map(i => i.id)
   if (!ids.length) return
-  const flat = allImageIds.value
-  const globalIndex = Math.max(0, flat.indexOf(ids[index]))
+  const flat = allImageRefs.value
+  const globalIndex = Math.max(0, flat.findIndex(r => r.id === ids[index]))
   openImageViewer(flat, globalIndex, { mutated: () => load() })
 }
 
@@ -155,9 +156,10 @@ onUnmounted(() => stream?.close())
             v-for="(img, i) in item.images"
             :key="img.id"
             class="ic-thumb"
-            :src="`/api/images/${img.id}/file`"
+            :src="thumbUrl(img.id)"
             :alt="img.filename"
             loading="lazy"
+            decoding="async"
             @click="openItemImage(item, i)"
           />
         </div>

@@ -4,6 +4,7 @@ import PhotoSwipeLightbox from 'photoswipe/lightbox'
 import PhotoSwipe from 'photoswipe'
 import 'photoswipe/style.css'
 import { api } from '../api/client'
+import { previewUrl, originalUrl, previewSize } from './imageUrls'
 
 export type ViewerDetail = {
   id: number
@@ -14,6 +15,9 @@ export type ViewerDetail = {
   prompt_title: string
   positive_prompt: string
   negative_prompt: string
+  /** 原图像素宽高，用于「查看原图」时换算出正确的 1:1 尺寸 */
+  width?: number
+  height?: number
 }
 
 export type ViewerCallbacks = {
@@ -22,19 +26,52 @@ export type ViewerCallbacks = {
   mutated?: () => void
 }
 
-type SlideItem = { width: number; height: number; src: string; msrc: string; alt: string; psId: number }
+// src 用 preview（长边 1600 的 WebP），不再直接拉原图：
+// 一张原图 1.5–4.4MB，preview 只有 74–144KB，画质在 2K 屏上看不出差别。
+// 需要 1:1 细节时由底部的「查看原图」按钮按需切换。
+type SlideItem = { width: number; height: number; src: string; alt: string; psId: number; isOriginal?: boolean }
 
-function loadImageSize(url: string): Promise<{ width: number; height: number }> {
+/**
+ * 调用方可以只给 id，也可以带上后端返回的像素宽高。
+ * 宽高**必须**尽量带上：PhotoSwipe 只认 data.width/height，从不读 naturalWidth，
+ * 拿不到真尺寸的图会被当正方形拉伸（竖版长图被压扁）。
+ */
+export type ViewerRef = number | { id: number; width?: number; height?: number }
+
+type Ref = { id: number; width: number; height: number }
+
+/** 尺寸未知时的临时占位（方图）——只作为兜底显示，量到真尺寸后立即纠正 */
+const PLACEHOLDER_SIZE = 1024
+const MEASURE_CONCURRENCY = 3
+const MEASURE_TIMEOUT = 8000
+
+function toRefs(input: ViewerRef[]): Ref[] {
+  return input.map(r => {
+    if (typeof r === 'number') return { id: r, width: 0, height: 0 }
+    const width = Math.round(Number(r.width) || 0)
+    const height = Math.round(Number(r.height) || 0)
+    return { id: r.id, width: width > 0 ? width : 0, height: height > 0 ? height : 0 }
+  })
+}
+
+/**
+ * 兜底实测一张图的像素尺寸。
+ * 正常路径下后端已随列表返回宽高（images.go/imagesize.go），这里根本不会触发；
+ * 只有历史数据（列刚加上还没回填完）或文件缺失才走这条路。
+ */
+function measureImage(url: string): Promise<{ width: number; height: number } | null> {
   return new Promise(resolve => {
     const img = new Image()
-    const timer = setTimeout(() => resolve({ width: 1024, height: 1024 }), 10000)
+    const timer = setTimeout(() => resolve(null), MEASURE_TIMEOUT)
     img.onload = () => {
       clearTimeout(timer)
-      resolve({ width: img.naturalWidth || 1024, height: img.naturalHeight || 1024 })
+      const w = img.naturalWidth
+      const h = img.naturalHeight
+      resolve(w > 0 && h > 0 ? { width: w, height: h } : null)
     }
     img.onerror = () => {
       clearTimeout(timer)
-      resolve({ width: 1024, height: 1024 })
+      resolve(null)
     }
     img.src = url
   })
@@ -88,52 +125,62 @@ export type PrefetchOptions = {
   filters?: { favorite?: boolean | string; q?: string; group?: string }
 }
 
-export async function openImageViewer(ids: number[], startIndex: number, cb: ViewerCallbacks = {}, prefetch?: PrefetchOptions) {
-  if (!ids.length || activeIds.length) return
+export async function openImageViewer(input: ViewerRef[], startIndex: number, cb: ViewerCallbacks = {}, prefetch?: PrefetchOptions) {
+  if (!input.length || activeIds.length) return
 
-  let loadedIds = [...ids]
-  let firstPage = 1
+  let loadedRefs = toRefs(input)
   let lastPage = 1
-  let totalCount = ids.length
+  let totalCount = input.length
 
   // —— 分页预取 ——
   // 打开大图时，先把「当前页之前」的各页补齐进列表（按页请求 /api/images，
   // 不是一次性全量拉取），这样往回切能一路走完整个筛选结果集；
   // 往后切则在接近末尾时由 maybePrefetch 按需拉下一页 push 进列表。
   if (prefetch) {
-    firstPage = prefetch.page
     lastPage = prefetch.page
     totalCount = prefetch.total
     if (prefetch.page > 1) {
       try {
         const pages = await Promise.all(
-          Array.from({ length: prefetch.page - 1 }, (_, k) => fetchPageIds(k + 1, prefetch)),
+          Array.from({ length: prefetch.page - 1 }, (_, k) => fetchPageRefs(k + 1, prefetch)),
         )
         const before = pages.flat()
-        loadedIds = [...before, ...ids]
+        loadedRefs = [...before, ...loadedRefs]
         startIndex = (prefetch.page - 1) * prefetch.pageSize + startIndex
       } catch {
         // 预取失败不阻断：退化为仅当前页
-        loadedIds = [...ids]
+        loadedRefs = toRefs(input)
       }
     }
   }
 
-  activeIds = [...loadedIds]
+  activeIds = loadedRefs.map(r => r.id)
 
-  const urls = loadedIds.map(id => `/api/images/${id}/file`)
-  const sizes = await Promise.all(urls.map(loadImageSize))
-  const items: SlideItem[] = loadedIds.map((id, i) => ({
-    width: sizes[i].width,
-    height: sizes[i].height,
-    src: urls[i],
-    msrc: urls[i],
-    alt: `图片 #${id}`,
-    psId: id,
-  }))
+  // 宽高全部来自接口/调用方，不再为量尺寸去并发拉原图——
+  // 之前正是「上百张并发 + 10s 超时兜底成 1024×1024」把竖版长图压成方图的。
+  const items: SlideItem[] = loadedRefs.map(toSlideItem)
+  /** 尺寸未知（历史数据）的索引：先用方图占位，量到真尺寸再纠正 */
+  const unknownIdx = new Set<number>()
+  loadedRefs.forEach((r, i) => {
+    if (r.width <= 0 || r.height <= 0) unknownIdx.add(i)
+  })
+
+  function toSlideItem(r: Ref): SlideItem {
+    const known = r.width > 0 && r.height > 0
+    // 尺寸要给「preview 这张图」的实际像素，不是原图：
+    // PhotoSwipe 用它算 fit 与双击放大上限，给原图尺寸会让它以为还能放到更大，越放越糊。
+    const size = known ? previewSize(r.width, r.height) : { width: PLACEHOLDER_SIZE, height: PLACEHOLDER_SIZE }
+    return {
+      width: size.width,
+      height: size.height,
+      src: previewUrl(r.id),
+      alt: `图片 #${r.id}`,
+      psId: r.id,
+    }
+  }
 
   const loadingPages = new Set<string>()
-  async function fetchPageIds(page: number, opts: PrefetchOptions): Promise<number[]> {
+  async function fetchPageRefs(page: number, opts: PrefetchOptions): Promise<Ref[]> {
     const params = new URLSearchParams()
     const f = opts.filters || {}
     if (f.favorite) params.set('favorite', '1')
@@ -141,9 +188,9 @@ export async function openImageViewer(ids: number[], startIndex: number, cb: Vie
     if (f.group) params.set('group', f.group)
     params.set('page', String(page))
     params.set('page_size', String(opts.pageSize))
-    const result = await api<{ items: { id: number }[]; total: number }>(`/api/images?${params}`)
+    const result = await api<{ items: { id: number; width?: number; height?: number }[]; total: number }>(`/api/images?${params}`)
     totalCount = result.total
-    return result.items.map(i => i.id)
+    return toRefs(result.items)
   }
   async function maybePrefetch(cur: number) {
     const opts = prefetch
@@ -153,21 +200,15 @@ export async function openImageViewer(ids: number[], startIndex: number, cb: Vie
     if (lastPage * opts.pageSize >= totalCount) return
     loadingPages.add('next')
     try {
-      const pageIds = await fetchPageIds(lastPage + 1, opts)
-      if (!pageIds.length) return
-      const sz = await Promise.all(pageIds.map(id => loadImageSize(`/api/images/${id}/file`)))
-      pageIds.forEach((id, k) => {
-        loadedIds.push(id)
-        items.push({
-          width: sz[k].width,
-          height: sz[k].height,
-          src: `/api/images/${id}/file`,
-          msrc: `/api/images/${id}/file`,
-          alt: `图片 #${id}`,
-          psId: id,
-        })
+      const pageRefs = await fetchPageRefs(lastPage + 1, opts)
+      if (!pageRefs.length) return
+      pageRefs.forEach(ref => {
+        const index = items.length
+        items.push(toSlideItem(ref))
+        loadedRefs.push(ref)
+        if (ref.width <= 0 || ref.height <= 0) unknownIdx.add(index)
       })
-      activeIds = [...loadedIds]
+      activeIds = loadedRefs.map(r => r.id)
       lastPage++
     } catch {
       /* 预取失败不阻断浏览 */
@@ -186,6 +227,47 @@ export async function openImageViewer(ids: number[], startIndex: number, cb: Vie
     showHideAnimationType: 'zoom',
     bgOpacity: 0.92,
   })
+
+  // —— 尺寸兜底（只有历史数据才走）——
+  // 并发限 3，且只对「要看的这张」按需触发；量到真尺寸后改 item 并重建该幻灯片，
+  // 不会像以前那样把一次误判的方图比例永久固化。
+  const measureQueue: number[] = []
+  const measurePending = new Set<number>()
+  let measureBusy = 0
+
+  function pumpMeasure() {
+    while (measureBusy < MEASURE_CONCURRENCY && measureQueue.length) {
+      const index = measureQueue.shift() as number
+      if (!unknownIdx.has(index)) {
+        measurePending.delete(index)
+        continue
+      }
+      measureBusy++
+      measureImage(items[index].src).then(size => {
+        measureBusy--
+        measurePending.delete(index)
+        if (size) {
+          items[index].width = size.width
+          items[index].height = size.height
+          unknownIdx.delete(index)
+          // 幻灯片可能已经按方图建好了，必须重建才会用上新比例
+          lightbox.pswp?.refreshSlideContent(index)
+        } else {
+          // 量不到（文件缺失/损坏）就保持占位，本次会话不再重试
+          unknownIdx.delete(index)
+        }
+        pumpMeasure()
+      })
+    }
+  }
+
+  function requestMeasure(index: number, urgent = false) {
+    if (!unknownIdx.has(index) || measurePending.has(index)) return
+    measurePending.add(index)
+    if (urgent) measureQueue.unshift(index)
+    else measureQueue.push(index)
+    pumpMeasure()
+  }
 
   let captionEl: HTMLElement | null = null
   let fabEl: HTMLElement | null = null
@@ -233,9 +315,12 @@ export async function openImageViewer(ids: number[], startIndex: number, cb: Vie
         <div class="ps-caps-meta">${escapeHtml(formatDate(detail.created_at))}${detail.filename ? ` · ${escapeHtml(detail.filename)}` : ''}</div>
         ${source}${pos}${neg}
         <div class="ps-caps-actions">
+          <button class="ps-caps-btn" data-action="view-original" type="button">查看原图</button>
           <button class="ps-caps-btn primary" data-action="download" type="button">↓ 下载原图</button>
         </div>
       </div>`
+    // 换图后按钮要回到「查看原图」；同一张图已切到原图则显示「看压缩图」
+    syncOriginalButtons()
   }
 
   async function showCaptionFor(id: number) {
@@ -267,6 +352,81 @@ export async function openImageViewer(ids: number[], startIndex: number, cb: Vie
     const fav = !!detail?.is_favorite
     favBtn.classList.toggle('active', fav)
     favBtn.textContent = fav ? '★ 已收藏' : '☆ 收藏'
+  }
+
+  /** 当前幻灯片的 data（PhotoSwipe 内部叫 currSlide.data） */
+  function currentSlideData(): SlideItem | undefined {
+    const pswp = lightbox.pswp as unknown as { currSlide?: { data?: SlideItem } } | undefined
+    return pswp?.currSlide?.data
+  }
+
+  /** 同步「查看原图 / 看压缩图」两处入口的文案与状态 */
+  function syncOriginalButtons() {
+    const isOriginal = !!currentSlideData()?.isOriginal
+    const fabBtn = fabEl?.querySelector<HTMLButtonElement>('[data-action="fab-original"]')
+    if (fabBtn) {
+      fabBtn.textContent = isOriginal ? '↩ 看压缩图' : '🔍 查看原图'
+      fabBtn.classList.toggle('active', isOriginal)
+    }
+    const capBtn = captionEl?.querySelector<HTMLButtonElement>('[data-action="view-original"]')
+    if (capBtn) capBtn.textContent = isOriginal ? '看压缩图' : '查看原图'
+  }
+
+  /**
+   * 在原图与压缩版之间切换当前这一张。
+   * 只对「正在看的这张」按需加载原图，不做任何预取——一张 1.5–4.4MB，
+   * 预取等于把刚省下来的流量原样还回去。
+   */
+  async function toggleOriginal() {
+    const pswp = lightbox.pswp
+    const data = currentSlideData()
+    if (!pswp || !data) return
+    const fabBtn = fabEl?.querySelector<HTMLButtonElement>('[data-action="fab-original"]')
+    if (fabBtn?.disabled) return
+
+    if (data.isOriginal) {
+      // 切回压缩版：preview 早就在浏览器缓存里，瞬时完成
+      const detail = detailCache.get(data.psId)
+      const size = detail?.width && detail?.height
+        ? previewSize(detail.width, detail.height)
+        : { width: data.width, height: data.height }
+      data.src = previewUrl(data.psId)
+      data.width = size.width
+      data.height = size.height
+      data.isOriginal = false
+      pswp.refreshSlideContent(pswp.currIndex)
+      pswp.updateSize(true)
+      syncOriginalButtons()
+      return
+    }
+
+    if (fabBtn) {
+      fabBtn.disabled = true
+      fabBtn.textContent = '加载原图…'
+    }
+    let ok = false
+    try {
+      const src = originalUrl(data.psId)
+      // 先等加载完再换 src，否则 PhotoSwipe 会先闪一个空白图框
+      const size = await measureImage(src)
+      if (!size) return
+      data.src = src
+      // 尺寸必须一起换成原图真实像素，否则双击放大到 1:1 的上限还是压缩图的
+      data.width = size.width
+      data.height = size.height
+      data.isOriginal = true
+      pswp.refreshSlideContent(pswp.currIndex)
+      pswp.updateSize(true)
+      ok = true
+    } finally {
+      if (fabBtn) fabBtn.disabled = false
+      syncOriginalButtons()
+      // 超时/读失败时给个明确反馈，否则点了像没反应
+      if (!ok && !data.isOriginal && fabBtn) {
+        fabBtn.textContent = '原图加载失败'
+        setTimeout(() => syncOriginalButtons(), 2000)
+      }
+    }
   }
 
   async function doFavorite() {
@@ -322,6 +482,8 @@ export async function openImageViewer(ids: number[], startIndex: number, cb: Vie
           } else if (action === 'go-prompt' && detail?.prompt_id) {
             cb.goToPrompt?.(detail.prompt_id)
             pswp.close()
+          } else if (action === 'view-original') {
+            await toggleOriginal()
           } else if (action === 'download') {
             window.open(`/api/images/${currentId}/download`, '_blank')
           }
@@ -335,6 +497,7 @@ export async function openImageViewer(ids: number[], startIndex: number, cb: Vie
       fabEl = document.createElement('div')
       fabEl.className = 'ps-action-fab'
       fabEl.innerHTML = `
+        <button class="ps-fab-btn" data-action="fab-original" type="button">🔍 查看原图</button>
         <button class="ps-fab-btn" data-action="fab-favorite" type="button">☆ 收藏</button>
         <button class="ps-fab-btn danger" data-action="fab-delete" type="button">🗑 删除</button>`
       // 关键：阻止 PhotoSwipe 把按钮上的按下当作图片拖拽（否则 click 会被吞，按钮点不动）
@@ -348,6 +511,8 @@ export async function openImageViewer(ids: number[], startIndex: number, cb: Vie
         if (action === 'fab-favorite') {
           if (!detailCache.get(currentId)) return
           await doFavorite()
+        } else if (action === 'fab-original') {
+          await toggleOriginal()
         } else if (action === 'fab-delete') {
           await doDelete()
         }
@@ -362,7 +527,13 @@ export async function openImageViewer(ids: number[], startIndex: number, cb: Vie
     const pswp = lightbox.pswp
     const data = (pswp as unknown as { currData?: SlideItem })?.currData
     if (data?.psId) showCaptionFor(data.psId)
-    if (prefetch && pswp) maybePrefetch(pswp.currIndex)
+    if (pswp) {
+      // 换图后按钮要回到「查看原图」状态（上一张切过原图不影响这一张）
+      syncOriginalButtons()
+      // 历史数据兜底：划到哪张就先量哪张（插队），量到后重建这张的幻灯片
+      requestMeasure(pswp.currIndex, true)
+      if (prefetch) maybePrefetch(pswp.currIndex)
+    }
   })
 
   lightbox.on('destroy', () => {
@@ -373,6 +544,17 @@ export async function openImageViewer(ids: number[], startIndex: number, cb: Vie
     fabEl = null
     if (mutated) cb.mutated?.()
   })
+
+  // 首帧这张要是历史数据（缺尺寸），先单独量一次再开——只发一个请求，
+  // 不会重演「整页并发拉原图、超时全退成方图」的老问题。
+  if (unknownIdx.has(startIndex)) {
+    const size = await measureImage(items[startIndex].src)
+    if (size) {
+      items[startIndex].width = size.width
+      items[startIndex].height = size.height
+      unknownIdx.delete(startIndex)
+    }
+  }
 
   try {
     await lightbox.loadAndOpen(startIndex, items)

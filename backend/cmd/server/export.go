@@ -269,6 +269,8 @@ func (a *app) importData(w http.ResponseWriter, r *http.Request) {
 	// 合并 images（按 filename 去重）
 	importedImages := 0
 	skippedImages := 0
+	// 事务里插入成功的图片，提交后统一丢进缩略图队列
+	pendingThumbs := make([]thumbJob, 0, 16)
 
 	for _, img := range images {
 		// ZIP 内的实际文件名：优先 archive_name，兼容旧导出包仅有 filename 的情况。
@@ -319,20 +321,29 @@ func (a *app) importData(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// 插入图片记录
-		_, err = tx.Exec(`INSERT INTO images(generation_item_id, filename, storage_path, is_favorite, created_at) VALUES(?,?,?,?,CURRENT_TIMESTAMP)`,
-			itemID, displayName, target, boolToInt(img.IsFavorite))
+		// 插入图片记录。尺寸按刚落盘的文件头取（拷贝失败或图损坏则留 0，由回填补齐）
+		imgW, imgH := imageSizeFromFile(target)
+		res, err := tx.Exec(`INSERT INTO images(generation_item_id, filename, storage_path, is_favorite, width, height, created_at) VALUES(?,?,?,?,?,?,CURRENT_TIMESTAMP)`,
+			itemID, displayName, target, boolToInt(img.IsFavorite), imgW, imgH)
 		if err != nil {
 			skippedImages++
 			continue
 		}
 		importedImages++
+		if newID, idErr := res.LastInsertId(); idErr == nil && imgW > 0 && imgH > 0 {
+			pendingThumbs = append(pendingThumbs, thumbJob{id: newID, src: target})
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
 		tx.Rollback()
 		writeError(w, 500, "commit failed")
 		return
+	}
+
+	// 事务提交后再排队：回滚的图不该留下缩略图
+	for _, job := range pendingThumbs {
+		a.queueThumbBuild(job.id, job.src)
 	}
 
 	writeJSON(w, 200, map[string]any{

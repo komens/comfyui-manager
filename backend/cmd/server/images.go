@@ -28,6 +28,9 @@ func (a *app) deleteImageByID(ctx context.Context, id int64) error {
 	if target := a.imageFilePath(path); target != "" {
 		_ = os.Remove(target)
 	}
+	// 派生文件跟着原图一起删。漏掉会留下永远没人引用的缩略图；
+	// 这里删失败也不阻断（维护页的孤儿清理能兜底）。
+	a.removeThumbs(id)
 	result, err := a.db.ExecContext(ctx, `DELETE FROM images WHERE id=?`, id)
 	if err != nil {
 		return err
@@ -90,7 +93,7 @@ func (a *app) listImages(w http.ResponseWriter, r *http.Request) {
 	pageArgs := append(args, pageSize, offset)
 	rows, err := a.db.QueryContext(r.Context(),
 		`SELECT i.id, i.generation_item_id, i.filename, i.storage_path, i.is_favorite, i.created_at,
-		        COALESCE(gi.prompt_id, 0), COALESCE(p.title, '')`+joins+where+`
+		        COALESCE(gi.prompt_id, 0), COALESCE(p.title, ''), i.width, i.height`+joins+where+`
 		 ORDER BY i.id DESC LIMIT ? OFFSET ?`, pageArgs...)
 	if err != nil {
 		writeError(w, 500, "query images failed")
@@ -99,13 +102,13 @@ func (a *app) listImages(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	items := make([]map[string]any, 0)
 	for rows.Next() {
-		var id, itemID, isFav, promptID int
+		var id, itemID, isFav, promptID, imgW, imgH int
 		var filename, path, created, promptTitle string
-		if err := rows.Scan(&id, &itemID, &filename, &path, &isFav, &created, &promptID, &promptTitle); err != nil {
+		if err := rows.Scan(&id, &itemID, &filename, &path, &isFav, &created, &promptID, &promptTitle, &imgW, &imgH); err != nil {
 			writeError(w, 500, "read image failed")
 			return
 		}
-		items = append(items, map[string]any{"id": id, "generation_item_id": itemID, "filename": filename, "path": path, "is_favorite": isFav == 1, "created_at": created, "prompt_id": promptID, "prompt_title": promptTitle})
+		items = append(items, map[string]any{"id": id, "generation_item_id": itemID, "filename": filename, "path": path, "is_favorite": isFav == 1, "created_at": created, "prompt_id": promptID, "prompt_title": promptTitle, "width": imgW, "height": imgH})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "page": page, "page_size": pageSize})
 }
@@ -136,26 +139,27 @@ func (a *app) getImage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid image id")
 		return
 	}
-	var itemID, isFav, promptID int
+	var itemID, isFav, promptID, imgW, imgH int
 	var filename, path, created, promptTitle, positive, negative string
 	// 一次左连接取全：图片 → 任务项 → 任务 → 工作流（负向词），以及任务项 → 提示词（title）。
 	// 用 LEFT JOIN 是因为直接提交的图可能没有关联提示词/工作流，INNER JOIN 会整行丢失。
 	err = a.db.QueryRowContext(r.Context(),
 		`SELECT i.generation_item_id, i.filename, i.storage_path, i.is_favorite, i.created_at,
 		        COALESCE(gi.prompt_id, 0), COALESCE(p.title, ''),
-		        COALESCE(gi.positive_prompt, ''), COALESCE(w.negative_prompt, '')
+		        COALESCE(gi.positive_prompt, ''), COALESCE(w.negative_prompt, ''),
+		        i.width, i.height
 		 FROM images i
 		 LEFT JOIN generation_items gi ON gi.id = i.generation_item_id
 		 LEFT JOIN generation_tasks gt ON gt.id = gi.task_id
 		 LEFT JOIN workflows w ON w.id = gt.workflow_id
 		 LEFT JOIN prompts p ON p.id = gi.prompt_id
 		 WHERE i.id=?`, id).
-		Scan(&itemID, &filename, &path, &isFav, &created, &promptID, &promptTitle, &positive, &negative)
+		Scan(&itemID, &filename, &path, &isFav, &created, &promptID, &promptTitle, &positive, &negative, &imgW, &imgH)
 	if err != nil {
 		writeError(w, 404, "image not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": id, "generation_item_id": itemID, "filename": filename, "storage_path": path, "positive_prompt": positive, "negative_prompt": negative, "is_favorite": isFav == 1, "created_at": created, "prompt_id": promptID, "prompt_title": promptTitle})
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "generation_item_id": itemID, "filename": filename, "storage_path": path, "positive_prompt": positive, "negative_prompt": negative, "is_favorite": isFav == 1, "created_at": created, "prompt_id": promptID, "prompt_title": promptTitle, "width": imgW, "height": imgH})
 }
 
 func (a *app) downloadImage(w http.ResponseWriter, r *http.Request) {

@@ -1300,6 +1300,21 @@ func (a *app) purgeTrash(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "remove trash directory failed")
 		return
 	}
+	// 缩略图不跟着进回收站（还原后 id 不变、还能直接复用），但批次被彻底删除后
+	// 它们就成了孤儿，这里一并清掉。必须赶在 DELETE trash_images 之前查 image_id。
+	if idRows, err := a.db.QueryContext(r.Context(), `SELECT DISTINCT image_id FROM trash_images WHERE batch_id=?`, id); err == nil {
+		thumbIDs := make([]int64, 0, 16)
+		for idRows.Next() {
+			var imgID int64
+			if idRows.Scan(&imgID) == nil {
+				thumbIDs = append(thumbIDs, imgID)
+			}
+		}
+		idRows.Close()
+		for _, imgID := range thumbIDs {
+			a.removeThumbs(imgID)
+		}
+	}
 	if _, err := a.db.ExecContext(r.Context(), `DELETE FROM trash_images WHERE batch_id=?`, id); err != nil {
 		writeError(w, 500, "delete trash records failed")
 		return
@@ -1436,6 +1451,13 @@ func (a *app) cleanupStatsHandler(w http.ResponseWriter, r *http.Request) {
 	out["image_bytes"] = totalBytes
 	out["orphan_files"] = orphans
 
+	// 缩略图单独统计：它们是派生数据，体积和原图分开看才知道省了多少 /
+	// 占了多少。迁移时可以整个 data/thumbnails 丢掉，服务会自动重建。
+	thumbFiles, thumbBytes, thumbOrphans := a.scanThumbDir(ctx)
+	out["thumb_files"] = thumbFiles
+	out["thumb_bytes"] = thumbBytes
+	out["thumb_orphan_files"] = len(thumbOrphans)
+
 	if info, err := os.Stat(a.dbPath); err == nil {
 		out["db_bytes"] = info.Size()
 	}
@@ -1481,10 +1503,11 @@ func (a *app) scanImageDir(ctx context.Context) (files int, bytes int64, orphanN
 	return files, bytes, orphanNames
 }
 
-// purgeOrphans 删除没有任何库记录引用的图片文件。
+// purgeOrphans 删除没有任何库记录引用的图片文件（以及它们的缩略图）。
 func (a *app) purgeOrphans(w http.ResponseWriter, r *http.Request) {
 	_, _, orphans := a.scanImageDir(r.Context())
-	if len(orphans) == 0 {
+	_, _, thumbOrphanIDs := a.scanThumbDir(r.Context())
+	if len(orphans) == 0 && len(thumbOrphanIDs) == 0 {
 		writeJSON(w, 200, map[string]any{"removed": 0})
 		return
 	}
@@ -1506,8 +1529,12 @@ func (a *app) purgeOrphans(w http.ResponseWriter, r *http.Request) {
 			removed++
 		}
 	}
-	a.log.Printf("purged %d orphan image files", removed)
-	writeJSON(w, 200, map[string]any{"removed": removed})
+	// 图片记录已经不在了，对应的缩略图也没有任何引用了
+	for _, id := range thumbOrphanIDs {
+		a.removeThumbs(id)
+	}
+	a.log.Printf("purged %d orphan image files, %d orphan thumbnails", removed, len(thumbOrphanIDs))
+	writeJSON(w, 200, map[string]any{"removed": removed, "thumb_removed": len(thumbOrphanIDs)})
 }
 
 var _ = sql.ErrNoRows

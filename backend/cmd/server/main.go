@@ -53,6 +53,9 @@ type app struct {
 	// scripts 是脚本运行台。由 initScripts 赋值；为 nil 表示 ENABLE_SCRIPTS 未开启，
 	// 此时相关路由压根不注册（不是返 403，是这个能力不存在）。
 	scripts *scriptRunner
+	// thumbs 是缩略图生成器（thumbs.go）。由 initThumbs 赋值，
+	// 为 nil 时缩略图接口退化为直接返回原图。
+	thumbs *thumbMaker
 }
 
 type urlRequest struct {
@@ -101,6 +104,8 @@ func main() {
 	if err := a.initScripts(cfg); err != nil {
 		log.Fatal(err)
 	}
+	// 缩略图生成器：起固定数量的 worker，队列满时自动丢弃（派生数据可重建）
+	a.initThumbs()
 	// 启动快照要等库和 settings 都可用之后才写得出来，所以放在这里
 	dumpStartupSnapshot(a.startupSnapshot(cfg))
 
@@ -156,6 +161,10 @@ func main() {
 	mux.HandleFunc("GET /api/images", a.listImages)
 	mux.HandleFunc("GET /api/images/{id}", a.getImage)
 	mux.HandleFunc("GET /api/images/{id}/file", a.imageFile)
+	// 缩略图两档：thumb 给小图标，preview 给大图预览（图库网格也用这一档，
+	// 点开时浏览器缓存直接命中，不会重复下载）。原图仍走 /file。
+	mux.HandleFunc("GET /api/images/{id}/thumb", a.imageThumbHandler(thumbSpecThumb))
+	mux.HandleFunc("GET /api/images/{id}/preview", a.imageThumbHandler(thumbSpecPreview))
 	mux.HandleFunc("GET /api/images/{id}/download", a.downloadImage)
 	mux.HandleFunc("DELETE /api/images/{id}", a.deleteImage)
 	mux.HandleFunc("POST /api/images/batch-delete", a.batchDeleteImages)
@@ -201,6 +210,10 @@ func main() {
 	go a.submitter()
 	go a.downloader()
 	go a.recoverTasks()
+	// 补齐历史图片的像素宽高（首启新列的库会扫一遍，之后每次只剩零星新增）
+	go a.backfillImageSizes()
+	// 给存量图补缩略图。放在宽高回填之后：新图走写入时的队列，这里只处理历史数据。
+	go a.prewarmThumbnails()
 
 	// Static file serving for frontend
 	if cfg.StaticDir != "" {
@@ -335,6 +348,9 @@ CREATE TABLE IF NOT EXISTS images (
   generation_item_id INTEGER NOT NULL,
   filename TEXT NOT NULL,
   storage_path TEXT NOT NULL,
+  -- 像素宽高：大图预览（PhotoSwipe）按比例排布只认这两个值，缺了就压成方图
+  width INTEGER NOT NULL DEFAULT 0,
+  height INTEGER NOT NULL DEFAULT 0,
   created_at DATETIME NOT NULL,
   FOREIGN KEY(generation_item_id) REFERENCES generation_items(id)
 );
@@ -380,6 +396,9 @@ VALUES ('comfyui_url', ?, CURRENT_TIMESTAMP);
 		// 提交时的自动纠正说明（repair.go）。中性文案，不占 error_message——
 		// 那一栏是红色的「失败原因」，成功项上出现会让人以为出错了。
 		`ALTER TABLE generation_items ADD COLUMN notes TEXT NOT NULL DEFAULT ''`,
+		// 图片像素宽高（imagesize.go）。存量行由 backfillImageSizes 后台补齐。
+		`ALTER TABLE images ADD COLUMN width INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE images ADD COLUMN height INTEGER NOT NULL DEFAULT 0`,
 	}
 	for _, stmt := range migrations {
 		if _, err := a.db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {

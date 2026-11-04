@@ -254,7 +254,7 @@ func (a *app) attachItemImages(ctx context.Context, items []map[string]any) {
 	for i, item := range items {
 		args[i] = item["id"]
 	}
-	rows, err := a.db.QueryContext(ctx, `SELECT generation_item_id, id, filename FROM images
+	rows, err := a.db.QueryContext(ctx, `SELECT generation_item_id, id, filename, width, height FROM images
 		WHERE generation_item_id IN (`+placeholders+`) ORDER BY id`, args...)
 	if err != nil {
 		return
@@ -264,8 +264,9 @@ func (a *app) attachItemImages(ctx context.Context, items []map[string]any) {
 	for rows.Next() {
 		var itemID, imageID int64
 		var filename string
-		if err := rows.Scan(&itemID, &imageID, &filename); err == nil {
-			imgsByItem[itemID] = append(imgsByItem[itemID], map[string]any{"id": imageID, "filename": filename})
+		var imgW, imgH int
+		if err := rows.Scan(&itemID, &imageID, &filename, &imgW, &imgH); err == nil {
+			imgsByItem[itemID] = append(imgsByItem[itemID], map[string]any{"id": imageID, "filename": filename, "width": imgW, "height": imgH})
 		}
 	}
 	for _, item := range items {

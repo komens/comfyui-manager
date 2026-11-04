@@ -6,6 +6,7 @@ import Pagination from '../components/Pagination.vue'
 import { api, type Workflow } from '../api/client'
 import { pickDefaultWorkflow } from '../utils/workflowParams'
 import { openImageViewer } from '../utils/imageViewer'
+import { thumbUrl } from '../utils/imageUrls'
 import { useUrlState } from '../composables/useUrlState'
 
 type Prompt = {
@@ -342,7 +343,7 @@ onMounted(() => {
             </div>
             <div class="pc-body">
               <div class="pc-cover" :class="{ clickable: p.cover_image_id }" @click.stop="openCover(p)" :title="p.cover_image_id ? '查看最新结果图' : ''">
-                <img v-if="p.cover_image_id" :src="`/api/images/${p.cover_image_id}/file`" loading="lazy" :alt="p.title" />
+                <img v-if="p.cover_image_id" :src="thumbUrl(p.cover_image_id)" loading="lazy" decoding="async" :alt="p.title" />
                 <div v-else class="pc-cover-empty">无图</div>
               </div>
               <div class="pc-meta">

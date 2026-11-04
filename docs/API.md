@@ -216,29 +216,31 @@ curl -s $BASE/api/tasks/11
 | 50 | POST | `/api/images/batch-delete` | 批量删除 |
 | 51 | POST | `/api/images/batch-favorite` | 批量收藏 |
 | 52 | PATCH | `/api/images/{id}/favorite` | 切换收藏 |
+| 53 | GET | `/api/images/{id}/thumb` | 小图标缩略图（WebP） |
+| 54 | GET | `/api/images/{id}/preview` | 大图预览图（WebP） |
 | **数据整理** | | | |
-| 53 | POST | `/api/maintenance/preview` | 预览清理结果（只查不删） |
-| 54 | POST | `/api/maintenance/cleanup` | 执行条件清理 |
-| 55 | GET | `/api/maintenance/stats` | 整理数据统计 |
-| 56 | POST | `/api/maintenance/orphans/purge` | 清理孤儿文件 |
-| 57 | POST | `/api/maintenance/vacuum` | 整理数据库（VACUUM） |
-| 58 | GET | `/api/maintenance/trash` | 回收站批次列表 |
-| 59 | GET | `/api/maintenance/trash/{id}` | 回收站批次明细 |
-| 60 | POST | `/api/maintenance/trash/{id}/restore` | 还原批次 |
-| 61 | DELETE | `/api/maintenance/trash/{id}` | 彻底删除批次 |
+| 55 | POST | `/api/maintenance/preview` | 预览清理结果（只查不删） |
+| 56 | POST | `/api/maintenance/cleanup` | 执行条件清理 |
+| 57 | GET | `/api/maintenance/stats` | 整理数据统计 |
+| 58 | POST | `/api/maintenance/orphans/purge` | 清理孤儿文件 |
+| 59 | POST | `/api/maintenance/vacuum` | 整理数据库（VACUUM） |
+| 60 | GET | `/api/maintenance/trash` | 回收站批次列表 |
+| 61 | GET | `/api/maintenance/trash/{id}` | 回收站批次明细 |
+| 62 | POST | `/api/maintenance/trash/{id}/restore` | 还原批次 |
+| 63 | DELETE | `/api/maintenance/trash/{id}` | 彻底删除批次 |
 | **脚本**（**仅 `ENABLE_SCRIPTS` 开启时注册**，关闭时均 404） | | | |
-| 62 | GET | `/api/scripts/status` | 功能状态与可用解释器 |
-| 63 | POST | `/api/scripts/runs` | 提交一次运行 |
-| 64 | GET | `/api/scripts/runs` | 运行历史 |
-| 65 | GET | `/api/scripts/runs/{id}` | 运行详情（含代码与输出） |
-| 66 | GET | `/api/scripts/runs/{id}/events` | 运行输出（SSE） |
-| 67 | POST | `/api/scripts/runs/{id}/cancel` | 取消运行 |
-| 68 | GET | `/api/scripts/runs/{id}/files` | 产出文件列表 |
-| 69 | GET | `/api/scripts/runs/{id}/files/download` | 下载产出文件 |
-| 70 | DELETE | `/api/scripts/runs/{id}` | 删除运行记录 |
+| 64 | GET | `/api/scripts/status` | 功能状态与可用解释器 |
+| 65 | POST | `/api/scripts/runs` | 提交一次运行 |
+| 66 | GET | `/api/scripts/runs` | 运行历史 |
+| 67 | GET | `/api/scripts/runs/{id}` | 运行详情（含代码与输出） |
+| 68 | GET | `/api/scripts/runs/{id}/events` | 运行输出（SSE） |
+| 69 | POST | `/api/scripts/runs/{id}/cancel` | 取消运行 |
+| 70 | GET | `/api/scripts/runs/{id}/files` | 产出文件列表 |
+| 71 | GET | `/api/scripts/runs/{id}/files/download` | 下载产出文件 |
+| 72 | DELETE | `/api/scripts/runs/{id}` | 删除运行记录 |
 | **导入导出** | | | |
-| 71 | GET | `/api/export` | 导出 ZIP |
-| 72 | POST | `/api/import` | 导入 ZIP |
+| 73 | GET | `/api/export` | 导出 ZIP |
+| 74 | POST | `/api/import` | 导入 ZIP |
 | **调试**（**仅 `DEBUG` 开启时注册**，关闭时均 404） | | | |
 | 73 | GET | `/api/debug/status` | 调试状态与文件清单 |
 | 74 | GET | `/api/debug/files/{name}` | 下载调试文件 |
@@ -1162,7 +1164,7 @@ GET /api/tasks/{id}
 | `status` | string | item 状态 |
 | `error_message` | string | 失败原因 |
 | `notes` | string | 提交时的中性说明（目前只有「自动纠正了导出串位的控件值」这一种），无说明时为空串 |
-| `images` | array | 结果图，元素为 `{"id":int64,"filename":string}`；无图时该字段不存在 |
+| `images` | array | 结果图，元素为 `{"id":int64,"filename":string,"width":int,"height":int}`（宽高供大图预览按比例排布，未知为 0）；无图时该字段不存在 |
 
 | 状态码 | 触发条件 | 错误消息 |
 |---|---|---|
@@ -1450,7 +1452,7 @@ GET /api/prompts/{id}
 | `error_message` | string | |
 | `workflow_id` | int | |
 | `workflow_name` | string | |
-| `images` | array | 元素为 `{"id":int,"filename":string}` |
+| `images` | array | 元素为 `{"id":int,"filename":string,"width":int,"height":int}`（宽高供大图预览按比例排布，未知为 0） |
 
 | 状态码 | 触发条件 | 错误消息 |
 |---|---|---|
@@ -1841,6 +1843,10 @@ GET /api/images?favorite=1&q=cat&group=风景&page=1&page_size=20
 | `created_at` | string | |
 | `prompt_id` | int | 关联提示词 id；**手动提交的图片为 0** |
 | `prompt_title` | string | 无关联时为空串 |
+| `width` | int | 像素宽，落库时记录；未知为 0 |
+| `height` | int | 像素高，落库时记录；未知为 0 |
+
+> 大图预览（PhotoSwipe）只按 `width`/`height` 排布、不读图片自身尺寸，调用方应直接用这两个值，不要为量尺寸去拉原图。历史数据在服务启动时后台回填（日志 `backfill image sizes`），回填前为 0。
 
 | 状态码 | 触发条件 | 错误消息 |
 |---|---|---|
@@ -1866,6 +1872,8 @@ GET /api/images/{id}
 | `created_at` | string | |
 | `prompt_id` | int | 无关联为 0 |
 | `prompt_title` | string | 无关联为空串 |
+| `width` | int | 像素宽；未知为 0 |
+| `height` | int | 像素高；未知为 0 |
 
 | 状态码 | 触发条件 | 错误消息 |
 |---|---|---|
@@ -1878,7 +1886,9 @@ GET /api/images/{id}
 GET /api/images/{id}/file
 ```
 
-**响应 200**：图片二进制流，`Content-Type` 由文件扩展名推断（如 `image/png`）。不带 `Content-Disposition`，适合直接用于 `<img>` 标签。
+**响应 200**：图片二进制流，`Content-Type` 由文件扩展名推断（如 `image/png`）。不带 `Content-Disposition`，适合「查看原图」这类需要 1:1 细节的场景。
+
+⚠️ **列表与预览不要用这个接口**：出图是 PNG，单张 1.5–4.4MB。日常展示请用 9.5 的 `thumb` / `preview`（WebP，几十到一百多 KB）。
 
 | 状态码 | 触发条件 | 错误消息 |
 |---|---|---|
@@ -1886,7 +1896,36 @@ GET /api/images/{id}/file
 | 404 | 记录不存在 | `image not found` |
 | 404 | 文件路径解析失败 | `image file not found` |
 
-### 9.5 图片下载
+### 9.5 缩略图 / 预览图
+
+```
+GET /api/images/{id}/thumb
+GET /api/images/{id}/preview
+```
+
+两档派生图，输出 WebP：
+
+| 路径 | 尺寸规则 | 用途 |
+|---|---|---|
+| `/thumb` | 短边 480，等比，**不放大** | 列表 / 卡片里的小图标（最大显示 140px） |
+| `/preview` | 长边 1600，等比，**不放大** | 大图预览；图库网格卡片也用这一档（点开时浏览器缓存直接命中，不重复下载） |
+
+原图比上限小时保持原尺寸，只做转码不放大。文件落在 `data/thumbnails/<id 后两位>/<id>_<档位>_<边长>_q<质量>.webp`，属于纯派生数据：整个目录删掉后服务会按需重建，迁移时可放心排除。
+
+**响应 200**：`Content-Type: image/webp`，并带：
+
+- `Cache-Control: public, max-age=31536000, immutable`（图片 id 唯一且内容不可变）
+- `ETag: "im-<id>-<档位>-<边长>-q<质量>"`；请求带 `If-None-Match` 命中返回 `304`
+
+生成失败（原图损坏、格式不支持）时**退回原图**，状态码仍是 200，`Content-Type` 变成原图格式——缩略图只是省流量的优化，不该让一张本来能看的图变成 404。
+
+| 状态码 | 触发条件 | 错误消息 |
+|---|---|---|
+| 400 | `id` 非法 | `invalid image id` |
+| 404 | 记录不存在 | `image not found` |
+| 404 | 文件路径解析失败 | `image file not found` |
+
+### 9.6 图片下载
 
 ```
 GET /api/images/{id}/download
@@ -1896,7 +1935,7 @@ GET /api/images/{id}/download
 
 状态码同 9.4。
 
-### 9.6 删除图片
+### 9.7 删除图片
 
 ```
 DELETE /api/images/{id}
@@ -1917,7 +1956,7 @@ DELETE /api/images/{id}
 | 404 | 不存在 | `image not found` |
 | 500 | 其它错误 | `delete image failed` |
 
-### 9.7 批量删除图片
+### 9.8 批量删除图片
 
 ```
 POST /api/images/batch-delete
@@ -1942,7 +1981,7 @@ POST /api/images/batch-delete
 | 400 | 超过 500 个 | `too many ids, max 500 per request` |
 | 500 | 出现非可跳过的错误 | `batch operation failed` |
 
-### 9.8 批量收藏图片
+### 9.9 批量收藏图片
 
 ```
 POST /api/images/batch-favorite
@@ -1959,7 +1998,7 @@ POST /api/images/batch-favorite
 
 状态码同 9.7。
 
-### 9.9 切换图片收藏
+### 9.10 切换图片收藏
 
 ```
 PATCH /api/images/{id}/favorite
@@ -2109,11 +2148,14 @@ GET /api/maintenance/stats
   "favorite_images": 0, "favorite_prompts": 0,
   "files_on_disk": 16, "image_bytes": 28084133,
   "orphan_files": ["7.png"],
+  "thumb_files": 30, "thumb_bytes": 1650000, "thumb_orphan_files": 0,
   "db_bytes": 118784, "db_path": "../data/db/comfyui.db"
 }
 ```
 
 `orphan_files` 是磁盘上有、但库里没有任何记录引用的图片文件（历史手工删除或历史 bug 留下的）。最多返回 200 个。
+
+`thumb_files` / `thumb_bytes` 是缩略图目录（`data/thumbnails/`）的文件数与总字节；`thumb_orphan_files` 是所属图片记录已不存在的缩略图数量。这一档是纯派生数据，整个目录删掉只会让服务重新生成，不影响原图。
 
 ### 10.5 清理孤儿文件
 
@@ -2123,11 +2165,11 @@ POST /api/maintenance/orphans/purge
 
 **请求体**：`{"confirm": true}`
 
-删除 10.4 报出的孤儿文件。不涉及任何库记录，零风险。
+删除 10.4 报出的孤儿文件（连同它们的缩略图）。不涉及任何库记录，零风险。
 
 | 状态码 | 场景 |
 |---|---|
-| 200 | `{"removed": N}`（没有孤儿时 N=0，不需要 confirm） |
+| 200 | `{"removed": N, "thumb_removed": M}`（没有孤儿时两者都为 0，不需要 confirm） |
 | 400 | 有孤儿但未确认，报错里带上数量 |
 
 ### 10.6 整理数据库（VACUUM）

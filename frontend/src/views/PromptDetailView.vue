@@ -3,6 +3,7 @@ import { onMounted, onUnmounted, ref, computed, watch } from 'vue'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import { api, type Workflow } from '../api/client'
+import { thumbUrl } from '../utils/imageUrls'
 import { pickDefaultWorkflow } from '../utils/workflowParams'
 import { openImageViewer } from '../utils/imageViewer'
 import { backToListOr } from '../utils/nav'
@@ -15,7 +16,7 @@ type Run = {
   error_message: string
   workflow_id: number
   workflow_name: string
-  images: { id: number; filename: string }[]
+  images: { id: number; filename: string; width?: number; height?: number }[]
 }
 type PromptDetail = {
   id: number
@@ -144,7 +145,7 @@ function backToList() {
 }
 
 function openRunImages(run: Run, index: number) {
-  openImageViewer(run.images.map(i => i.id), index, {
+  openImageViewer(run.images.map(i => ({ id: i.id, width: i.width, height: i.height })), index, {
     goToPrompt: id => router.push(`/prompts/${id}`),
     mutated: () => load(true),
   })
@@ -217,9 +218,11 @@ onUnmounted(() => setPolling(false))
           <img
             v-for="(img, idx) in run.images"
             :key="img.id"
-            :src="`/api/images/${img.id}/file`"
+            :src="thumbUrl(img.id)"
             :alt="img.filename"
             class="run-thumb"
+            loading="lazy"
+            decoding="async"
             @click="openRunImages(run, idx)"
           />
         </div>

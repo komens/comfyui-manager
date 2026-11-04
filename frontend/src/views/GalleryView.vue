@@ -5,9 +5,10 @@ import PageHeader from '../components/PageHeader.vue'
 import Pagination from '../components/Pagination.vue'
 import { api } from '../api/client'
 import { openImageViewer } from '../utils/imageViewer'
+import { previewUrl, thumbUrl } from '../utils/imageUrls'
 import { useUrlState } from '../composables/useUrlState'
 
-type ImageItem = { id: number; filename: string; created_at: string; is_favorite: boolean; prompt_id: number; prompt_title: string }
+type ImageItem = { id: number; filename: string; created_at: string; is_favorite: boolean; prompt_id: number; prompt_title: string; width: number; height: number }
 type PageResult = { items: ImageItem[]; total: number; page: number; page_size: number }
 type BatchResult = { applied: number; skipped: number }
 
@@ -223,9 +224,10 @@ async function batchDelete() {
 }
 
 function openViewer(index: number) {
-  const ids = images.value.map(i => i.id)
+  // 带上宽高：查看器按真比例排布，跨页预取也不用再逐张拉原图量尺寸
+  const refs = images.value.map(i => ({ id: i.id, width: i.width, height: i.height }))
   openImageViewer(
-    ids,
+    refs,
     index,
     {
       goToPrompt: id => router.push(`/prompts/${id}`),
@@ -325,7 +327,7 @@ onMounted(() => {
         <input type="checkbox" :checked="selectedIds.has(image.id)" @change="toggleSelect(image.id)" />
       </label>
       <span class="fav-badge" @click.stop="toggleFavorite(image)">{{ image.is_favorite ? '★' : '☆' }}</span>
-      <img class="image-thumb" :src="`/api/images/${image.id}/file`" :alt="image.filename" loading="lazy" />
+      <img class="image-thumb" :src="previewUrl(image.id)" :alt="image.filename" loading="lazy" decoding="async" />
       <div class="image-info">
         <span class="text-xs">#{{ image.id }}</span>
         <span class="text-xs">{{ new Date(image.created_at).toLocaleDateString('zh-CN') }}</span>
@@ -360,7 +362,7 @@ onMounted(() => {
   <div v-if="detailOpen" class="modal-overlay" @click.self="closeDetail">
     <div class="modal detail-modal">
       <div class="detail-head">
-        <img v-if="detailImage" class="detail-thumb" :src="`/api/images/${detailImage.id}/file`" :alt="detailImage.filename" />
+        <img v-if="detailImage" class="detail-thumb" :src="thumbUrl(detailImage.id)" :alt="detailImage.filename" />
         <div class="detail-meta">
           <div class="detail-title-row">
             <span class="detail-id">#{{ detailImage?.id }}</span>

@@ -1,5 +1,5 @@
 # 后端-only 镜像：distroless、**不含前端静态文件**，适合单独跑 API / 二次集成。
-# 完整可部署镜像请用仓库根目录的 Dockerfile（debian-slim + 内置前端 + 注入版本号），
+# 完整可部署镜像请用仓库根目录的 Dockerfile（alpine + 内置前端 + 注入版本号），
 # docker-compose.yml 用的也是那一份。
 #
 # 注意：这里没有 -X main.version=...，所以 GET /api/version 会返回 "dev"。

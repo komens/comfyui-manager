@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import PageHeader from '../components/PageHeader.vue'
 import { api } from '../api/client'
+import { thumbUrl } from '../utils/imageUrls'
 import type { CleanupPreview, CleanupStats, TrashBatch, Workflow } from '../api/client'
 
 /**
@@ -513,7 +514,7 @@ function formatBytes(bytes: number) {
                 <template #default="{ row }">
                   <img
                     class="sample-thumb"
-                    :src="`/api/images/${row.id}/file`"
+                    :src="thumbUrl(row.id)"
                     :alt="row.filename"
                     loading="lazy"
                     @error="(e: Event) => (e.target as HTMLImageElement).style.visibility = 'hidden'"

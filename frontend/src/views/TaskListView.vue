@@ -5,6 +5,7 @@ import PageHeader from '../components/PageHeader.vue'
 import Pagination from '../components/Pagination.vue'
 import { api } from '../api/client'
 import { openImageViewer } from '../utils/imageViewer'
+import { thumbUrl } from '../utils/imageUrls'
 import { useUrlState } from '../composables/useUrlState'
 
 type Task = {
@@ -282,7 +283,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
         <label class="checkbox-wrap" @click.stop>
           <input type="checkbox" :checked="selectedIds.has(t.id)" @change="toggleSelect(t.id)" />
         </label>
-        <img v-if="t.image_id" class="task-thumb" :src="`/api/images/${t.image_id}/file`" alt="结果图" loading="lazy" @click.stop="openTaskImage(t)" />
+        <img v-if="t.image_id" class="task-thumb" :src="thumbUrl(t.image_id)" alt="结果图" loading="lazy" decoding="async" @click.stop="openTaskImage(t)" />
         <div v-else class="task-thumb task-thumb-empty">无图</div>
         <div class="task-main">
           <div class="task-head">
