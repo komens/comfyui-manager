@@ -195,6 +195,7 @@ docker save comfyui-server:1.11.2 -o comfyui-server-1.11.2.tar
 | `DB_PATH` | `/app/data/db/comfyui.db` | SQLite 数据库路径 |
 | `STATIC_DIR` | `/app/static` | 前端静态文件目录（Docker 内置） |
 | `DEBUG` | 关闭 | 调试总开关。填 `1` 开启，排查线索落盘到 `data/debug/`，并在 Web 界面出现「调试日志」页（见下节） |
+| `THUMB_WORKERS` | `min(CPU 核数, 4)` | 缩略图编码并发数（上限 8）。编码是纯 CPU 密集型，并发数≈吞吐；内存紧张或图片很大时设小一点（如 `2`） |
 
 ### 数据目录
 
@@ -206,6 +207,7 @@ data/
 ├── images/            # 生成的图片
 ├── workflows/         # 工作流 JSON（ComfyUI 导出）
 ├── json/              # 上传的 JSON 文件备份
+├── thumbnails/        # 缩略图缓存（纯派生物，可整个删除自动重建）
 └── debug/             # 仅 DEBUG 开启时存在
 ```
 
