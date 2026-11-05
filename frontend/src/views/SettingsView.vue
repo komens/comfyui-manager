@@ -2,6 +2,7 @@
 import { onMounted, ref } from 'vue'
 import PageHeader from '../components/PageHeader.vue'
 import { api } from '../api/client'
+import { ensurePlatforms, type Platform } from '../utils/platforms'
 
 const url = ref('')
 const message = ref('')
@@ -17,6 +18,8 @@ const exportFavorite = ref(false)
 const exportGroup = ref('')
 const exportStatus = ref('')
 const exportSearch = ref('')
+const exportPlatform = ref('')
+const platformOptions = ref<Platform[]>([])
 const groups = ref<{ group_name: string; count: number }[]>([])
 
 onMounted(async () => {
@@ -31,6 +34,8 @@ onMounted(async () => {
     const g = await api<{ group_name: string; count: number }[]>('/api/prompts/groups')
     groups.value = g
   } catch { /* ignore */ }
+  // 导出可按来源筛选：本平台 + 各外部平台
+  ensurePlatforms().then(list => { platformOptions.value = list })
 })
 
 async function save() {
@@ -77,6 +82,7 @@ function resetExportFilters() {
   exportGroup.value = ''
   exportStatus.value = ''
   exportSearch.value = ''
+  exportPlatform.value = ''
 }
 
 async function exportData() {
@@ -87,6 +93,7 @@ async function exportData() {
     if (exportGroup.value) params.set('group', exportGroup.value)
     if (exportStatus.value) params.set('status', exportStatus.value)
     if (exportSearch.value) params.set('search', exportSearch.value)
+    if (exportPlatform.value) params.set('platform', exportPlatform.value)
     const query = params.toString()
     const exportUrl = '/api/export' + (query ? '?' + query : '')
     const a = document.createElement('a')
@@ -112,11 +119,13 @@ async function handleImport(e: Event) {
   try {
     const formData = new FormData()
     formData.append('file', file)
-    const result = await api<{ imported_prompts: number; skipped_prompts: number; imported_images: number; skipped_images: number }>('/api/import', {
+    const result = await api<{ imported_prompts: number; skipped_prompts: number; imported_images: number; skipped_images: number; imported_external_images?: number }>('/api/import', {
       method: 'POST',
       body: formData,
     })
-    importResult.value = `导入成功！\n提示词：导入 ${result.imported_prompts} 条，跳过 ${result.skipped_prompts} 条重复\n图片：导入 ${result.imported_images} 张，跳过 ${result.skipped_images} 张重复`
+    const external = result.imported_external_images ?? 0
+    importResult.value = `导入成功！\n提示词：导入 ${result.imported_prompts} 条，跳过 ${result.skipped_prompts} 条重复\n图片：导入 ${result.imported_images} 张，跳过 ${result.skipped_images} 张重复` +
+      (external > 0 ? `\n其中外部平台来源 ${external} 张（来源标识已保留）` : '')
   } catch (e) {
     importResult.value = '导入失败：' + (e instanceof Error ? e.message : '未知错误')
   } finally {
@@ -235,15 +244,24 @@ async function test() {
             </select>
           </div>
           <div class="form-group" style="flex:1">
-            <label>状态</label>
-            <select v-model="exportStatus" class="input">
-              <option value="">全部状态</option>
-              <option value="pending">待生成</option>
-              <option value="running">生成中</option>
-              <option value="done">已完成</option>
-              <option value="failed">失败</option>
+            <label>来源</label>
+            <select v-model="exportPlatform" class="input">
+              <option value="">全部来源</option>
+              <option value="local">本平台</option>
+              <option v-for="p in platformOptions" :key="p.id" :value="p.id">{{ p.label }}</option>
             </select>
           </div>
+        </div>
+
+        <div class="form-group">
+          <label>状态</label>
+          <select v-model="exportStatus" class="input">
+            <option value="">全部状态</option>
+            <option value="pending">待生成</option>
+            <option value="running">生成中</option>
+            <option value="completed">已完成</option>
+            <option value="failed">失败</option>
+          </select>
         </div>
 
         <label class="checkbox-label" style="margin-bottom:20px;">

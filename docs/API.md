@@ -241,6 +241,9 @@ curl -s $BASE/api/tasks/11
 | **导入导出** | | | |
 | 73 | GET | `/api/export` | 导出 ZIP |
 | 74 | POST | `/api/import` | 导入 ZIP |
+| **外部平台同步** | | | |
+| 75 | GET | `/api/external/platforms` | 可选的来源平台清单 |
+| 76 | POST | `/api/external/images` | 录入一条外部平台素材 |
 | **调试**（**仅 `DEBUG` 开启时注册**，关闭时均 404） | | | |
 | 73 | GET | `/api/debug/status` | 调试状态与文件清单 |
 | 74 | GET | `/api/debug/files/{name}` | 下载调试文件 |
@@ -1335,6 +1338,7 @@ GET /api/prompts?group=风景&status=pending&q=cat&favorite=1&page=1&page_size=2
 | `status` | string | 精确匹配状态 |
 | `q` | string | 模糊搜索标题或正向提示词 |
 | `favorite` | string | 值为 `1` 时只返回收藏项 |
+| `platform` | string | 来源筛选：`local` = 本平台（`source_platform` 为空），其余精确匹配平台标识（如 `chatgpt`、`grok`） |
 | `page` / `page_size` | int | 见 1.3 |
 
 **响应 200**
@@ -1358,9 +1362,10 @@ GET /api/prompts?group=风景&status=pending&q=cat&favorite=1&page=1&page_size=2
 | `is_favorite` | bool | |
 | `completed_at` | string | 可能为空串 |
 | `created_at` | string | |
-| `run_count` | int | 关联生成次数 |
-| `image_count` | int | 关联图片数 |
+| `run_count` | int | 关联生成次数（只统计本平台生成项；外部同步提示词为 0） |
+| `image_count` | int | 关联图片数（本平台生成图 + 外部同步图） |
 | `cover_image_id` | int | 封面图 id；无图为 0 |
+| `source_platform` | string | 来源平台；空串表示本平台 |
 
 | 状态码 | 触发条件 | 错误消息 |
 |---|---|---|
@@ -1439,7 +1444,9 @@ GET /api/prompts/{id}
 | `is_favorite` | bool | |
 | `completed_at` | string | |
 | `created_at` / `updated_at` | string | |
-| `runs` | array | 生成历史，倒序 |
+| `source_platform` | string | 来源平台；空串表示本平台 |
+| `runs` | array | 生成历史，倒序（只含本平台生成项） |
+| `external_images` | array | 外部平台同步的图片，元素为 `{"id":int,"filename":string,"width":int,"height":int}`；它们不挂在 `runs` 上 |
 
 `runs[]` 元素：
 
@@ -1822,6 +1829,7 @@ GET /api/images?favorite=1&q=cat&group=风景&page=1&page_size=20
 | `favorite` | string | 值为 `1` 时只返回收藏图片 |
 | `q` | string | 模糊搜索提示词标题、正向提示词或文件名 |
 | `group` | string | 按提示词分组筛选 |
+| `platform` | string | 来源筛选：`local` = 本平台，其余精确匹配平台标识（如 `chatgpt`） |
 | `page` / `page_size` | int | 见 1.3 |
 
 **响应 200**
@@ -1836,13 +1844,14 @@ GET /api/images?favorite=1&q=cat&group=风景&page=1&page_size=20
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `id` | int | |
-| `generation_item_id` | int | 关联任务项 id |
+| `generation_item_id` | int | 关联任务项 id；**外部平台同步的图为 0**（没有生成项） |
 | `filename` | string | 展示名 |
 | `path` | string | 真实路径（即 `storage_path`） |
 | `is_favorite` | bool | |
 | `created_at` | string | |
-| `prompt_id` | int | 关联提示词 id；**手动提交的图片为 0** |
+| `prompt_id` | int | 关联提示词 id；**手动提交的图片为 0**。外部同步图走 `images.prompt_id` 直连 |
 | `prompt_title` | string | 无关联时为空串 |
+| `source_platform` | string | 来源平台；空串表示本平台 |
 | `width` | int | 像素宽，落库时记录；未知为 0 |
 | `height` | int | 像素高，落库时记录；未知为 0 |
 
@@ -1863,15 +1872,16 @@ GET /api/images/{id}
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `id` | int | |
-| `generation_item_id` | int | |
+| `generation_item_id` | int | 外部平台同步的图为 0 |
 | `filename` | string | 展示名 |
 | `storage_path` | string | 真实路径 |
-| `positive_prompt` | string | 生成时使用的正向提示词 |
-| `negative_prompt` | string | 工作流上的负向提示词 |
+| `positive_prompt` | string | 生成时使用的正向提示词；外部同步图取所属提示词的内容 |
+| `negative_prompt` | string | 工作流上的负向提示词（外部同步图为空串） |
 | `is_favorite` | bool | |
 | `created_at` | string | |
 | `prompt_id` | int | 无关联为 0 |
 | `prompt_title` | string | 无关联为空串 |
+| `source_platform` | string | 来源平台；空串表示本平台 |
 | `width` | int | 像素宽；未知为 0 |
 | `height` | int | 像素高；未知为 0 |
 
@@ -2018,6 +2028,69 @@ PATCH /api/images/{id}/favorite
 | 400 | `id` 非法 | `invalid image id` |
 | 404 | 不存在 | `image not found` |
 | 500 | 失败 | `toggle favorite failed` |
+
+### 9.11 外部平台清单
+
+```
+GET /api/external/platforms
+```
+
+**响应 200**
+
+```json
+{
+  "items": [
+    { "id": "chatgpt", "label": "ChatGPT", "color": "#10a37f" },
+    { "id": "grok", "label": "Grok", "color": "#1d1d1f" }
+  ]
+}
+```
+
+> 平台是后端白名单常量（`external.go`）。加平台只改那张表，前端从这里取，不硬编码。
+
+### 9.12 录入外部平台素材
+
+```
+POST /api/external/images
+Content-Type: multipart/form-data
+```
+
+**表单字段**
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `platform` | string | 是 | 必须在平台白名单内 |
+| `positive_prompt` | string | 是 | 最长 20000 字节 |
+| `title` | string | 否 | 留空自动取提示词前 50 个字符 |
+| `file` | file | 是 | PNG / JPEG / GIF / WebP，≤ 25 MiB |
+
+行为说明：
+
+- **落盘**：`data/images/ext_<platform>_<YYYYMMDD_HHMMSS>_<rand>.<ext>`，扩展名按文件头嗅探结果决定，不信任上传的文件名。
+- **入库**：新建一条 `prompts`（`status='completed'`、写入 `source_platform`），再插 `images`，其 `generation_item_id=0`、`prompt_id` 指向新提示词——外部图没有 ComfyUI 生成链路，靠这条直连通道参与图库、搜索、收藏与导出。
+- **去重**：按文件内容 sha256，命中直接 409。
+- 尺寸从图片文件头解出并落库；事务提交后异步生成缩略图。
+
+**响应 201**
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `image_id` | int | |
+| `prompt_id` | int | |
+| `platform` / `platform_label` | string | |
+| `filename` | string | 落盘文件名 |
+| `width` / `height` | int | 解不出时为 0 |
+| `source_filename` | string | 上传时的原始文件名 |
+
+| 状态码 | 触发条件 | 错误消息 |
+|---|---|---|
+| 400 | 平台不在白名单 | `unknown platform` |
+| 400 | 提示词为空 / 过长 | `positive_prompt is required` / `positive_prompt too long (max 20000 bytes)` |
+| 400 | 缺文件 | `file is required` |
+| 400 | 空文件 / 超过 25 MiB | `file is empty` / `file too large (max 25 MB)` |
+| 400 | 非图片类型 | `unsupported image type, only png/jpeg/gif/webp are allowed` |
+| 409 | 同一张图已在库中 | `这张图已在素材库中（#<id>）` |
+| 500 | 落盘 / 入库失败 | `save image file failed` / `create prompt failed` / `create image failed` / `commit failed` |
 
 ---
 
@@ -2412,7 +2485,7 @@ DELETE /api/scripts/runs/{id}
 ### 12.1 导出 ZIP
 
 ```
-GET /api/export?favorite=1&group=风景&status=completed&search=cat
+GET /api/export?favorite=1&group=风景&status=completed&search=cat&platform=chatgpt
 ```
 
 **Query 参数**
@@ -2423,6 +2496,7 @@ GET /api/export?favorite=1&group=风景&status=completed&search=cat
 | `group` | string | 按分组筛选 |
 | `status` | string | 按提示词状态筛选 |
 | `search` | string | 模糊搜索标题、正向提示词、描述 |
+| `platform` | string | 来源筛选：`local` = 本平台，其余精确匹配平台标识（如 `chatgpt`） |
 
 > ⚠️ 这里的搜索参数名是 `search`，而列表接口用的是 `q`，注意区分。
 
@@ -2437,12 +2511,14 @@ ZIP 结构：
 
 ```
 export-20261001_183000.zip
-├── prompts.json        # 提示词数组（含 negative_prompt / group_id / is_favorite）
-├── images.json         # 图片数组（含 archive_name / prompt_id / positive_prompt）
+├── prompts.json        # 提示词数组（含 negative_prompt / group_id / is_favorite / source_platform）
+├── images.json         # 图片数组（含 archive_name / prompt_id / positive_prompt / source_platform）
 └── images/             # 图片二进制文件
     ├── 1767000000_12.png
     └── ...
 ```
+
+> 外部平台同步的图片同样会进包：取图不依赖 `generation_items`，而是 `COALESCE(NULLIF(images.prompt_id,0), generation_items.prompt_id)` 这条统一关联，所以「有提示词却没图片」不会发生。
 
 `prompts.json` 元素：
 
@@ -2457,6 +2533,7 @@ export-20261001_183000.zip
 | `group_id` | string |
 | `status` | string |
 | `is_favorite` | bool |
+| `source_platform` | string（空/缺省 = 本平台） |
 
 `images.json` 元素：
 
@@ -2468,6 +2545,9 @@ export-20261001_183000.zip
 | `prompt_id` | int64 | |
 | `positive_prompt` | string | |
 | `is_favorite` | bool | |
+| `source_platform` | string | 空/缺省 = 本平台 |
+| `image_hash` | string | sha256，导回后可继续参与去重 |
+| `width` / `height` | int | 原始像素尺寸；缺省时导入端重新读文件头 |
 
 | 状态码 | 触发条件 | 错误消息 |
 |---|---|---|
@@ -2490,8 +2570,10 @@ Content-Type: multipart/form-data
 
 | 对象 | 去重键 |
 |---|---|
-| 提示词 | `title` + `positive_prompt` 完全相同 |
+| 提示词 | `title` + `positive_prompt` + `source_platform` 完全相同 |
 | 图片 | `filename` 已存在 |
+
+> 来源必须进去重键：两个平台可能撞出完全一样的提示词，合并会让来源标识丢失。
 
 **响应 200**
 
@@ -2501,6 +2583,7 @@ Content-Type: multipart/form-data
 | `skipped_prompts` | int | 跳过的提示词数 |
 | `imported_images` | int | 新插入的图片数 |
 | `skipped_images` | int | 跳过的图片数 |
+| `imported_external_images` | int | 其中带来源标识的外部平台图片数 |
 
 | 状态码 | 触发条件 | 错误消息 |
 |---|---|---|

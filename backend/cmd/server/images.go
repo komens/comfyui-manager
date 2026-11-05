@@ -80,11 +80,21 @@ func (a *app) listImages(w http.ResponseWriter, r *http.Request) {
 		where += ` AND p.group_name=?`
 		args = append(args, group)
 	}
-	// 左连接出来源提示词：直接提交(manual)的图没有 prompt_id，此时 title 为空；
-	// 连接同时服务于上面的 q/group 筛选（LEFT JOIN 不会丢手动提交的行）。
+	// 来源平台："local" 特指本平台出图（source_platform 为空），其余按平台标识精确匹配
+	if platform := r.URL.Query().Get("platform"); platform != "" {
+		if platform == platformLocal {
+			where += ` AND i.source_platform=''`
+		} else {
+			where += ` AND i.source_platform=?`
+			args = append(args, platform)
+		}
+	}
+	// 左连接出来源提示词：直接提交(manual)/外部同步的图可能没有 generation_item，
+	// 此时 title 走 images.prompt_id 这条直连通道。
+	// COALESCE 顺序不能反：外部图的两条路径里只有 prompt_id 有值。
 	const joins = ` FROM images i
-	 LEFT JOIN generation_items gi ON gi.id = i.generation_item_id
-	 LEFT JOIN prompts p ON p.id = gi.prompt_id`
+	 LEFT JOIN generation_items gi ON gi.id = i.generation_item_id AND i.generation_item_id > 0
+	 LEFT JOIN prompts p ON p.id = COALESCE(NULLIF(i.prompt_id,0), gi.prompt_id)`
 	// 统计总数
 	var total int
 	_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(*)`+joins+where, args...).Scan(&total)
@@ -93,7 +103,8 @@ func (a *app) listImages(w http.ResponseWriter, r *http.Request) {
 	pageArgs := append(args, pageSize, offset)
 	rows, err := a.db.QueryContext(r.Context(),
 		`SELECT i.id, i.generation_item_id, i.filename, i.storage_path, i.is_favorite, i.created_at,
-		        COALESCE(gi.prompt_id, 0), COALESCE(p.title, ''), i.width, i.height`+joins+where+`
+		        COALESCE(NULLIF(i.prompt_id,0), gi.prompt_id, 0), COALESCE(p.title, ''), i.width, i.height,
+		        i.source_platform`+joins+where+`
 		 ORDER BY i.id DESC LIMIT ? OFFSET ?`, pageArgs...)
 	if err != nil {
 		writeError(w, 500, "query images failed")
@@ -103,12 +114,12 @@ func (a *app) listImages(w http.ResponseWriter, r *http.Request) {
 	items := make([]map[string]any, 0)
 	for rows.Next() {
 		var id, itemID, isFav, promptID, imgW, imgH int
-		var filename, path, created, promptTitle string
-		if err := rows.Scan(&id, &itemID, &filename, &path, &isFav, &created, &promptID, &promptTitle, &imgW, &imgH); err != nil {
+		var filename, path, created, promptTitle, platform string
+		if err := rows.Scan(&id, &itemID, &filename, &path, &isFav, &created, &promptID, &promptTitle, &imgW, &imgH, &platform); err != nil {
 			writeError(w, 500, "read image failed")
 			return
 		}
-		items = append(items, map[string]any{"id": id, "generation_item_id": itemID, "filename": filename, "path": path, "is_favorite": isFav == 1, "created_at": created, "prompt_id": promptID, "prompt_title": promptTitle, "width": imgW, "height": imgH})
+		items = append(items, map[string]any{"id": id, "generation_item_id": itemID, "filename": filename, "path": path, "is_favorite": isFav == 1, "created_at": created, "prompt_id": promptID, "prompt_title": promptTitle, "width": imgW, "height": imgH, "source_platform": platform})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "page": page, "page_size": pageSize})
 }
@@ -140,26 +151,27 @@ func (a *app) getImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var itemID, isFav, promptID, imgW, imgH int
-	var filename, path, created, promptTitle, positive, negative string
-	// 一次左连接取全：图片 → 任务项 → 任务 → 工作流（负向词），以及任务项 → 提示词（title）。
-	// 用 LEFT JOIN 是因为直接提交的图可能没有关联提示词/工作流，INNER JOIN 会整行丢失。
+	var filename, path, created, promptTitle, positive, negative, platform string
+	// 一次左连接取全：图片 → 任务项 → 任务 → 工作流（负向词），以及提示词（title / 正向词）。
+	// 用 LEFT JOIN 是因为直接提交/外部同步的图可能没有关联生成项，INNER JOIN 会整行丢失。
+	// 提示词关联有两条路径：本平台走 generation_items.prompt_id，外部同步走 images.prompt_id。
 	err = a.db.QueryRowContext(r.Context(),
 		`SELECT i.generation_item_id, i.filename, i.storage_path, i.is_favorite, i.created_at,
-		        COALESCE(gi.prompt_id, 0), COALESCE(p.title, ''),
-		        COALESCE(gi.positive_prompt, ''), COALESCE(w.negative_prompt, ''),
-		        i.width, i.height
+		        COALESCE(NULLIF(i.prompt_id,0), gi.prompt_id, 0), COALESCE(p.title, ''),
+		        COALESCE(p.positive_prompt, gi.positive_prompt, ''), COALESCE(w.negative_prompt, ''),
+		        i.width, i.height, i.source_platform
 		 FROM images i
-		 LEFT JOIN generation_items gi ON gi.id = i.generation_item_id
+		 LEFT JOIN generation_items gi ON gi.id = i.generation_item_id AND i.generation_item_id > 0
 		 LEFT JOIN generation_tasks gt ON gt.id = gi.task_id
 		 LEFT JOIN workflows w ON w.id = gt.workflow_id
-		 LEFT JOIN prompts p ON p.id = gi.prompt_id
+		 LEFT JOIN prompts p ON p.id = COALESCE(NULLIF(i.prompt_id,0), gi.prompt_id)
 		 WHERE i.id=?`, id).
-		Scan(&itemID, &filename, &path, &isFav, &created, &promptID, &promptTitle, &positive, &negative, &imgW, &imgH)
+		Scan(&itemID, &filename, &path, &isFav, &created, &promptID, &promptTitle, &positive, &negative, &imgW, &imgH, &platform)
 	if err != nil {
 		writeError(w, 404, "image not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": id, "generation_item_id": itemID, "filename": filename, "storage_path": path, "positive_prompt": positive, "negative_prompt": negative, "is_favorite": isFav == 1, "created_at": created, "prompt_id": promptID, "prompt_title": promptTitle, "width": imgW, "height": imgH})
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "generation_item_id": itemID, "filename": filename, "storage_path": path, "positive_prompt": positive, "negative_prompt": negative, "is_favorite": isFav == 1, "created_at": created, "prompt_id": promptID, "prompt_title": promptTitle, "width": imgW, "height": imgH, "source_platform": platform})
 }
 
 func (a *app) downloadImage(w http.ResponseWriter, r *http.Request) {

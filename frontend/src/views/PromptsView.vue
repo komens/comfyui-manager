@@ -3,11 +3,13 @@ import { onMounted, ref, computed } from 'vue'
 import { RouterLink } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import Pagination from '../components/Pagination.vue'
+import PlatformBadge from '../components/PlatformBadge.vue'
 import { api, type Workflow } from '../api/client'
-import { pickDefaultWorkflow } from '../utils/workflowParams'
+import { pickWorkflowId, rememberWorkflowId } from '../utils/workflowParams'
 import { openImageViewer } from '../utils/imageViewer'
 import { thumbUrl } from '../utils/imageUrls'
 import { useUrlState } from '../composables/useUrlState'
+import { ensurePlatforms, platforms, type Platform } from '../utils/platforms'
 
 type Prompt = {
   id: number
@@ -23,6 +25,7 @@ type Prompt = {
   image_count: number
   cover_image_id: number
   is_favorite: boolean
+  source_platform: string
 }
 type Group = { group_name: string; group_id: string; count: number }
 type PageResult = { items: Prompt[]; total: number; page: number; page_size: number }
@@ -44,6 +47,7 @@ const state = useUrlState({
   status: '',
   q: '',
   favorite: false,
+  platform: '',
 }, {
   onExternalSync: () => {
     // 侧边栏重新点击进入等外部导航：state 已按 URL 重置，清掉勾选并重新加载
@@ -51,6 +55,9 @@ const state = useUrlState({
     load()
   },
 })
+
+// 来源下拉：本平台 + 各外部平台（清单来自后端）
+const platformOptions = ref<Platform[]>([])
 
 // 多选
 const selectedIds = ref<Set<number>>(new Set())
@@ -71,6 +78,7 @@ async function load() {
     if (state.status) params.set('status', state.status)
     if (state.q) params.set('q', state.q)
     if (state.favorite) params.set('favorite', '1')
+    if (state.platform) params.set('platform', state.platform)
     params.set('page', String(state.page))
     params.set('page_size', String(state.page_size))
     const result = await api<PageResult>(`/api/prompts?${params}`)
@@ -168,9 +176,8 @@ async function batchDelete() {
 // 打开批量重跑弹窗
 function openBatchRun(mode: 'selected' | 'group') {
   batchRunMode.value = mode
-  // 预选默认工作流：下拉只列出启用项，默认项被禁用时退回 0
-  const preferred = pickDefaultWorkflow(workflows.value)
-  batchRunWorkflow.value = preferred && preferred.enabled ? preferred.id : 0
+  // 下拉只列启用项，所以记忆项被停用时自动退回默认
+  batchRunWorkflow.value = pickWorkflowId(workflows.value, { requireEnabled: true })
   showBatchRunModal.value = true
 }
 
@@ -194,6 +201,7 @@ async function confirmBatchRun() {
       message.value = `已提交 ${result.created} 个分组任务`
     }
     messageType.value = 'success'
+    rememberWorkflowId(batchRunWorkflow.value)
     selectedIds.value.clear()
     showBatchRunModal.value = false
     await load()
@@ -239,6 +247,7 @@ function onSearch() {
 onMounted(() => {
   loadGroups()
   loadWorkflows()
+  ensurePlatforms().then(list => { platformOptions.value = list })
   load()
 })
 </script>
@@ -295,6 +304,11 @@ onMounted(() => {
           <option value="done">已完成</option>
           <option value="failed">失败</option>
         </select>
+        <select v-model="state.platform" class="input" style="width:auto;max-width:150px;" @change="resetAndLoad">
+          <option value="">全部来源</option>
+          <option value="local">本平台</option>
+          <option v-for="p in platformOptions" :key="p.id" :value="p.id">{{ p.label }}</option>
+        </select>
         <button class="btn btn-sm" :class="{ 'btn-primary': state.favorite }" @click="state.favorite = !state.favorite; resetAndLoad()">
           {{ state.favorite ? '★ 仅收藏' : '☆ 仅收藏' }}
         </button>
@@ -330,6 +344,7 @@ onMounted(() => {
                 <input type="checkbox" :checked="selectedIds.has(p.id)" @change="toggleSelect(p.id)" />
               </label>
               <RouterLink :to="`/prompts/${p.id}`" class="pc-title" :title="p.title">{{ p.title }}</RouterLink>
+              <PlatformBadge v-if="p.source_platform" :platform="p.source_platform" />
               <span class="badge" :class="'badge-' + p.status">{{ statusBadge(p.status) }}</span>
               <span v-if="p.group_name" class="badge badge-muted">{{ p.group_name }}</span>
               <div class="pc-actions">

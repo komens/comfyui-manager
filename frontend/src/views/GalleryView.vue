@@ -3,12 +3,14 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import Pagination from '../components/Pagination.vue'
+import PlatformBadge from '../components/PlatformBadge.vue'
 import { api } from '../api/client'
 import { openImageViewer } from '../utils/imageViewer'
 import { previewUrl, thumbUrl } from '../utils/imageUrls'
 import { useUrlState } from '../composables/useUrlState'
+import { ensurePlatforms, platforms, type Platform } from '../utils/platforms'
 
-type ImageItem = { id: number; filename: string; created_at: string; is_favorite: boolean; prompt_id: number; prompt_title: string; width: number; height: number }
+type ImageItem = { id: number; filename: string; created_at: string; is_favorite: boolean; prompt_id: number; prompt_title: string; width: number; height: number; source_platform: string }
 type PageResult = { items: ImageItem[]; total: number; page: number; page_size: number }
 type BatchResult = { applied: number; skipped: number }
 
@@ -27,12 +29,16 @@ const state = useUrlState({
   favorite: false,
   q: '',
   group: '',
+  platform: '',
 }, {
   onExternalSync: () => {
     clearSelection()
     load()
   },
 })
+
+// 来源下拉：本平台 + 各外部平台（清单来自后端，加平台前端不用改）
+const platformOptions = ref<Platform[]>([])
 
 type Group = { group_name: string; group_id: string; count: number }
 const groups = ref<Group[]>([])
@@ -56,6 +62,7 @@ async function load() {
     if (state.favorite) params.set('favorite', '1')
     if (state.q) params.set('q', state.q)
     if (state.group) params.set('group', state.group)
+    if (state.platform) params.set('platform', state.platform)
     params.set('page', String(state.page))
     params.set('page_size', String(state.page_size))
     const result = await api<PageResult>(`/api/images?${params}`)
@@ -76,7 +83,7 @@ function clearSelection() {
 }
 
 // —— 图片信息弹窗：点击卡片底部标题文案唤起，展示提示词等生成数据 ——
-type ImageDetail = { id: number; filename: string; created_at: string; is_favorite: boolean; prompt_id: number; prompt_title: string; positive_prompt: string; negative_prompt: string }
+type ImageDetail = { id: number; filename: string; created_at: string; is_favorite: boolean; prompt_id: number; prompt_title: string; positive_prompt: string; negative_prompt: string; source_platform: string }
 
 const detailOpen = ref(false)
 const detailLoading = ref(false)
@@ -319,7 +326,7 @@ function openViewer(index: number) {
       page: state.page,
       pageSize: state.page_size,
       total: total.value,
-      filters: { favorite: state.favorite, q: state.q, group: state.group },
+      filters: { favorite: state.favorite, q: state.q, group: state.group, platform: state.platform },
     },
   )
 }
@@ -340,6 +347,7 @@ async function toggleFavorite(image: ImageItem) {
 onMounted(() => {
   load()
   loadGroups()
+  ensurePlatforms().then(list => { platformOptions.value = list })
 })
 </script>
 
@@ -358,6 +366,11 @@ onMounted(() => {
     <select v-model="state.group" class="input" style="width:auto;max-width:180px;" @change="onFilterChange">
       <option value="">全部分组</option>
       <option v-for="g in groups" :key="g.group_name" :value="g.group_name">{{ g.group_name }}（{{ g.count }}）</option>
+    </select>
+    <select v-model="state.platform" class="input" style="width:auto;max-width:150px;" @change="onFilterChange">
+      <option value="">全部来源</option>
+      <option value="local">本平台</option>
+      <option v-for="p in platformOptions" :key="p.id" :value="p.id">{{ p.label }}</option>
     </select>
     <button class="btn btn-sm" :class="{ 'btn-primary': state.favorite }" @click="onFavOnlyChange">
       {{ state.favorite ? '★ 仅收藏' : '☆ 仅收藏' }}
@@ -415,7 +428,10 @@ onMounted(() => {
         <input type="checkbox" :checked="selectedIds.has(image.id)" @change="toggleSelect(image.id)" />
       </label>
       <span class="fav-badge" @click.stop="toggleFavorite(image)">{{ image.is_favorite ? '★' : '☆' }}</span>
-      <img class="image-thumb" :src="previewUrl(image.id)" :alt="image.filename" :style="thumbAspect(image)" loading="lazy" decoding="async" />
+      <div class="image-thumb-wrap">
+        <img class="image-thumb" :src="previewUrl(image.id)" :alt="image.filename" :style="thumbAspect(image)" loading="lazy" decoding="async" />
+        <PlatformBadge v-if="image.source_platform" :platform="image.source_platform" class="platform-tag" />
+      </div>
       <div class="image-info">
         <span class="text-xs">#{{ image.id }}</span>
         <span class="text-xs">{{ new Date(image.created_at).toLocaleDateString('zh-CN') }}</span>
@@ -454,6 +470,7 @@ onMounted(() => {
         <div class="detail-meta">
           <div class="detail-title-row">
             <span class="detail-id">#{{ detailImage?.id }}</span>
+            <PlatformBadge v-if="detail?.source_platform" :platform="detail.source_platform" size="md" />
             <span v-if="detail?.is_favorite" class="detail-fav">★ 已收藏</span>
           </div>
           <div class="detail-filename" :title="detail?.filename">{{ detail?.filename || '…' }}</div>
@@ -512,6 +529,15 @@ onMounted(() => {
 }
 .fav-badge:hover { transform: scale(1.3); }
 .image-card { position: relative; overflow: hidden; }
+/* 平台角标要贴着图片，不能相对卡片定位——卡片底部还有标题行，会错位 */
+.image-thumb-wrap { position: relative; display: block; }
+.platform-tag {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  z-index: 2;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.35);
+}
 .fav-btn {
   background: var(--c-bg-subtle);
   color: var(--c-muted);

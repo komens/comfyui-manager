@@ -36,6 +36,7 @@ onMounted(async () => {
 const baseItems = [
   { path: '/', label: '概览', icon: '&#9633;' },
   { path: '/submit', label: '直接提交', icon: '&#9998;' },
+  { path: '/external', label: '平台同步', icon: '&#8644;' },
   { path: '/prompts', label: '提示词库', icon: '&#128221;' },
   { path: '/json-files', label: 'JSON 文件', icon: '&#128196;' },
   { path: '/workflows', label: '工作流', icon: '&#9881;' },

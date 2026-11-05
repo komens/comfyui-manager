@@ -20,15 +20,21 @@ func (a *app) setPromptFavorite(ctx context.Context, promptID int64, fav int) er
 		return errPromptNotFound
 	}
 	_, err = a.db.ExecContext(ctx,
-		`UPDATE images SET is_favorite=? WHERE generation_item_id IN (SELECT id FROM generation_items WHERE prompt_id=?)`, fav, promptID)
+		`UPDATE images SET is_favorite=?
+		 WHERE prompt_id=? OR generation_item_id IN (SELECT id FROM generation_items WHERE prompt_id=?)`,
+		fav, promptID, promptID)
 	return err
 }
 
 // promptIDForImage 返回图片关联的提示词 id；手动提交（无关联）返回 0。
+// 外部同步图没有 generation_item，关联走 images.prompt_id 这条直连通道——
+// 以前这里是 INNER JOIN，外部图会直接 ErrNoRows，收藏时报「图片不存在」。
 func (a *app) promptIDForImage(ctx context.Context, imageID int64) (int64, error) {
 	var promptID sql.NullInt64
 	err := a.db.QueryRowContext(ctx,
-		`SELECT gi.prompt_id FROM images i JOIN generation_items gi ON i.generation_item_id=gi.id WHERE i.id=?`, imageID).Scan(&promptID)
+		`SELECT COALESCE(NULLIF(i.prompt_id,0), gi.prompt_id) FROM images i
+		 LEFT JOIN generation_items gi ON gi.id = i.generation_item_id AND i.generation_item_id > 0
+		 WHERE i.id=?`, imageID).Scan(&promptID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return 0, errImageNotFound

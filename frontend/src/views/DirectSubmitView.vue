@@ -3,7 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import { api, type Workflow } from '../api/client'
-import { pickDefaultWorkflow } from '../utils/workflowParams'
+import { pickWorkflowId, rememberWorkflowId } from '../utils/workflowParams'
 
 const router = useRouter()
 const workflows = ref<Workflow[]>([])
@@ -19,9 +19,9 @@ const selectedWorkflow = computed(() => workflows.value.find(w => w.id === workf
 onMounted(async () => {
   const result = await api<{ items: Workflow[] }>('/api/workflows?page_size=200')
   workflows.value = result.items
-  // 预选默认工作流（无默认时退回第一个启用项）
-  const preferred = pickDefaultWorkflow(workflows.value)
-  if (preferred) workflowId.value = preferred.id
+  // 优先上次提交选过的工作流，其次设置里的默认项
+  const preferred = pickWorkflowId(workflows.value)
+  if (preferred) workflowId.value = preferred
 })
 
 async function submit() {
@@ -39,6 +39,8 @@ async function submit() {
     })
     message.value = `任务 #${data.id} 已创建，正在跳转...`
     messageType.value = 'success'
+    // 提交成功才算「上次用过的选择」，换页再回来仍是这条
+    rememberWorkflowId(workflowId.value)
     positive.value = ''
     title.value = ''
     setTimeout(() => router.push(`/tasks/${data.id}`), 800)

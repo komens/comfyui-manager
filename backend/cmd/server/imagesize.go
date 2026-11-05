@@ -5,11 +5,14 @@ import (
 	"context"
 	"image"
 	// 注册解码器：image.DecodeConfig 只读文件头，靠这些 init 注册格式。
-	// ComfyUI 出图是 png，导入的旧图可能是 jpg。
+	// ComfyUI 出图是 png，导入的旧图可能是 jpg，
+	// 外部平台同步（external.go）可能收到 webp——不注册 webp 会让它宽高恒为 0。
 	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
 	"os"
+
+	_ "golang.org/x/image/webp"
 )
 
 // 图片像素宽高是「大图预览按比例展示」的硬前提：PhotoSwipe 只信 data.width/height，

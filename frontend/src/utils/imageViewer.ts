@@ -141,7 +141,7 @@ export type PrefetchOptions = {
   pageSize: number
   /** 整个筛选结果集的总数，用于判断是否还有下一页 */
   total: number
-  filters?: { favorite?: boolean | string; q?: string; group?: string }
+  filters?: { favorite?: boolean | string; q?: string; group?: string; platform?: string }
 }
 
 export async function openImageViewer(input: ViewerRef[], startIndex: number, cb: ViewerCallbacks = {}, prefetch?: PrefetchOptions) {
@@ -205,6 +205,7 @@ export async function openImageViewer(input: ViewerRef[], startIndex: number, cb
     if (f.favorite) params.set('favorite', '1')
     if (f.q) params.set('q', f.q)
     if (f.group) params.set('group', f.group)
+    if (f.platform) params.set('platform', f.platform)
     params.set('page', String(page))
     params.set('page_size', String(opts.pageSize))
     const result = await api<{ items: { id: number; width?: number; height?: number }[]; total: number }>(`/api/images?${params}`)

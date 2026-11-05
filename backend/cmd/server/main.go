@@ -170,6 +170,9 @@ func main() {
 	mux.HandleFunc("POST /api/images/batch-delete", a.batchDeleteImages)
 	mux.HandleFunc("POST /api/images/batch-favorite", a.batchFavoriteImages)
 	mux.HandleFunc("PATCH /api/images/{id}/favorite", a.toggleImageFavorite)
+	// 外部平台同步（external.go）：单条录入别家生成的图 + 提示词
+	mux.HandleFunc("GET /api/external/platforms", a.listExternalPlatforms)
+	mux.HandleFunc("POST /api/external/images", a.createExternalImage)
 	// 数据整理：条件式批量清理 + 回收站。
 	// preview 只查不删，cleanup 才是破坏性操作且要求 confirm=true。
 	mux.HandleFunc("POST /api/maintenance/preview", a.previewCleanup)
@@ -313,6 +316,8 @@ CREATE TABLE IF NOT EXISTS prompts (
   group_name TEXT NOT NULL DEFAULT '',
   group_id TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'pending',
+  -- 来源平台：空=本平台(ComfyUI)，chatgpt / grok 等为外部同步
+  source_platform TEXT NOT NULL DEFAULT '',
   completed_at DATETIME,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -345,7 +350,14 @@ CREATE TABLE IF NOT EXISTS generation_items (
 );
 CREATE TABLE IF NOT EXISTS images (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  -- 本平台生成：指向 generation_items.id；外部平台同步：固定为 0（无生成项）
   generation_item_id INTEGER NOT NULL,
+  -- 外部平台图片直连提示词。本平台图片留 0，关联仍走 generation_item_id → generation_items.prompt_id
+  prompt_id INTEGER NOT NULL DEFAULT 0,
+  -- 来源平台标识，空=本平台
+  source_platform TEXT NOT NULL DEFAULT '',
+  -- 文件内容 sha256，用于外部同步去重（本平台历史图为空）
+  image_hash TEXT NOT NULL DEFAULT '',
   filename TEXT NOT NULL,
   storage_path TEXT NOT NULL,
   -- 像素宽高：大图预览（PhotoSwipe）按比例排布只认这两个值，缺了就压成方图
@@ -399,6 +411,15 @@ VALUES ('comfyui_url', ?, CURRENT_TIMESTAMP);
 		// 图片像素宽高（imagesize.go）。存量行由 backfillImageSizes 后台补齐。
 		`ALTER TABLE images ADD COLUMN width INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE images ADD COLUMN height INTEGER NOT NULL DEFAULT 0`,
+		// 外部平台同步（external.go）。prompt_id 让外部图直连提示词，
+		// 不再依赖 generation_items 这条只对 ComfyUI 出图成立的链路。
+		`ALTER TABLE images ADD COLUMN prompt_id INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE images ADD COLUMN source_platform TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE images ADD COLUMN image_hash TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE prompts ADD COLUMN source_platform TEXT NOT NULL DEFAULT ''`,
+		// 索引单独执行：上面这批 ALTER 失败会被静默忽略，索引不能跟着一起吞错
+		`CREATE INDEX IF NOT EXISTS idx_images_platform ON images(source_platform)`,
+		`CREATE INDEX IF NOT EXISTS idx_images_hash ON images(image_hash)`,
 	}
 	for _, stmt := range migrations {
 		if _, err := a.db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {

@@ -2,11 +2,13 @@
 import { onMounted, onUnmounted, ref, computed, watch } from 'vue'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
+import PlatformBadge from '../components/PlatformBadge.vue'
 import { api, type Workflow } from '../api/client'
 import { thumbUrl } from '../utils/imageUrls'
-import { pickDefaultWorkflow } from '../utils/workflowParams'
+import { pickWorkflowId, rememberWorkflowId } from '../utils/workflowParams'
 import { openImageViewer } from '../utils/imageViewer'
 import { backToListOr } from '../utils/nav'
+import { ensurePlatforms } from '../utils/platforms'
 
 type Run = {
   item_id: number
@@ -18,6 +20,7 @@ type Run = {
   workflow_name: string
   images: { id: number; filename: string; width?: number; height?: number }[]
 }
+type PromptImage = { id: number; filename: string; width?: number; height?: number }
 type PromptDetail = {
   id: number
   title: string
@@ -27,6 +30,9 @@ type PromptDetail = {
   status: string
   is_favorite: boolean
   created_at: string
+  source_platform: string
+  // 外部同步的图不走生成项，后端单独返回一份
+  external_images: PromptImage[]
   runs: Run[]
 }
 
@@ -88,9 +94,8 @@ async function loadWorkflows() {
 }
 
 function openRunModal() {
-  // 预选默认工作流：下拉只列出启用项，默认项被禁用时退回 0
-  const preferred = pickDefaultWorkflow(workflows.value)
-  selectedWorkflow.value = preferred && preferred.enabled ? preferred.id : 0
+  // 下拉只列启用项，所以记忆项被停用时自动退回默认
+  selectedWorkflow.value = pickWorkflowId(workflows.value, { requireEnabled: true })
   showRunModal.value = true
 }
 
@@ -108,6 +113,7 @@ async function confirmRun() {
       body: JSON.stringify({ workflow_id: selectedWorkflow.value }),
     })
     showRunModal.value = false
+    rememberWorkflowId(selectedWorkflow.value)
     router.push(`/tasks/${result.task_id}`)
   } catch (e) {
     showMessage(e instanceof Error ? e.message : '重跑失败', 'error')
@@ -151,9 +157,17 @@ function openRunImages(run: Run, index: number) {
   })
 }
 
+function openExternalImages(images: PromptImage[], index: number) {
+  openImageViewer(images.map(i => ({ id: i.id, width: i.width, height: i.height })), index, {
+    goToPrompt: id => router.push(`/prompts/${id}`),
+    mutated: () => load(true),
+  })
+}
+
 onMounted(() => {
   load()
   loadWorkflows()
+  ensurePlatforms()
 })
 onUnmounted(() => setPolling(false))
 </script>
@@ -183,6 +197,7 @@ onUnmounted(() => setPolling(false))
           <div class="detail-title-wrap">
             <h2 class="detail-title">{{ prompt.title }}</h2>
             <div class="detail-badges">
+              <PlatformBadge v-if="prompt.source_platform" :platform="prompt.source_platform" size="md" />
               <span class="badge" :class="'badge-' + prompt.status">{{ statusBadge(prompt.status) }}</span>
               <span v-if="prompt.group_name" class="badge badge-muted">{{ prompt.group_name }}</span>
             </div>
@@ -201,10 +216,30 @@ onUnmounted(() => setPolling(false))
       </div>
     </div>
 
+    <!-- 外部平台同步的图片：不挂在生成项上，单独一块展示 -->
+    <div v-if="prompt.external_images && prompt.external_images.length" class="card run-item external-block">
+      <div class="run-head">
+        <PlatformBadge v-if="prompt.source_platform" :platform="prompt.source_platform" />
+        <span class="text-sm">外部来源图片（{{ prompt.external_images.length }}）</span>
+      </div>
+      <div class="run-images">
+        <img
+          v-for="(img, idx) in prompt.external_images"
+          :key="img.id"
+          :src="thumbUrl(img.id)"
+          :alt="img.filename"
+          class="run-thumb"
+          loading="lazy"
+          decoding="async"
+          @click="openExternalImages(prompt.external_images, idx)"
+        />
+      </div>
+    </div>
+
     <h3 style="margin:20px 0 12px;">生成历史（{{ prompt.runs.length }}）</h3>
     <div v-if="!prompt.runs.length" class="card empty-state">
       <div class="empty-icon">&#128247;</div>
-      <p>还没有生成记录，点击「重跑」开始生成。</p>
+      <p>{{ prompt.source_platform ? '还没有本平台生成记录，点击「重跑」可用本平台工作流生成。' : '还没有生成记录，点击「重跑」开始生成。' }}</p>
     </div>
     <div v-else class="run-list">
       <div v-for="run in prompt.runs" :key="run.item_id" class="card run-item">

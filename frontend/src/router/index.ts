@@ -11,6 +11,7 @@ import PromptDetailView from '../views/PromptDetailView.vue'
 import PromptEditView from '../views/PromptEditView.vue'
 import TaskListView from '../views/TaskListView.vue'
 import DebugView from '../views/DebugView.vue'
+import ExternalImportView from '../views/ExternalImportView.vue'
 
 // SPA 异步渲染下浏览器自动恢复滚动不可靠，关闭后交给下面的 scrollBehavior 延迟恢复
 if ('scrollRestoration' in window.history) {
@@ -43,6 +44,8 @@ export default createRouter({
   routes: [
     { path: '/', component: DashboardView },
     { path: '/submit', component: DirectSubmitView },
+    // 外部平台同步：单条录入别家生成的图 + 提示词
+    { path: '/external', component: ExternalImportView },
     { path: '/prompts', component: PromptsView },
     { path: '/prompts/new', component: PromptEditView },
     { path: '/prompts/:id', component: PromptDetailView },
