@@ -24,12 +24,18 @@ export type ViewerCallbacks = {
   goToPrompt?: (promptId: number) => void
   /** 查看期间发生收藏/删除后回调，用于父列表刷新 */
   mutated?: () => void
+  /**
+   * 关闭后回调。index 是关闭时停留的那张在「整个筛选结果」里的下标（0-based、跨页），
+   * 列表页据此把自己切到对应页码，而不是退回打开时那一页。
+   * 传了 onClose 就不用再传 mutated：第二个参数就是「本次有没有收藏/删除」。
+   */
+  onClose?: (index: number, mutated: boolean) => void
 }
 
 // src 用 preview（长边 1600 的 WebP），不再直接拉原图：
 // 一张原图 1.5–4.4MB，preview 只有 74–144KB，画质在 2K 屏上看不出差别。
 // 需要 1:1 细节时由底部的「查看原图」按钮按需切换。
-type SlideItem = { width: number; height: number; src: string; alt: string; psId: number; isOriginal?: boolean }
+type SlideItem = { width: number; height: number; src: string; alt: string; psId: number; isOriginal?: boolean; deleted?: boolean }
 
 /**
  * 调用方可以只给 id，也可以带上后端返回的像素宽高。
@@ -44,6 +50,19 @@ type Ref = { id: number; width: number; height: number }
 const PLACEHOLDER_SIZE = 1024
 const MEASURE_CONCURRENCY = 3
 const MEASURE_TIMEOUT = 8000
+
+/**
+ * 删除图片后当前这张的占位图。
+ * 删完不关闭灯箱：把这一格就地换成占位，然后滑到相邻一张继续看，
+ * 序列和索引都不用动（PhotoSwipe 没有公开的 removeSlide，改索引极易错位）。
+ */
+const DELETED_SRC = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(
+  `<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600">
+    <rect width="800" height="600" fill="#18181b"/>
+    <text x="400" y="300" font-family="-apple-system,system-ui,sans-serif" font-size="26"
+      fill="#71717a" text-anchor="middle" dominant-baseline="middle">图片已删除</text>
+  </svg>`,
+)}`
 
 function toRefs(input: ViewerRef[]): Ref[] {
   return input.map(r => {
@@ -272,6 +291,8 @@ export async function openImageViewer(input: ViewerRef[], startIndex: number, cb
   let captionEl: HTMLElement | null = null
   let fabEl: HTMLElement | null = null
   let currentId = 0
+  /** 关闭时停留的那张的全局下标（跨页），用于让列表页跟着切页 */
+  let lastIndex = startIndex
   let renderSeq = 0
 
   function renderCaption(detail: ViewerDetail | null, loading: boolean) {
@@ -315,12 +336,9 @@ export async function openImageViewer(input: ViewerRef[], startIndex: number, cb
         <div class="ps-caps-meta">${escapeHtml(formatDate(detail.created_at))}${detail.filename ? ` · ${escapeHtml(detail.filename)}` : ''}</div>
         ${source}${pos}${neg}
         <div class="ps-caps-actions">
-          <button class="ps-caps-btn" data-action="view-original" type="button">查看原图</button>
           <button class="ps-caps-btn primary" data-action="download" type="button">↓ 下载原图</button>
         </div>
       </div>`
-    // 换图后按钮要回到「查看原图」；同一张图已切到原图则显示「看压缩图」
-    syncOriginalButtons()
   }
 
   async function showCaptionFor(id: number) {
@@ -344,32 +362,75 @@ export async function openImageViewer(input: ViewerRef[], startIndex: number, cb
     setTimeout(() => { btn.textContent = '复制' }, 2000)
   }
 
-  /** 右下角浮动按钮列：根据当前图收藏状态刷新星标 */
+  /** 浮动按钮反馈：临时改说明文字 + 红框，2 秒后恢复。静默 catch 会让用户以为按钮坏了 */
+  function flashFab(action: string, text: string, restore: string) {
+    const btn = fabEl?.querySelector<HTMLElement>(`[data-action="${action}"]`)
+    if (!btn) return
+    setFabTip(btn, text)
+    btn.classList.add('is-failed')
+    setTimeout(() => {
+      if (!btn.isConnected) return
+      btn.classList.remove('is-failed')
+      setFabTip(btn, restore)
+    }, 2000)
+  }
+
+  /** 右下角浮动按钮列：根据当前图收藏状态刷新星标（实心/空心由 .active 控制） */
   function renderFab(detail: ViewerDetail | null) {
     if (!fabEl) return
     const favBtn = fabEl.querySelector<HTMLButtonElement>('[data-action="fab-favorite"]')
     if (!favBtn) return
     const fav = !!detail?.is_favorite
     favBtn.classList.toggle('active', fav)
-    favBtn.textContent = fav ? '★ 已收藏' : '☆ 收藏'
+    favBtn.setAttribute('aria-pressed', fav ? 'true' : 'false')
+    setFabTip(favBtn, fav ? '取消收藏' : '收藏')
   }
 
-  /** 当前幻灯片的 data（PhotoSwipe 内部叫 currSlide.data） */
+  /** 已删除占位图的说明：不请求详情，也没什么可展开的 */
+  function renderDeletedCaption(id: number) {
+    if (!captionEl) return
+    // 不能用 .ps-caps-summary：它在桌面端是 display:none（详情默认展开），会一行字都看不到
+    captionEl.innerHTML = `<div class="ps-caps-deleted">#${id} · 这张图片已删除</div>`
+  }
+
+  /** 占位图上禁用原图/收藏/删除（已经没东西可操作了） */
+  function setFabDisabled(disabled: boolean) {
+    if (!fabEl) return
+    fabEl.querySelectorAll<HTMLButtonElement>('button').forEach(b => { b.disabled = disabled })
+  }
+
+  /**
+   * 当前幻灯片的 data。
+   * PhotoSwipe 5 叫 `pswp.currSlide.data`——**没有** `currData`（那是 v4 的 API）。
+   * 之前 change 回调读 `currData` 拿到恒为 undefined，导致 currentId 永远是 0，
+   * 收藏/删除/查看原图全部静默失效。切勿再改名。
+   * 首帧 currSlide 可能尚未挂上，用 currIndex 从 items 兜底。
+   */
   function currentSlideData(): SlideItem | undefined {
-    const pswp = lightbox.pswp as unknown as { currSlide?: { data?: SlideItem } } | undefined
-    return pswp?.currSlide?.data
+    const pswp = lightbox.pswp as unknown as
+      | { currSlide?: { data?: SlideItem }; currIndex?: number }
+      | undefined
+    if (!pswp) return undefined
+    const data = pswp.currSlide?.data
+    if (data) return data
+    const index = pswp.currIndex
+    return typeof index === 'number' ? items[index] : undefined
   }
 
-  /** 同步「查看原图 / 看压缩图」两处入口的文案与状态 */
+  /** 浮动按钮的说明文字（悬停向左浮出，也作为读屏标签），不占画面 */
+  function setFabTip(btn: HTMLElement, tip: string) {
+    btn.dataset.tip = tip
+    btn.setAttribute('aria-label', tip)
+  }
+
+  /** 同步原图按钮状态：加载的是原图时 HD 徽标高亮，说明改成「看压缩图」 */
   function syncOriginalButtons() {
     const isOriginal = !!currentSlideData()?.isOriginal
     const fabBtn = fabEl?.querySelector<HTMLButtonElement>('[data-action="fab-original"]')
-    if (fabBtn) {
-      fabBtn.textContent = isOriginal ? '↩ 看压缩图' : '🔍 查看原图'
-      fabBtn.classList.toggle('active', isOriginal)
-    }
-    const capBtn = captionEl?.querySelector<HTMLButtonElement>('[data-action="view-original"]')
-    if (capBtn) capBtn.textContent = isOriginal ? '看压缩图' : '查看原图'
+    if (!fabBtn) return
+    fabBtn.classList.toggle('active', isOriginal)
+    fabBtn.classList.remove('is-failed')
+    setFabTip(fabBtn, isOriginal ? '看压缩图' : '查看原图')
   }
 
   /**
@@ -380,7 +441,7 @@ export async function openImageViewer(input: ViewerRef[], startIndex: number, cb
   async function toggleOriginal() {
     const pswp = lightbox.pswp
     const data = currentSlideData()
-    if (!pswp || !data) return
+    if (!pswp || !data || data.deleted) return
     const fabBtn = fabEl?.querySelector<HTMLButtonElement>('[data-action="fab-original"]')
     if (fabBtn?.disabled) return
 
@@ -402,7 +463,7 @@ export async function openImageViewer(input: ViewerRef[], startIndex: number, cb
 
     if (fabBtn) {
       fabBtn.disabled = true
-      fabBtn.textContent = '加载原图…'
+      setFabTip(fabBtn, '加载原图…')
     }
     let ok = false
     try {
@@ -423,39 +484,79 @@ export async function openImageViewer(input: ViewerRef[], startIndex: number, cb
       syncOriginalButtons()
       // 超时/读失败时给个明确反馈，否则点了像没反应
       if (!ok && !data.isOriginal && fabBtn) {
-        fabBtn.textContent = '原图加载失败'
-        setTimeout(() => syncOriginalButtons(), 2000)
+        fabBtn.classList.add('is-failed')
+        setFabTip(fabBtn, '原图加载失败')
+        setTimeout(() => { if (fabBtn.isConnected) syncOriginalButtons() }, 2000)
       }
     }
   }
 
   async function doFavorite() {
-    let detail = detailCache.get(currentId)
+    const id = currentId
+    if (!id) return
+    // 占位图上没有可收藏的对象（按钮通常已禁用，这里兜一层）
+    if (currentSlideData()?.deleted) return
+    let detail = detailCache.get(id)
     if (!detail) {
       try {
-        detail = await api<ViewerDetail>(`/api/images/${currentId}`)
-        detailCache.set(currentId, detail)
+        detail = await api<ViewerDetail>(`/api/images/${id}`)
+        detailCache.set(id, detail)
       } catch {
+        flashFab('fab-favorite', '加载失败', '收藏')
         return
       }
     }
     try {
-      const r = await api<{ is_favorite: boolean }>(`/api/images/${currentId}/favorite`, { method: 'PATCH' })
+      const r = await api<{ is_favorite: boolean }>(`/api/images/${id}/favorite`, { method: 'PATCH' })
       detail.is_favorite = r.is_favorite
       mutated = true
+      // 请求期间可能已划到下一张：别把这张的状态画到那张的 UI 上
+      if (id !== currentId) return
       renderCaption(detail, false)
       renderFab(detail)
-    } catch { /* ignore */ }
+    } catch {
+      flashFab('fab-favorite', '操作失败', detail.is_favorite ? '取消收藏' : '收藏')
+    }
+  }
+
+  /** 把当前这张就地换成「已删除」占位：不关闭灯箱，序列与索引都保持原样 */
+  function markDeleted(data: SlideItem) {
+    data.src = DELETED_SRC
+    data.width = 800
+    data.height = 600
+    data.deleted = true
+    data.isOriginal = false
+    detailCache.delete(data.psId)
+    const pswp = lightbox.pswp
+    if (pswp) {
+      pswp.refreshSlideContent(pswp.currIndex)
+      pswp.updateSize(true)
+    }
   }
 
   async function doDelete() {
+    const id = currentId
+    if (!id) return
+    const pswp = lightbox.pswp
+    const data = currentSlideData()
+    if (!data || data.deleted) return
     if (!confirm('确定删除这张图片？\n\n这会同时删除磁盘上的图片文件，且不可恢复。')) return
     try {
-      await api(`/api/images/${currentId}`, { method: 'DELETE' })
+      await api(`/api/images/${id}`, { method: 'DELETE' })
       mutated = true
-      viewerRemoveId(currentId)
-      lightbox.pswp?.close()
-    } catch { /* ignore */ }
+      viewerRemoveId(id)
+      markDeleted(data)
+      // 不关闭灯箱：就地停住，自动滑到相邻一张继续看。
+      // 只剩这一张时没有邻居可去，才退回关闭。
+      const idx = pswp?.currIndex ?? 0
+      if (!pswp || items.length <= 1) {
+        pswp?.close()
+        return
+      }
+      pswp.goTo(idx < items.length - 1 ? idx + 1 : idx - 1)
+    } catch {
+      flashFab('fab-delete', '删除失败', '删除')
+    }
   }
 
   lightbox.on('uiRegister', () => {
@@ -482,8 +583,6 @@ export async function openImageViewer(input: ViewerRef[], startIndex: number, cb
           } else if (action === 'go-prompt' && detail?.prompt_id) {
             cb.goToPrompt?.(detail.prompt_id)
             pswp.close()
-          } else if (action === 'view-original') {
-            await toggleOriginal()
           } else if (action === 'download') {
             window.open(`/api/images/${currentId}/download`, '_blank')
           }
@@ -491,15 +590,28 @@ export async function openImageViewer(input: ViewerRef[], startIndex: number, cb
       },
     } as never)
 
-    // 浮动操作列直接挂到 document.body，彻底脱离 PhotoSwipe 的 UI 层叠与
-    // 图片拖拽事件体系，避免点击被吞掉（之前 appendTo:'root' 时按钮点不动）。
+    // 浮动操作列挂在 PhotoSwipe 根节点内，用纯图标 + 悬停说明，尽量不遮挡画面。
+    // 三个按钮的文案由 data-tip 提供，不要改回可见文字。
     if (!fabEl) {
       fabEl = document.createElement('div')
       fabEl.className = 'ps-action-fab'
       fabEl.innerHTML = `
-        <button class="ps-fab-btn" data-action="fab-original" type="button">🔍 查看原图</button>
-        <button class="ps-fab-btn" data-action="fab-favorite" type="button">☆ 收藏</button>
-        <button class="ps-fab-btn danger" data-action="fab-delete" type="button">🗑 删除</button>`
+        <button class="ps-fab-btn" data-action="fab-original" data-tip="查看原图" aria-label="查看原图" type="button">
+          <span class="ps-fab-hd">HD</span>
+        </button>
+        <button class="ps-fab-btn" data-action="fab-favorite" data-tip="收藏" aria-label="收藏" aria-pressed="false" type="button">
+          <svg data-icon="star" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 3.7l2.6 5.3 5.8.9-4.2 4.1 1 5.8-5.2-2.8-5.2 2.8 1-5.8-4.2-4.1 5.8-.9z"/>
+          </svg>
+        </button>
+        <button class="ps-fab-btn danger" data-action="fab-delete" data-tip="删除" aria-label="删除" type="button">
+          <svg data-icon="trash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M4 7h16"/>
+            <path d="M9.5 7V5.3c0-.7.6-1.3 1.3-1.3h2.4c.7 0 1.3.6 1.3 1.3V7"/>
+            <path d="M6.5 7l.8 12.1c.1 1 .9 1.9 2 1.9h5.4c1.1 0 1.9-.8 2-1.9L17.5 7"/>
+            <path d="M10.5 11v6M13.5 11v6"/>
+          </svg>
+        </button>`
       // 关键：阻止 PhotoSwipe 把按钮上的按下当作图片拖拽（否则 click 会被吞，按钮点不动）
       fabEl.addEventListener('pointerdown', e => e.stopPropagation())
       fabEl.addEventListener('click', async e => {
@@ -509,7 +621,6 @@ export async function openImageViewer(input: ViewerRef[], startIndex: number, cb
         e.preventDefault()
         e.stopPropagation()
         if (action === 'fab-favorite') {
-          if (!detailCache.get(currentId)) return
           await doFavorite()
         } else if (action === 'fab-original') {
           await toggleOriginal()
@@ -525,7 +636,16 @@ export async function openImageViewer(input: ViewerRef[], startIndex: number, cb
 
   lightbox.on('change', () => {
     const pswp = lightbox.pswp
-    const data = (pswp as unknown as { currData?: SlideItem })?.currData
+    if (pswp) lastIndex = pswp.currIndex
+    const data = currentSlideData()
+    if (data?.deleted) {
+      // 退回到已删除的占位图：不拉详情，按钮也没有可操作的对象
+      currentId = data.psId
+      renderDeletedCaption(data.psId)
+      setFabDisabled(true)
+      return
+    }
+    setFabDisabled(false)
     if (data?.psId) showCaptionFor(data.psId)
     if (pswp) {
       // 换图后按钮要回到「查看原图」状态（上一张切过原图不影响这一张）
@@ -542,7 +662,9 @@ export async function openImageViewer(input: ViewerRef[], startIndex: number, cb
     if (fabEl && fabEl.parentNode) fabEl.parentNode.removeChild(fabEl)
     captionEl = null
     fabEl = null
-    if (mutated) cb.mutated?.()
+    // onClose 优先：它同时负责「切到当前页」和「按需刷新」，避免父组件刷两遍
+    if (cb.onClose) cb.onClose(lastIndex, mutated)
+    else if (mutated) cb.mutated?.()
   })
 
   // 首帧这张要是历史数据（缺尺寸），先单独量一次再开——只发一个请求，

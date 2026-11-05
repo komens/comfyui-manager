@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import Pagination from '../components/Pagination.vue'
@@ -23,7 +23,7 @@ const total = ref(0)
 // 分页与筛选进 URL query：从详情页返回、刷新、分享链接都保持当前位置
 const state = useUrlState({
   page: 1,
-  page_size: 20,
+  page_size: 50,
   favorite: false,
   q: '',
   group: '',
@@ -223,6 +223,78 @@ async function batchDelete() {
   }
 }
 
+/** 用后端返回的原图宽高给缩略图占位：图片加载前盒子高度就是对的，不会跳动 */
+function thumbAspect(image: ImageItem) {
+  return image.width > 0 && image.height > 0 ? { aspectRatio: `${image.width} / ${image.height}` } : {}
+}
+
+// —— 瀑布流 ——
+// 用 grid 跨行实现（grid-auto-rows 8px + 每张算 span），不用绝对定位：
+// 列数交给 CSS 的 auto-fill，卡片保持文档流顺序（从左到右、从上到下），
+// Tab 焦点、读屏顺序、选中框都不会乱。
+const gridEl = ref<HTMLElement | null>(null)
+let gridObserver: ResizeObserver | null = null
+let layoutRaf = 0
+
+/**
+ * 重排一次：先清空 span 让卡片回到自然高度，量完再按行高换算跨行数。
+ * row-gap 是 0，纵向间距由 span 一起带出来，舍入误差压在 8px 以内。
+ */
+function layoutMasonry() {
+  const grid = gridEl.value
+  if (!grid) return
+  const cards = Array.from(grid.children as HTMLCollectionOf<HTMLElement>)
+  if (!cards.length) return
+  cards.forEach(c => { c.style.gridRowEnd = '' })
+  const cs = getComputedStyle(grid)
+  const rowH = parseFloat(cs.getPropertyValue('grid-auto-rows')) || 8
+  const spacing = parseFloat(cs.getPropertyValue('column-gap')) || 16
+  // 一次读完所有高度再统一写：逐张「读高度→写 span」会触发 N 次强制重排
+  const heights = cards.map(c => c.getBoundingClientRect().height)
+  cards.forEach((card, i) => {
+    const h = heights[i]
+    if (h <= 0) return
+    card.style.gridRowEnd = `span ${Math.max(1, Math.ceil((h + spacing) / rowH))}`
+  })
+}
+
+function scheduleMasonry() {
+  if (layoutRaf) cancelAnimationFrame(layoutRaf)
+  layoutRaf = requestAnimationFrame(() => {
+    layoutRaf = 0
+    layoutMasonry()
+  })
+}
+
+// 只看宽度变化：高度变化正是重排自己造成的，跟着它重排会死循环
+function observeGrid(el: HTMLElement) {
+  if (!gridObserver) {
+    let lastWidth = -1
+    gridObserver = new ResizeObserver(entries => {
+      const w = entries[0].contentRect.width
+      if (Math.abs(w - lastWidth) < 1) return
+      lastWidth = w
+      scheduleMasonry()
+    })
+  }
+  gridObserver.observe(el)
+}
+
+watch(gridEl, el => {
+  if (!el) return
+  observeGrid(el)
+  scheduleMasonry()
+})
+
+// 换页 / 改筛选后重排
+watch(images, () => { nextTick(scheduleMasonry) }, { flush: 'post' })
+
+onBeforeUnmount(() => {
+  gridObserver?.disconnect()
+  gridObserver = null
+  if (layoutRaf) cancelAnimationFrame(layoutRaf)
+})
+
 function openViewer(index: number) {
   // 带上宽高：查看器按真比例排布，跨页预取也不用再逐张拉原图量尺寸
   const refs = images.value.map(i => ({ id: i.id, width: i.width, height: i.height }))
@@ -231,7 +303,17 @@ function openViewer(index: number) {
     index,
     {
       goToPrompt: id => router.push(`/prompts/${id}`),
-      mutated: () => load(),
+      // 关闭时按「最后停留的那张」定位页码：翻到第 3 页的图再关，
+      // 列表就停在第 3 页，而不是退回点开时的第 1 页。
+      onClose: (lastIndex, changed) => {
+        const page = Math.floor(lastIndex / state.page_size) + 1
+        const pageChanged = page !== state.page
+        if (pageChanged) state.page = page
+        if (pageChanged || changed) {
+          clearSelection()
+          load()
+        }
+      },
     },
     {
       page: state.page,
@@ -314,8 +396,14 @@ onMounted(() => {
     </div>
   </div>
 
-  <!-- Image Grid -->
-  <div v-if="images.length" class="image-grid">
+  <!-- Image Grid：瀑布流，卡片高度按图片比例（span 由 layoutMasonry 计算） -->
+  <div
+    v-if="images.length"
+    ref="gridEl"
+    class="image-grid"
+    @load.capture="scheduleMasonry"
+    @error.capture="scheduleMasonry"
+  >
     <div
       v-for="(image, index) in images"
       :key="image.id"
@@ -327,7 +415,7 @@ onMounted(() => {
         <input type="checkbox" :checked="selectedIds.has(image.id)" @change="toggleSelect(image.id)" />
       </label>
       <span class="fav-badge" @click.stop="toggleFavorite(image)">{{ image.is_favorite ? '★' : '☆' }}</span>
-      <img class="image-thumb" :src="previewUrl(image.id)" :alt="image.filename" loading="lazy" decoding="async" />
+      <img class="image-thumb" :src="previewUrl(image.id)" :alt="image.filename" :style="thumbAspect(image)" loading="lazy" decoding="async" />
       <div class="image-info">
         <span class="text-xs">#{{ image.id }}</span>
         <span class="text-xs">{{ new Date(image.created_at).toLocaleDateString('zh-CN') }}</span>
@@ -349,10 +437,10 @@ onMounted(() => {
     <div class="page-size-wrap">
       <span class="text-xs muted">每页</span>
       <select v-model.number="state.page_size" class="input page-size-select" @change="onPageSizeChange">
-        <option :value="10">10</option>
         <option :value="20">20</option>
         <option :value="50">50</option>
         <option :value="100">100</option>
+        <option :value="200">200</option>
       </select>
       <span class="text-xs muted">条</span>
     </div>

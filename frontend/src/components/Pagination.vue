@@ -76,22 +76,27 @@ function commitJump() {
         </template>
         <button class="page-btn" :disabled="page >= totalPages" @click="go(page + 1)" aria-label="下一页">&rsaquo;</button>
       </div>
-      <!-- 只有一页时跳转没有意义，隐藏 -->
-      <label v-if="totalPages > 1" class="page-jump">
-        跳至
+      <!-- 用 form 包起来：移动端数字键盘的「前往/完成」会提交表单，
+           比只靠 keydown.enter 可靠（部分输入法只派发 change/submit）。
+           只有一页时跳转没有意义，隐藏。 -->
+      <form v-if="totalPages > 1" class="page-jump" @submit.prevent="commitJump">
+        <span class="page-jump-label">跳至</span>
         <input
           v-model="jumpDraft"
           class="page-jump-input"
           type="number"
           inputmode="numeric"
+          enterkeyhint="go"
           :min="1"
           :max="totalPages"
           aria-label="跳转到指定页"
           @keydown.enter.prevent="commitJump"
+          @keyup.enter="commitJump"
+          @change="commitJump"
           @blur="commitJump"
         />
-        / {{ totalPages }} 页
-      </label>
+        <span class="page-jump-total">/ {{ totalPages }}<span class="page-jump-unit"> 页</span></span>
+      </form>
     </div>
   </div>
 </template>
@@ -122,4 +127,22 @@ input[type="number"].page-jump-input::-webkit-outer-spin-button { -webkit-appear
 .page-btn.active { background: var(--c-primary); border-color: var(--c-primary); color: #fff; font-weight: 600; }
 .page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .page-ellipsis { min-width: 24px; text-align: center; color: var(--c-muted); }
+
+/* ===== 移动端紧凑分页 =====
+   页码区只保留「‹ 当前页 ›」，中间页码与省略号全部隐藏——390px 下 7 个按钮排不下。
+   跳页去掉「跳至」「页」字样，只留「[3] / 12」，跟页码挤在同一行。 */
+@media (max-width: 640px) {
+  .page-info { font-size: 12px; }
+  .page-btns { gap: 6px; flex-wrap: nowrap; }
+  /* 第一个/最后一个 .page-btn 是前后翻页箭头（必须留），
+     其余页码按钮只有当前页显示，点箭头照样能翻 */
+  .page-btn:not(.active):not(:first-child):not(:last-child) { display: none; }
+  .page-ellipsis { display: none; }
+  .page-btn { min-width: 30px; height: 30px; padding: 0 7px; font-size: 13px; }
+  .page-tail { flex-wrap: nowrap; justify-content: space-between; width: 100%; gap: 10px; }
+  .page-jump { font-size: 12px; gap: 4px; }
+  .page-jump-label,
+  .page-jump-unit { display: none; }
+  input[type="number"].page-jump-input { width: 44px; height: 30px; padding: 0 4px; }
+}
 </style>

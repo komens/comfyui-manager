@@ -41,7 +41,7 @@ let timer: ReturnType<typeof setInterval> | null = null
 // 分页与筛选进 URL query：从任务详情返回、刷新、分享链接都保持页码与筛选
 const state = useUrlState({
   page: 1,
-  page_size: 20,
+  page_size: 50,
   status: '',
   group: '',
 }, {
@@ -324,10 +324,10 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
     <div class="page-size-wrap">
       <span class="text-xs muted">每页</span>
       <select v-model.number="state.page_size" class="input page-size-select" @change="onPageSizeChange">
-        <option :value="10">10</option>
         <option :value="20">20</option>
         <option :value="50">50</option>
         <option :value="100">100</option>
+        <option :value="200">200</option>
       </select>
       <span class="text-xs muted">条</span>
     </div>

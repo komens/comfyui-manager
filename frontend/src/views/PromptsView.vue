@@ -39,7 +39,7 @@ const total = ref(0)
 // 分页与筛选统一进 URL query：从详情页返回、刷新、分享链接都保持当前页码与筛选条件
 const state = useUrlState({
   page: 1,
-  page_size: 20,
+  page_size: 50,
   group: '',
   status: '',
   q: '',
@@ -369,7 +369,6 @@ onMounted(() => {
         <div class="page-size-wrap">
           <span class="text-xs muted">每页</span>
           <select v-model.number="state.page_size" class="input page-size-select" @change="onPageSizeChange">
-            <option :value="10">10</option>
             <option :value="20">20</option>
             <option :value="50">50</option>
             <option :value="100">100</option>

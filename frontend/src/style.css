@@ -522,14 +522,53 @@ select:not([class*="el-"]) {
 
 /* ===== Pagination Footer ===== */
 .pagination-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-top: 16px; }
-.page-size-wrap { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
-.page-size-select { width: 64px; padding: 4px 6px; font-size: 13px; }
+.page-size-wrap { display: flex; align-items: center; gap: 6px; flex-shrink: 0; white-space: nowrap; }
+/* ⚠️ 必须写成 select.page-size-select（特异性 0,1,1）。
+   全局 select:not([class*="el-"]) 的 padding-right:36px 也是 0,1,1 且先定义，
+   只写 .page-size-select(0,1,0) 压不过它：64px 宽减掉 左6+右36+边框2 只剩 20px，
+   "100" 会被裁成"10"+半个字。提权 + width:auto 让宽度由最长选项自己撑开。 */
+select.page-size-select {
+  width: auto;
+  min-width: 62px;
+  flex: 0 0 auto;
+  padding: 4px 22px 4px 8px;
+  font-size: 13px;
+  background-position: right 6px center;
+}
+
+/* ===== 移动端分页压成两行（≤640px）=====
+   行1：范围信息（左） + 每页条数（右）
+   行2：页码（左） + 跳页（右）
+   跨组件重排靠 display:contents —— 去掉 .pagination 的盒子，
+   让 .page-info / .page-tail 直接成为 footer 的 grid 子项，
+   否则它们被裹在组件根节点里，没法跟 .page-size-wrap 同排。 */
+@media (max-width: 640px) {
+  .pagination-footer {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    row-gap: 10px;
+    column-gap: 12px;
+  }
+  /* ⚠️ 重复写一次类名把特异性抬到 (0,3,0)。组件内 scoped 的
+     .pagination[data-v-x]{display:flex} 是 (0,2,0) 且在本文件之后加载，
+     同特异性会被它压回来，grid 直接退化成 flex（右侧元素全被挤出屏幕）。 */
+  .pagination-footer > .pagination.pagination { display: contents; }
+  .pagination-footer .page-info { grid-column: 1; grid-row: 1; }
+  .pagination-footer > .page-size-wrap { grid-column: 2; grid-row: 1; justify-self: end; }
+  .pagination-footer .page-tail { grid-column: 1 / -1; grid-row: 2; }
+}
 
 /* ===== Image Grid ===== */
+/* 瀑布流网格：8px 细轨道，卡片按内容高度跨 N 行（span 由 GalleryView.layoutMasonry 算）。
+   row-gap 必须是 0——纵向间距已经算进 span 里，否则每跨一行会多叠一个 gap。 */
 .image-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 16px;
+  grid-auto-rows: 8px;
+  column-gap: 16px;
+  row-gap: 0;
+  align-items: start;
 }
 
 .image-card {
@@ -539,6 +578,8 @@ select:not([class*="el-"]) {
   overflow: hidden;
   transition: box-shadow var(--transition), transform var(--transition);
   cursor: pointer;
+  /* 瀑布流：卡片不跟着轨道拉伸，高度始终等于内容高度，span 才好算 */
+  align-self: start;
 }
 
 .image-card:hover {
@@ -546,10 +587,14 @@ select:not([class*="el-"]) {
   transform: translateY(-2px);
 }
 
+/* 缩略图按图片自身比例展示，不裁切。
+   高度由模板里绑定的 aspect-ratio（来自后端 width/height）提前占位，避免加载时跳动；
+   object-fit 用 contain 兜底——元数据比例万一不准也只是留边，绝不切掉画面。 */
 .image-card .image-thumb {
   width: 100%;
-  aspect-ratio: 1;
-  object-fit: cover;
+  height: auto;
+  object-fit: contain;
+  display: block;
   background: var(--c-bg);
 }
 
@@ -692,51 +737,107 @@ select:not([class*="el-"]) {
   .ps-caps-text { max-height: 120px; }
 }
 
-/* 大图预览右下角浮动操作列（收藏 / 删除），常驻、不依赖展开详情 */
+/* 已删除图片的占位说明（桌面端 .ps-caps-summary 是隐藏的，这里单独给一条） */
+.ps-caps-deleted {
+  font-size: 13px;
+  color: rgba(255, 255, 255, .68);
+  line-height: 1.6;
+}
+
+/* 大图预览右下角浮动操作列（原图 / 收藏 / 删除）。
+   纯图标 42px 圆钮：图片本身才是主体，文字说明只在悬停时向左浮出。 */
 .ps-action-fab {
   position: absolute;
   right: 16px;
   bottom: 96px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   z-index: 99999;
 }
 .ps-fab-btn {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  min-width: 86px;
-  padding: 10px 14px;
-  border: 1px solid rgba(255, 255, 255, .28);
-  background: rgba(24, 24, 27, .62);
+  width: 42px;
+  height: 42px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, .22);
+  background: rgba(24, 24, 27, .5);
   color: #fff;
-  border-radius: 12px;
-  font-size: 13px;
-  font-weight: 500;
+  border-radius: 50%;
   cursor: pointer;
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
-  box-shadow: 0 4px 14px rgba(0, 0, 0, .35);
-  transition: background .15s, transform .1s;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, .3);
+  transition: background .15s, transform .1s, border-color .15s, color .15s;
 }
-.ps-fab-btn:hover { background: rgba(40, 40, 45, .78); }
-.ps-fab-btn:active { transform: scale(.96); }
+.ps-fab-btn svg { width: 20px; height: 20px; display: block; }
+.ps-fab-btn:hover { background: rgba(45, 45, 50, .78); }
+.ps-fab-btn:active { transform: scale(.94); }
+.ps-fab-btn:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+
+/* 悬停向左浮出说明文字：不占画面，也不用把文案印在按钮上 */
+.ps-fab-btn::after {
+  content: attr(data-tip);
+  position: absolute;
+  right: calc(100% + 10px);
+  top: 50%;
+  transform: translateY(-50%) translateX(4px);
+  padding: 5px 9px;
+  border-radius: 7px;
+  background: rgba(18, 18, 20, .88);
+  border: 1px solid rgba(255, 255, 255, .14);
+  color: #f4f4f5;
+  font-size: 12px;
+  line-height: 1.3;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .12s, transform .12s;
+}
+.ps-fab-btn:hover::after,
+.ps-fab-btn:focus-visible::after { opacity: 1; transform: translateY(-50%) translateX(0); }
+
+/* 已收藏 / 已切原图：图标高亮；星标由描边变实心 */
 .ps-fab-btn.active {
-  background: rgba(250, 204, 21, .18);
-  border-color: rgba(250, 204, 21, .7);
+  background: rgba(250, 204, 21, .2);
+  border-color: rgba(250, 204, 21, .65);
   color: #fde68a;
 }
-.ps-fab-btn.danger {
-  border-color: rgba(253, 164, 175, .5);
-  color: #fda4af;
+/* 「查看原图」用清晰度徽标 HD，而不是放大镜：
+   PhotoSwipe 本身双击就是缩放，放大镜会和缩放语义打架，像是在改动缩放比例。 */
+.ps-fab-btn.active svg[data-icon="star"] { fill: currentColor; }
+
+.ps-fab-hd {
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: .03em;
+  line-height: 1;
+  /* 轻微下移，让两个字母在圆形里视觉居中 */
+  transform: translateY(.5px);
 }
-.ps-fab-btn.danger:hover { background: rgba(225, 29, 72, .32); }
+
+.ps-fab-btn.danger { color: #fda4af; }
+.ps-fab-btn.danger:hover {
+  background: rgba(225, 29, 72, .34);
+  border-color: rgba(253, 164, 175, .6);
+  color: #fecdd3;
+}
+.ps-fab-btn:disabled { opacity: .55; cursor: default; }
+.ps-fab-btn.is-failed {
+  border-color: rgba(248, 113, 113, .8);
+  background: rgba(127, 29, 29, .45);
+  color: #fca5a5;
+}
 
 @media (max-width: 768px) {
-  .ps-action-fab { right: 12px; bottom: 84px; gap: 8px; }
-  .ps-fab-btn { min-width: 76px; padding: 9px 12px; font-size: 12px; }
+  .ps-action-fab { right: 10px; bottom: 78px; gap: 7px; }
+  .ps-fab-btn { width: 38px; height: 38px; }
+  .ps-fab-btn svg { width: 18px; height: 18px; }
+  /* 触屏没有 hover，说明文字只在悬停设备上出现 */
+  .ps-fab-btn::after { display: none; }
 }
 
 /* ===== Progress Bar ===== */
@@ -960,7 +1061,7 @@ select:not([class*="el-"]) {
 
   .image-grid {
     grid-template-columns: repeat(2, 1fr);
-    gap: 10px;
+    column-gap: 10px;
   }
 
   .btn-group {
