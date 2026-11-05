@@ -25,7 +25,7 @@ COPY backend/ ./
 # 镜像里没有 libwebp，而该库的动态分支在编码失败时**是直接返回错误、不会回退**到纯 Go 版，
 # 所以这个 tag 不能漏：漏了会让缩略图编码每次都失败（接口只能回退原图）。
 # 二进制体积不变（wasm 版本来就在）。
-RUN CGO_ENABLED=0 GOOS=linux go build -tags nodynamic -ldflags="-s -w -X main.version=1.11.3" -o /out/comfyui-server ./cmd/server
+RUN CGO_ENABLED=0 GOOS=linux go build -tags nodynamic -ldflags="-s -w -X main.version=1.11.4" -o /out/comfyui-server ./cmd/server
 
 # Stage 3: Final image
 # 基线用 alpine 而不是 debian:bookworm-slim。这个镜像里唯一需要包管理器的地方就是
@@ -51,7 +51,7 @@ ARG WITH_PYTHON=1
 ARG APK_MIRROR=mirrors.aliyun.com
 
 LABEL org.opencontainers.image.title="comfyui-server" \
-      org.opencontainers.image.version="1.11.3" \
+      org.opencontainers.image.version="1.11.4" \
       org.opencontainers.image.description="ComfyUI workflow management and prompt library"
 
 RUN sed -i "s|dl-cdn.alpinelinux.org|${APK_MIRROR}|g" /etc/apk/repositories \
