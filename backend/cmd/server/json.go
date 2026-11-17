@@ -107,7 +107,7 @@ func (a *app) importJSONEntries(ctx context.Context, content []byte, entries []j
 			continue
 		}
 		if _, err := a.db.ExecContext(ctx,
-			`INSERT INTO prompts(title, description, positive_prompt, negative_prompt, group_name, group_id, status, created_at, updated_at) VALUES(?,?,?,?,?,?,?,'pending',?,?)`,
+			`INSERT INTO prompts(title, description, positive_prompt, negative_prompt, group_name, group_id, status, created_at, updated_at) VALUES(?,?,?,?,?,?,'pending',?,?)`,
 			title, entry.Desc, entry.Positive, entry.Negative, groupName, groupID, now, now); err != nil {
 			continue
 		}

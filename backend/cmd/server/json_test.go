@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 // 覆盖 JSON 导入的负面词优先级：逐条 negative 优先、全局 negative 兜底、数组形态不改动。
 func TestParseEntriesNegativeResolution(t *testing.T) {
@@ -58,4 +61,29 @@ func TestParseEntriesNegativeResolution(t *testing.T) {
 			t.Errorf("数组形态应按原样解析，实际 [%q %q]", entries[0].Negative, entries[1].Negative)
 		}
 	})
+}
+
+// TestImportJSONEntriesWritesRow 盯的是「真的写进库了」：只测 parseEntries 时，
+// INSERT 的列数/占位符对不上（多写一个 ?）也照样全绿——那种错误的表现是
+// imported=0、一条都没进去，而且每条都只是静默 continue。
+func TestImportJSONEntriesWritesRow(t *testing.T) {
+	a := newTestApp(t)
+	entries, err := parseEntries([]byte(`{"negative":"GLOBAL","entries":[{"id":"a","positive":"pa"}]}`))
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	stats, err := a.importJSONEntries(context.Background(), []byte(`{}`), entries, "测试组")
+	if err != nil {
+		t.Fatalf("入库失败: %v", err)
+	}
+	if stats.Inserted != 1 {
+		t.Fatalf("Inserted = %d，期望 1（INSERT 失败会静默跳过）", stats.Inserted)
+	}
+	var positive, negative, group string
+	if err := a.db.QueryRow(`SELECT positive_prompt, negative_prompt, group_name FROM prompts`).Scan(&positive, &negative, &group); err != nil {
+		t.Fatalf("查询失败: %v", err)
+	}
+	if positive != "pa" || negative != "GLOBAL" || group != "测试组" {
+		t.Errorf("落库内容不对：positive=%q negative=%q group=%q", positive, negative, group)
+	}
 }

@@ -662,9 +662,28 @@ func (a *app) backupDatabase(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "database file not found")
 		return
 	}
+	// 不能直接 ServeFile 主库文件：库跑在 WAL 模式下（见 DSN），最近的写入可能还在
+	// comfyui.db-wal 里没合并，单发 .db 得到的不是一致快照——轻则备份缺最近的操作，
+	// 重则拷到半截页、恢复时报 database disk image is malformed。
+	// VACUUM INTO 让 SQLite 自己写一份一致的快照：不阻塞写入、不用停服、不用手工 checkpoint。
+	snapshot, err := os.CreateTemp("", "comfyui-backup-*.db")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "create backup file failed")
+		return
+	}
+	snapshotPath := snapshot.Name()
+	_ = snapshot.Close()
+	// VACUUM INTO 要求目标文件不存在（0 字节的空文件也会报错）
+	_ = os.Remove(snapshotPath)
+	defer os.Remove(snapshotPath)
+
+	if _, err := a.db.Exec(`VACUUM INTO ?`, snapshotPath); err != nil {
+		writeError(w, http.StatusInternalServerError, "backup database failed: "+err.Error())
+		return
+	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="comfyui-backup-%s.db"`, time.Now().Format("20060102_150405")))
-	http.ServeFile(w, r, dbPath)
+	http.ServeFile(w, r, snapshotPath)
 }
 
 func (a *app) setting(ctx context.Context, key string) (string, error) {

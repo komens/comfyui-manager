@@ -2,6 +2,9 @@ package main
 
 import (
 	"archive/zip"
+	"bytes"
+	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,8 +17,9 @@ import (
 
 // ExportRecord 导出数据结构
 type ExportRecord struct {
-	Prompts []PromptRecord `json:"prompts"`
-	Images  []ImageRecord  `json:"images"`
+	Prompts   []PromptRecord   `json:"prompts"`
+	Images    []ImageRecord    `json:"images"`
+	Workflows []WorkflowRecord `json:"workflows"`
 }
 
 type PromptRecord struct {
@@ -44,6 +48,37 @@ type ImageRecord struct {
 	ImageHash      string `json:"image_hash,omitempty"`
 	Width          int    `json:"width,omitempty"`
 	Height         int    `json:"height,omitempty"`
+}
+
+// WorkflowRecord 是导出包里的工作流。
+//
+// workflow_json 直接内嵌，不按 ZIP 条目搬文件：库里只存 workflow_path，而文件名是
+// `<安全名>-<id>.json`，导入端 id 必然变，按文件搬就得改名 + 防撞名 + 防 zip slip。
+// 内嵌 JSON 交给导入端用本地 id 重新落盘，这几件事一并消失。
+//
+// Hash 只用于「同名同内容」判重（见 workflowContentHash），不含 name。
+type WorkflowRecord struct {
+	Name           string          `json:"name"`
+	Description    string          `json:"description"`
+	NegativePrompt string          `json:"negative_prompt"`
+	Enabled        bool            `json:"enabled"`
+	IsDefault      bool            `json:"is_default"`
+	Mapping        json.RawMessage `json:"mapping,omitempty"`
+	WorkflowJSON   json.RawMessage `json:"workflow_json"`
+	Hash           string          `json:"hash,omitempty"`
+}
+
+// workflowContentHash 是工作流内容指纹：先去掉格式空白再取 sha256。
+//
+// 必须规范化后再算——导出时 json.MarshalIndent 会重排缩进，直接对原始字节取哈希
+// 会让「同一个工作流」在导入端算不出同一个值，去重就永远不命中。
+func workflowContentHash(raw []byte) string {
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, raw); err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(compact.Bytes())
+	return fmt.Sprintf("%x", sum)
 }
 
 func (a *app) exportData(w http.ResponseWriter, r *http.Request) {
@@ -85,8 +120,10 @@ func (a *app) exportData(w http.ResponseWriter, r *http.Request) {
 		promptCond = " WHERE " + strings.Join(promptWhere, " AND ")
 	}
 
-	// 查询 prompts：负面优先取提示词自带列，没有则回落到关联工作流的静态负面（保留旧导出行为）
-	rows, err := a.db.Query(`SELECT p.id, COALESCE(p.title,''), COALESCE(p.description,''), COALESCE(p.positive_prompt,''), COALESCE(NULLIF(p.negative_prompt,''),(SELECT negative_prompt FROM workflows w JOIN generation_tasks t ON t.workflow_id=w.id JOIN generation_items i ON i.task_id=t.id WHERE i.prompt_id=p.id LIMIT 1),''), COALESCE(p.group_name,''), COALESCE(p.group_id,''), COALESCE(p.status,''), p.is_favorite, COALESCE(p.source_platform,'') FROM prompts p`+promptCond, promptArgs...)
+	// 查询 prompts：负面优先取提示词自带列，没有则回落到关联工作流的静态负面（保留旧导出行为）。
+	// ⚠️ 子查询里的 negative_prompt 必须带 w. 前缀：这是相关子查询，外层 p 和内层 w 都有
+	// 同名列，不限定就报 ambiguous column name，整个导出接口直接 500。
+	rows, err := a.db.Query(`SELECT p.id, COALESCE(p.title,''), COALESCE(p.description,''), COALESCE(p.positive_prompt,''), COALESCE(NULLIF(p.negative_prompt,''),(SELECT w.negative_prompt FROM workflows w JOIN generation_tasks t ON t.workflow_id=w.id JOIN generation_items i ON i.task_id=t.id WHERE i.prompt_id=p.id LIMIT 1),''), COALESCE(p.group_name,''), COALESCE(p.group_id,''), COALESCE(p.status,''), p.is_favorite, COALESCE(p.source_platform,'') FROM prompts p`+promptCond, promptArgs...)
 	if err != nil {
 		writeError(w, 500, "query prompts failed")
 		return
@@ -151,7 +188,45 @@ func (a *app) exportData(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	export := ExportRecord{Prompts: prompts, Images: images}
+	// 工作流：JSON 本体在 data/workflows/ 下（库里只存 workflow_path），必须读盘内嵌。
+	// 读不到文件或内容坏掉的跳过并记日志——导出半个工作流比不导出更糟：导入端会得到
+	// 一条「有记录、打不开」的空壳，等提交时才发现。
+	// with_workflows=0 可关掉，兼容只想要素材的旧调用方。
+	var exportWorkflows []WorkflowRecord
+	if q.Get("with_workflows") != "0" {
+		wrows, werr := a.db.Query(`SELECT name, COALESCE(description,''), COALESCE(negative_prompt,''), enabled, is_default, COALESCE(mapping_json,''), workflow_path FROM workflows ORDER BY id`)
+		if werr == nil {
+			defer wrows.Close()
+			for wrows.Next() {
+				var name, desc, negative, mapping, path string
+				var enabled, isDefault int
+				if err := wrows.Scan(&name, &desc, &negative, &enabled, &isDefault, &mapping, &path); err != nil {
+					continue
+				}
+				raw, err := readWorkflowFile(a.workflowFilePath(path))
+				if err != nil || len(raw) == 0 {
+					a.log.Printf("export: 跳过工作流 %q（读不到 %s：%v）", name, path, err)
+					continue
+				}
+				mappingJSON := json.RawMessage(mapping)
+				if !json.Valid(mappingJSON) {
+					mappingJSON = nil
+				}
+				exportWorkflows = append(exportWorkflows, WorkflowRecord{
+					Name:           name,
+					Description:    desc,
+					NegativePrompt: negative,
+					Enabled:        enabled == 1,
+					IsDefault:      isDefault == 1,
+					Mapping:        mappingJSON,
+					WorkflowJSON:   json.RawMessage(raw),
+					Hash:           workflowContentHash(raw),
+				})
+			}
+		}
+	}
+
+	export := ExportRecord{Prompts: prompts, Images: images, Workflows: exportWorkflows}
 
 	// 创建 ZIP
 	w.Header().Set("Content-Type", "application/zip")
@@ -169,6 +244,11 @@ func (a *app) exportData(w http.ResponseWriter, r *http.Request) {
 	ij, _ := json.MarshalIndent(export.Images, "", "  ")
 	iw, _ := zw.Create("images.json")
 	iw.Write(ij)
+
+	// 写入 workflows.json（JSON 内嵌，见 WorkflowRecord 的说明）
+	wj, _ := json.MarshalIndent(export.Workflows, "", "  ")
+	ww, _ := zw.Create("workflows.json")
+	ww.Write(wj)
 
 	// 写入图片文件
 	for _, img := range images {
@@ -235,6 +315,7 @@ func (a *app) importData(w http.ResponseWriter, r *http.Request) {
 	// 解析 ZIP 内容
 	var prompts []PromptRecord
 	var images []ImageRecord
+	var workflows []WorkflowRecord
 	fileMap := make(map[string]*zip.File) // filename -> zip file entry
 
 	for _, f := range zr.File {
@@ -246,6 +327,11 @@ func (a *app) importData(w http.ResponseWriter, r *http.Request) {
 		case f.Name == "images.json":
 			rc, _ := f.Open()
 			json.NewDecoder(rc).Decode(&images)
+			rc.Close()
+		case f.Name == "workflows.json":
+			// 旧包没有这个条目：workflows 保持空，行为与改动前一致
+			rc, _ := f.Open()
+			json.NewDecoder(rc).Decode(&workflows)
 			rc.Close()
 		case strings.HasPrefix(f.Name, "images/"):
 			if base := safeArchiveName(f.Name); base != "" {
@@ -280,7 +366,7 @@ func (a *app) importData(w http.ResponseWriter, r *http.Request) {
 
 		// 插入新 prompt
 		res, err := tx.Exec(`INSERT INTO prompts(title, description, positive_prompt, negative_prompt, group_name, group_id, status, is_favorite, source_platform, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
-			p.Title, p.Description, p.PositivePrompt, p.NegativePrompt, p.GroupName, p.GroupID, p.Status, boolToInt(p.IsFavorite), p.SourcePlatform)
+			p.Title, p.Description, p.PositivePrompt, p.NegativePrompt, p.GroupName, p.GroupID, importedPromptStatus(p.Status), boolToInt(p.IsFavorite), p.SourcePlatform)
 		if err != nil {
 			skippedPrompts++
 			continue
@@ -289,6 +375,10 @@ func (a *app) importData(w http.ResponseWriter, r *http.Request) {
 		idMap[p.ID] = newID
 		importedPrompts++
 	}
+
+	// 合并 workflows（按 name 判重；同名不同内容则加后缀共存）
+	// 放在 prompts 之后没有依赖关系，只是让响应里的计数顺序和打包顺序一致。
+	importedWorkflows, skippedWorkflows := a.importWorkflows(tx, workflows)
 
 	// 合并 images（按 filename 去重）
 	importedImages := 0
@@ -385,7 +475,99 @@ func (a *app) importData(w http.ResponseWriter, r *http.Request) {
 		"imported_images":          importedImages,
 		"skipped_images":           skippedImages,
 		"imported_external_images": importedExternal,
+		"imported_workflows":       importedWorkflows,
+		"skipped_workflows":        skippedWorkflows,
 	})
+}
+
+// importWorkflows 把导出包里的工作流写进库 + 盘，返回 (导入, 跳过)。
+//
+// 两条必须做的收敛：
+//   - is_default 一律置 0。目标库若已有默认工作流，再来一个就有两个「默认」，
+//     pickWorkflowId（记忆 → 默认 → 首个启用）的结果会变成实现细节。
+//   - enabled 保留原值。备份时禁用的，导回来仍是禁用，用户能自己看出来。
+func (a *app) importWorkflows(tx *sql.Tx, workflows []WorkflowRecord) (int, int) {
+	imported, skipped := 0, 0
+	for _, wf := range workflows {
+		name := strings.TrimSpace(wf.Name)
+		if name == "" || len(wf.WorkflowJSON) == 0 {
+			skipped++
+			continue
+		}
+		// normalizeWorkflowJSON 兼容「JSON 被当字符串又包了一层」的旧包
+		raw := normalizeWorkflowJSON(wf.WorkflowJSON)
+		if len(raw) == 0 || !json.Valid(raw) {
+			skipped++
+			continue
+		}
+		finalName, duplicate := a.resolveImportedWorkflowName(tx, name, workflowContentHash(raw))
+		if duplicate {
+			skipped++
+			continue
+		}
+		// 导入即用：编辑器没选的那一侧由自动识别补上，与 createWorkflow 一致
+		mapping := mergePromptMapping(wf.Mapping, raw)
+		if len(mapping) == 0 {
+			mapping = json.RawMessage(`{}`)
+		}
+		now := time.Now()
+		res, err := tx.Exec(`INSERT INTO workflows(name, description, workflow_path, mapping_json, negative_prompt, enabled, is_default, created_at, updated_at) VALUES(?,?,?,?,?,?,0,?,?)`,
+			finalName, wf.Description, "", string(mapping), wf.NegativePrompt, boolToInt(wf.Enabled), now, now)
+		if err != nil {
+			skipped++
+			continue
+		}
+		id, _ := res.LastInsertId()
+		fileName := workflowFileName(finalName, id)
+		if err := writeAtomic(filepath.Join(a.dataDir, "workflows", fileName), raw); err != nil {
+			// 落不了盘就把这行撤掉：留着「有记录、没文件」的工作流，等提交时才炸
+			_, _ = tx.Exec(`DELETE FROM workflows WHERE id=?`, id)
+			skipped++
+			continue
+		}
+		if _, err := tx.Exec(`UPDATE workflows SET workflow_path=? WHERE id=?`, fileName, id); err != nil {
+			_, _ = tx.Exec(`DELETE FROM workflows WHERE id=?`, id)
+			skipped++
+			continue
+		}
+		imported++
+	}
+	return imported, skipped
+}
+
+// resolveImportedWorkflowName 给出一个不与现有工作流撞名的名字，并判断是否为重复。
+//
+// 名字被占用时读对方文件比内容指纹：一样就是同一个工作流（duplicate=true）；
+// 不一样就试 `name (2)`、`name (3)`……宁可多一条带后缀的副本，也不静默吞掉导入的数据。
+func (a *app) resolveImportedWorkflowName(tx *sql.Tx, name, hash string) (string, bool) {
+	for i := 1; i <= 100; i++ {
+		candidate := name
+		if i > 1 {
+			candidate = fmt.Sprintf("%s (%d)", name, i)
+		}
+		var path string
+		if err := tx.QueryRow(`SELECT workflow_path FROM workflows WHERE name=? LIMIT 1`, candidate).Scan(&path); err != nil {
+			return candidate, false
+		}
+		existing, readErr := readWorkflowFile(a.workflowFilePath(path))
+		if readErr == nil && hash != "" && workflowContentHash(existing) == hash {
+			return candidate, true
+		}
+	}
+	return name, true
+}
+
+// importedPromptStatus 收敛导入的提示词状态。
+//
+// running / submitted / queued 是「有任务正在跑」的瞬时态：新库没有那条任务，
+// 原样导入会让列表永远显示「生成中」。其余状态（completed / failed / pending）
+// 只是静态标签，保留原值。
+func importedPromptStatus(status string) string {
+	switch status {
+	case "running", "submitted", "queued":
+		return "pending"
+	}
+	return status
 }
 
 // safeArchiveName 把（来自 ZIP 成员的）文件名收敛成纯文件名，防住 zip slip。

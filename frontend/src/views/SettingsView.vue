@@ -19,6 +19,7 @@ const exportGroup = ref('')
 const exportStatus = ref('')
 const exportSearch = ref('')
 const exportPlatform = ref('')
+const exportWorkflows = ref(true)
 const platformOptions = ref<Platform[]>([])
 const groups = ref<{ group_name: string; count: number }[]>([])
 
@@ -83,6 +84,7 @@ function resetExportFilters() {
   exportStatus.value = ''
   exportSearch.value = ''
   exportPlatform.value = ''
+  exportWorkflows.value = true
 }
 
 async function exportData() {
@@ -94,6 +96,7 @@ async function exportData() {
     if (exportStatus.value) params.set('status', exportStatus.value)
     if (exportSearch.value) params.set('search', exportSearch.value)
     if (exportPlatform.value) params.set('platform', exportPlatform.value)
+    params.set('with_workflows', exportWorkflows.value ? '1' : '0')
     const query = params.toString()
     const exportUrl = '/api/export' + (query ? '?' + query : '')
     const a = document.createElement('a')
@@ -119,13 +122,16 @@ async function handleImport(e: Event) {
   try {
     const formData = new FormData()
     formData.append('file', file)
-    const result = await api<{ imported_prompts: number; skipped_prompts: number; imported_images: number; skipped_images: number; imported_external_images?: number }>('/api/import', {
+    const result = await api<{ imported_prompts: number; skipped_prompts: number; imported_images: number; skipped_images: number; imported_external_images?: number; imported_workflows?: number; skipped_workflows?: number }>('/api/import', {
       method: 'POST',
       body: formData,
     })
     const external = result.imported_external_images ?? 0
+    const workflows = result.imported_workflows ?? 0
+    const skippedWorkflows = result.skipped_workflows ?? 0
     importResult.value = `导入成功！\n提示词：导入 ${result.imported_prompts} 条，跳过 ${result.skipped_prompts} 条重复\n图片：导入 ${result.imported_images} 张，跳过 ${result.skipped_images} 张重复` +
-      (external > 0 ? `\n其中外部平台来源 ${external} 张（来源标识已保留）` : '')
+      (external > 0 ? `\n其中外部平台来源 ${external} 张（来源标识已保留）` : '') +
+      (workflows > 0 || skippedWorkflows > 0 ? `\n工作流：导入 ${workflows} 个，跳过 ${skippedWorkflows} 个重复` : '')
   } catch (e) {
     importResult.value = '导入失败：' + (e instanceof Error ? e.message : '未知错误')
   } finally {
@@ -193,7 +199,7 @@ async function test() {
       <!-- 备份数据库 -->
       <div class="data-section">
         <h3>数据库备份</h3>
-        <p class="muted">下载完整的 SQLite 数据库文件。</p>
+        <p class="muted">整站账本快照：提示词、任务、工作流配置、设置全在这里，<strong>不含图片文件和工作流 JSON</strong>。用于整机回滚，需手动放回 <code>data/db/</code> 并重启服务。</p>
         <button class="btn" @click="backupDB">&#8681; 备份数据库</button>
       </div>
 
@@ -202,7 +208,7 @@ async function test() {
       <!-- 导出数据 -->
       <div class="data-section">
         <h3>导出数据</h3>
-        <p class="muted">按条件导出提示词和图片为 ZIP 包，可用于迁移到其他设备。</p>
+        <p class="muted">按条件导出提示词、图片和可选的<strong>工作流</strong>为 ZIP 包，导入到新设备即可继续出图（不含任务历史与设置）。</p>
         <button class="btn btn-primary" @click="openExportModal">&#8681; 导出数据</button>
       </div>
 
@@ -264,9 +270,15 @@ async function test() {
           </select>
         </div>
 
-        <label class="checkbox-label" style="margin-bottom:20px;">
+        <label class="checkbox-label" style="margin-bottom:10px;">
           <input type="checkbox" v-model="exportFavorite" />
           仅导出收藏
+        </label>
+
+        <label class="checkbox-label" style="margin-bottom:20px;">
+          <input type="checkbox" v-model="exportWorkflows" />
+          包含工作流
+          <span class="text-xs muted">（导出后可在新设备直接出图，不需重建）</span>
         </label>
 
         <div style="display:flex; gap:8px; justify-content:flex-end;">

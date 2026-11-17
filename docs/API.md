@@ -399,7 +399,12 @@ POST /api/settings/comfyui/test?url=http://127.0.0.1:8188
 GET /api/settings/backup
 ```
 
-**响应 200**：直接返回 SQLite 数据库文件流。
+**响应 200**：SQLite 数据库文件流。
+
+> 发的是 `VACUUM INTO` 导出的**一致快照**，不是主库文件本身：库跑在 WAL 模式，最近的写入可能还在
+> `comfyui.db-wal` 里没合并，直接发 `.db` 会缺数据甚至拷到半截页。快照生成后临时文件即删。
+> 内容只有「账本」——图片文件（`data/images/`）和工作流 JSON（`data/workflows/`）不在里面，
+> 整站回滚需要三者一起还原；只搬素材请用 [12. 数据导入导出](#12-数据导入导出)。
 
 | 响应头 | 值 |
 |---|---|
@@ -2510,6 +2515,7 @@ GET /api/export?favorite=1&group=风景&status=completed&search=cat&platform=cha
 | `status` | string | 按提示词状态筛选 |
 | `search` | string | 模糊搜索标题、正向提示词、描述 |
 | `platform` | string | 来源筛选：`local` = 本平台，其余精确匹配平台标识（如 `chatgpt`） |
+| `with_workflows` | string | 值为 `0` 时不导出工作流；缺省/其它值都导出（默认带工作流） |
 
 > ⚠️ 这里的搜索参数名是 `search`，而列表接口用的是 `q`，注意区分。
 
@@ -2526,6 +2532,7 @@ ZIP 结构：
 export-20261001_183000.zip
 ├── prompts.json        # 提示词数组（含 negative_prompt / group_id / is_favorite / source_platform）
 ├── images.json         # 图片数组（含 archive_name / prompt_id / positive_prompt / source_platform）
+├── workflows.json      # 工作流数组（JSON 本体内嵌，with_workflows=0 时为空数组）
 └── images/             # 图片二进制文件
     ├── 1767000000_12.png
     └── ...
@@ -2562,6 +2569,21 @@ export-20261001_183000.zip
 | `image_hash` | string | sha256，导回后可继续参与去重 |
 | `width` / `height` | int | 原始像素尺寸；缺省时导入端重新读文件头 |
 
+`workflows.json` 元素：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `name` | string | 展示名，也是导入时的判重键 |
+| `description` | string | |
+| `negative_prompt` | string | 工作流级默认负面（本条不带负面时的回落值） |
+| `enabled` | bool | 原样保留；禁用的工作流导回来仍然禁用 |
+| `is_default` | bool | 导出时记录，**导入时一律置 0**（见 12.2） |
+| `mapping` | object | 提示词落点；导入端会再用自动识别补齐缺的一侧 |
+| `workflow_json` | object | **工作流 JSON 本体**（`workflows` 表只存 `workflow_path`，本体在 `data/workflows/`，导出时读盘内嵌） |
+| `hash` | string | 规范化 JSON 的 sha256，导入端用于「同名同内容」判重 |
+
+> `workflow_json` 读不到文件的工作流会被跳过并写日志——宁可少一个条目，也不给导入端一个「有记录、打不开」的空壳。
+
 | 状态码 | 触发条件 | 错误消息 |
 |---|---|---|
 | 500 | 提示词查询失败 | `query prompts failed` |
@@ -2585,8 +2607,15 @@ Content-Type: multipart/form-data
 |---|---|
 | 提示词 | `title` + `positive_prompt` + `source_platform` 完全相同 |
 | 图片 | `filename` 已存在 |
+| 工作流 | `name` 相同且 JSON 内容指纹相同 → 跳过；`name` 相同但内容不同 → 存为 `name (2)`、`name (3)`…… |
 
 > 来源必须进去重键：两个平台可能撞出完全一样的提示词，合并会让来源标识丢失。
+> 工作流同名不同内容不覆盖也不丢弃，加后缀共存——迁移时最怕的是「导过去了却少了一版」。
+
+**导入时的两条收敛**
+
+- `is_default` 一律置 0：目标库若已有默认工作流，再来一个就有两个「默认」，`pickWorkflowId`（记忆 → 默认 → 首个启用）的顺序会变成实现细节。
+- 提示词状态 `running` / `submitted` / `queued` → `pending`：这些是「有任务正在跑」的瞬时态，新库没有对应任务，原样导入会让列表永远显示「生成中」。`completed` / `failed` / `pending` 保留原值。工作流文件名按**新 id** 重算（`<安全名>-<新id>.json`），不会与目标库已有文件撞名。
 
 **响应 200**
 
@@ -2597,6 +2626,8 @@ Content-Type: multipart/form-data
 | `imported_images` | int | 新插入的图片数 |
 | `skipped_images` | int | 跳过的图片数 |
 | `imported_external_images` | int | 其中带来源标识的外部平台图片数 |
+| `imported_workflows` | int | 新插入的工作流数（旧包没有 `workflows.json` 时为 0） |
+| `skipped_workflows` | int | 跳过的工作流数（重复或 JSON 坏掉） |
 
 | 状态码 | 触发条件 | 错误消息 |
 |---|---|---|
