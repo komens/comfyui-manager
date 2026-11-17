@@ -1,17 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import DashboardView from '../views/DashboardView.vue'
-import DirectSubmitView from '../views/DirectSubmitView.vue'
-import JsonFilesView from '../views/JsonFilesView.vue'
-import WorkflowsView from '../views/WorkflowsView.vue'
-import SettingsView from '../views/SettingsView.vue'
-import TaskDetailView from '../views/TaskDetailView.vue'
-import GalleryView from '../views/GalleryView.vue'
-import PromptsView from '../views/PromptsView.vue'
-import PromptDetailView from '../views/PromptDetailView.vue'
-import PromptEditView from '../views/PromptEditView.vue'
-import TaskListView from '../views/TaskListView.vue'
-import DebugView from '../views/DebugView.vue'
-import ExternalImportView from '../views/ExternalImportView.vue'
 
 // SPA 异步渲染下浏览器自动恢复滚动不可靠，关闭后交给下面的 scrollBehavior 延迟恢复
 if ('scrollRestoration' in window.history) {
@@ -43,18 +31,18 @@ export default createRouter({
   },
   routes: [
     { path: '/', component: DashboardView },
-    { path: '/submit', component: DirectSubmitView },
+    { path: '/submit', component: () => import('../views/DirectSubmitView.vue') },
     // 外部平台同步：单条录入别家生成的图 + 提示词
-    { path: '/external', component: ExternalImportView },
-    { path: '/prompts', component: PromptsView },
-    { path: '/prompts/new', component: PromptEditView },
-    { path: '/prompts/:id', component: PromptDetailView },
-    { path: '/prompts/:id/edit', component: PromptEditView },
-    { path: '/json-files', component: JsonFilesView },
-    { path: '/workflows', component: WorkflowsView },
-    { path: '/tasks', component: TaskListView },
-    { path: '/tasks/:id', component: TaskDetailView },
-    { path: '/gallery', component: GalleryView },
+    { path: '/external', component: () => import('../views/ExternalImportView.vue') },
+    { path: '/prompts', component: () => import('../views/PromptsView.vue') },
+    { path: '/prompts/new', component: () => import('../views/PromptEditView.vue') },
+    { path: '/prompts/:id', component: () => import('../views/PromptDetailView.vue') },
+    { path: '/prompts/:id/edit', component: () => import('../views/PromptEditView.vue') },
+    { path: '/json-files', component: () => import('../views/JsonFilesView.vue') },
+    { path: '/workflows', component: () => import('../views/WorkflowsView.vue') },
+    { path: '/tasks', component: () => import('../views/TaskListView.vue') },
+    { path: '/tasks/:id', component: () => import('../views/TaskDetailView.vue') },
+    { path: '/gallery', component: () => import('../views/GalleryView.vue') },
     // 条件式批量清理 + 回收站。破坏性操作，但走「预览 → 确认」两步且有回收站兜底。
     // 懒加载：这个页面是全项目唯一用 Element Plus 的，Element 的 chunk 约 400 kB，
     // 静态 import 会让**所有页面**的首屏都背上它。改成动态 import 后，
@@ -63,10 +51,10 @@ export default createRouter({
     // 脚本运行台：只在后端 ENABLE_SCRIPTS 开启时有内容，关闭时页面给开启说明、
     // 侧边栏也不出现。同样懒加载（这一页载入频率低，没必要进首屏包）。
     { path: '/scripts', component: () => import('../views/ScriptsView.vue') },
-    { path: '/settings', component: SettingsView },
+    { path: '/settings', component: () => import('../views/SettingsView.vue') },
     // 只在后端 DEBUG 开启时才有内容；没开时页面会给一份开启说明，
     // 侧边栏入口也不会出现
-    { path: '/debug', component: DebugView },
+    { path: '/debug', component: () => import('../views/DebugView.vue') },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],
 })

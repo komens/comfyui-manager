@@ -285,7 +285,6 @@ function formatBytes(bytes: number) {
 <template>
   <div class="page">
     <PageHeader
-      eyebrow="系统"
       title="数据整理"
       description="按条件批量清理图片、任务与提示词。删除的图片会先进回收站，确认无误后再彻底清除。"
     />

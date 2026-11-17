@@ -14,16 +14,25 @@ const title = ref('')
 const message = ref('')
 const messageType = ref<'success' | 'error' | 'info'>('info')
 const busy = ref(false)
+const loadingWorkflows = ref(true)
+const workflowError = ref(false)
 
 const selectedWorkflow = computed(() => workflows.value.find(w => w.id === workflowId.value))
 
-onMounted(async () => {
-  const result = await api<{ items: Workflow[] }>('/api/workflows?page_size=200')
-  workflows.value = result.items
-  // 优先上次提交选过的工作流，其次设置里的默认项
-  const preferred = pickWorkflowId(workflows.value)
-  if (preferred) workflowId.value = preferred
-})
+async function loadWorkflows() {
+  loadingWorkflows.value = true
+  workflowError.value = false
+  try {
+    const result = await api<{ items: Workflow[] }>('/api/workflows?page_size=200')
+    workflows.value = result.items.filter(item => item.enabled)
+    workflowId.value = pickWorkflowId(workflows.value)
+  } catch {
+    workflowError.value = true
+  } finally {
+    loadingWorkflows.value = false
+  }
+}
+onMounted(loadWorkflows)
 
 async function submit() {
   busy.value = true
@@ -57,16 +66,22 @@ async function submit() {
 </script>
 
 <template>
-  <PageHeader eyebrow="NEW TASK" title="直接提交" description="输入提示词并选择工作流生成图片。" />
+  <PageHeader title="直接提交" description="输入提示词并选择工作流生成图片。" />
 
   <div class="card" style="max-width:760px;">
     <div class="card-body">
       <div class="form-group">
         <label for="workflow">工作流</label>
-        <select id="workflow" v-model="workflowId">
+        <select id="workflow" v-model="workflowId" :disabled="loadingWorkflows || !workflows.length">
           <option v-for="item in workflows" :key="item.id" :value="item.id">{{ item.name }}</option>
         </select>
-        <p v-if="!workflows.length" class="form-hint" style="color:var(--c-danger);">请先创建工作流</p>
+        <p v-if="loadingWorkflows" class="form-hint">正在加载工作流…</p>
+        <div v-else-if="workflowError" class="form-hint">
+          工作流加载失败。<button type="button" class="btn btn-ghost btn-sm" @click="loadWorkflows">重试</button>
+        </div>
+        <div v-else-if="!workflows.length" class="form-hint">
+          请先创建或启用工作流。<RouterLink class="btn btn-secondary btn-sm" to="/workflows">管理工作流</RouterLink>
+        </div>
         <p v-if="selectedWorkflow?.negative_prompt" class="form-hint">
           工作流默认负面：{{ selectedWorkflow.negative_prompt }}（下方留空则使用它）
         </p>

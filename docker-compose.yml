@@ -14,8 +14,8 @@ services:
       DATA_DIR: /app/data
       DB_PATH: /app/data/db/comfyui.db
       STATIC_DIR: /app/static
-      # 与实机一致默认开启，日志落在 data/debug/；排查完在 .env 里写 DEBUG= 关掉
-      DEBUG: ${DEBUG:-1}
+      # 默认关闭。排查时显式设为 1，日志会包含完整提示词。
+      DEBUG: ${DEBUG:-0}
       # 脚本运行台。默认关闭：关闭时相关接口不注册，等于这个能力不存在。
       # 开了之后脚本以容器内服务用户身份执行，能读写整个 /app/data ——
       # 这个服务没有登录鉴权，只在可信内网里开。

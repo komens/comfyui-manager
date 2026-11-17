@@ -84,7 +84,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <PageHeader :eyebrow="isEdit ? 'EDIT PROMPT' : 'NEW PROMPT'" :title="isEdit ? '编辑提示词' : '新建提示词'" description="维护提示词内容和分组。" />
+  <PageHeader :title="isEdit ? '编辑提示词' : '新建提示词'" description="维护提示词内容和分组。" />
 
   <div class="card" style="max-width:760px;">
     <div class="card-body">

@@ -111,7 +111,6 @@ onBeforeUnmount(() => {
 
 <template>
   <PageHeader
-    eyebrow="EXTERNAL SOURCE"
     title="平台同步"
     description="把其他平台生成的图片和提示词单条录入素材库，会和本平台数据一起出现在图片库、提示词库和导出包里。"
   />

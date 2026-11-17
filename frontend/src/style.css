@@ -145,9 +145,6 @@ img { display: block; max-width: 100%; }
 .nav-link .nav-icon {
   width: 20px;
   height: 20px;
-  display: grid;
-  place-items: center;
-  font-size: 16px;
   flex-shrink: 0;
 }
 
@@ -172,15 +169,6 @@ img { display: block; max-width: 100%; }
 /* ===== Page Header ===== */
 .page-header {
   margin-bottom: 28px;
-}
-
-.page-header .eyebrow {
-  font-size: 11px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: .08em;
-  color: var(--c-primary);
-  margin-bottom: 8px;
 }
 
 .page-header h1 {
@@ -744,16 +732,14 @@ select.page-size-select {
   line-height: 1.6;
 }
 
-/* 大图预览右下角浮动操作列（原图 / 收藏 / 删除）。
-   纯图标 42px 圆钮：图片本身才是主体，文字说明只在悬停时向左浮出。 */
+/* 预览工具栏放在顶部控制区下方，避开底部提示词面板。 */
 .ps-action-fab {
   position: absolute;
   right: 16px;
-  bottom: 96px;
+  top: 64px;
   display: flex;
-  flex-direction: column;
   gap: 8px;
-  z-index: 99999;
+  z-index: 10;
 }
 .ps-fab-btn {
   position: relative;
@@ -778,13 +764,13 @@ select.page-size-select {
 .ps-fab-btn:active { transform: scale(.94); }
 .ps-fab-btn:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
 
-/* 悬停向左浮出说明文字：不占画面，也不用把文案印在按钮上 */
+/* 鼠标悬停或键盘聚焦时显示图标说明。 */
 .ps-fab-btn::after {
   content: attr(data-tip);
   position: absolute;
-  right: calc(100% + 10px);
-  top: 50%;
-  transform: translateY(-50%) translateX(4px);
+  right: 0;
+  top: calc(100% + 6px);
+  transform: translateY(-4px);
   padding: 5px 9px;
   border-radius: 7px;
   background: rgba(18, 18, 20, .88);
@@ -798,7 +784,7 @@ select.page-size-select {
   transition: opacity .12s, transform .12s;
 }
 .ps-fab-btn:hover::after,
-.ps-fab-btn:focus-visible::after { opacity: 1; transform: translateY(-50%) translateX(0); }
+.ps-fab-btn:focus-visible::after { opacity: 1; transform: translateY(0); }
 
 /* 已收藏 / 已切原图：图标高亮；星标由描边变实心 */
 .ps-fab-btn.active {
@@ -833,8 +819,8 @@ select.page-size-select {
 }
 
 @media (max-width: 768px) {
-  .ps-action-fab { right: 10px; bottom: 78px; gap: 7px; }
-  .ps-fab-btn { width: 38px; height: 38px; }
+  .ps-action-fab { right: 12px; top: 58px; gap: 8px; }
+  .ps-fab-btn { width: 44px; height: 44px; }
   .ps-fab-btn svg { width: 18px; height: 18px; }
   /* 触屏没有 hover，说明文字只在悬停设备上出现 */
   .ps-fab-btn::after { display: none; }
@@ -998,12 +984,15 @@ select.page-size-select {
 /* ===== Responsive ===== */
 @media (max-width: 768px) {
   .sidebar {
+    transition: transform .3s ease, visibility .3s;
+    visibility: hidden;
     transform: translateX(-100%);
     width: 280px;
     box-shadow: var(--shadow-lg);
   }
 
   .sidebar.open {
+    visibility: visible;
     transform: translateX(0);
   }
 

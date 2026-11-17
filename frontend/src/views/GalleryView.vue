@@ -18,6 +18,8 @@ const router = useRouter()
 
 const images = ref<ImageItem[]>([])
 const loading = ref(true)
+const loadError = ref(false)
+let loadController: AbortController | undefined
 const batchBusy = ref(false)
 const message = ref('')
 const total = ref(0)
@@ -36,6 +38,8 @@ const state = useUrlState({
     load()
   },
 })
+
+const hasFilters = computed(() => !!(state.q || state.group || state.platform || state.favorite))
 
 // 来源下拉：本平台 + 各外部平台（清单来自后端，加平台前端不用改）
 const platformOptions = ref<Platform[]>([])
@@ -56,7 +60,11 @@ const selectedCount = computed(() => selectedIds.value.size)
 const allSelected = computed(() => images.value.length > 0 && images.value.every(i => selectedIds.value.has(i.id)))
 
 async function load() {
+  loadController?.abort()
+  const controller = new AbortController()
+  loadController = controller
   loading.value = true
+  loadError.value = false
   try {
     const params = new URLSearchParams()
     if (state.favorite) params.set('favorite', '1')
@@ -65,16 +73,21 @@ async function load() {
     if (state.platform) params.set('platform', state.platform)
     params.set('page', String(state.page))
     params.set('page_size', String(state.page_size))
-    const result = await api<PageResult>(`/api/images?${params}`)
+    const result = await api<PageResult>(`/api/images?${params}`, { signal: controller.signal })
+    if (controller.signal.aborted) return
     images.value = result.items
     total.value = result.total
     // 只保留当前页仍存在的 id，避免残留"幽灵选中项"导致误删
     const alive = new Set(result.items.map(i => i.id))
     selectedIds.value = new Set([...selectedIds.value].filter(id => alive.has(id)))
   } catch {
+    if (controller.signal.aborted) return
     images.value = []
+    total.value = 0
+    clearSelection()
+    loadError.value = true
   } finally {
-    loading.value = false
+    if (!controller.signal.aborted) loading.value = false
   }
 }
 
@@ -161,7 +174,16 @@ function onFavOnlyChange() {
   load()
 }
 
+function clearFilters() {
+  state.q = ''
+  state.group = ''
+  state.platform = ''
+  state.favorite = false
+  onFilterChange()
+}
+
 function onFilterChange() {
+  clearTimeout(searchTimer)
   state.page = 1
   clearSelection()
   load()
@@ -297,6 +319,8 @@ watch(gridEl, el => {
 watch(images, () => { nextTick(scheduleMasonry) }, { flush: 'post' })
 
 onBeforeUnmount(() => {
+  loadController?.abort()
+  clearTimeout(searchTimer)
   gridObserver?.disconnect()
   gridObserver = null
   if (layoutRaf) cancelAnimationFrame(layoutRaf)
@@ -352,7 +376,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <PageHeader eyebrow="IMAGE LIBRARY" title="图片库" description="查看已生成的图片，支持预览、下载、提示词查看与批量管理。" />
+  <PageHeader title="图片库" description="查看已生成的图片，支持预览、下载、提示词查看与批量管理。" />
 
   <div class="toolbar" style="flex-wrap:wrap; gap:10px;">
     <input
@@ -360,19 +384,20 @@ onMounted(() => {
       class="input"
       type="text"
       placeholder="搜索提示词或文件名..."
+      aria-label="搜索提示词或文件名"
       style="flex:1; min-width:200px;"
       @input="onSearch"
     />
-    <select v-model="state.group" class="input" style="width:auto;max-width:180px;" @change="onFilterChange">
+    <select v-model="state.group" aria-label="图片分组" class="input" style="width:auto;max-width:180px;" @change="onFilterChange">
       <option value="">全部分组</option>
       <option v-for="g in groups" :key="g.group_name" :value="g.group_name">{{ g.group_name }}（{{ g.count }}）</option>
     </select>
-    <select v-model="state.platform" class="input" style="width:auto;max-width:150px;" @change="onFilterChange">
+    <select v-model="state.platform" aria-label="图片来源" class="input" style="width:auto;max-width:150px;" @change="onFilterChange">
       <option value="">全部来源</option>
       <option value="local">本平台</option>
       <option v-for="p in platformOptions" :key="p.id" :value="p.id">{{ p.label }}</option>
     </select>
-    <button class="btn btn-sm" :class="{ 'btn-primary': state.favorite }" @click="onFavOnlyChange">
+    <button class="btn btn-sm" :aria-pressed="state.favorite" :class="{ 'btn-primary': state.favorite }" @click="onFavOnlyChange">
       {{ state.favorite ? '★ 仅收藏' : '☆ 仅收藏' }}
     </button>
   </div>
@@ -401,11 +426,23 @@ onMounted(() => {
     </div>
   </div>
 
-  <!-- Empty -->
+  <div v-else-if="loadError" class="card">
+    <div class="empty-state" role="status">
+      <p>图片加载失败，请重试。</p>
+      <button type="button" class="btn btn-secondary btn-sm" @click="load">重试</button>
+    </div>
+  </div>
+
   <div v-else-if="!images.length" class="card">
     <div class="empty-state">
-      <div class="empty-icon">&#128247;</div>
-      <p>暂无生成图片，提交任务后图片将显示在这里。</p>
+      <template v-if="hasFilters">
+        <p>没有匹配的图片。</p>
+        <button type="button" class="btn btn-secondary btn-sm" @click="clearFilters">清空筛选</button>
+      </template>
+      <template v-else>
+        <p>图片库还没有素材。</p>
+        <RouterLink class="btn btn-primary btn-sm" to="/submit">创建作图任务</RouterLink>
+      </template>
     </div>
   </div>
 
@@ -422,24 +459,22 @@ onMounted(() => {
       :key="image.id"
       class="image-card"
       :class="{ selected: selectedIds.has(image.id) }"
-      @click="openViewer(index)"
     >
-      <label class="checkbox-wrap image-check" @click.stop>
-        <input type="checkbox" :checked="selectedIds.has(image.id)" @change="toggleSelect(image.id)" />
+      <label class="checkbox-wrap image-check">
+        <input type="checkbox" :aria-label="'选择图片 ' + image.filename" :checked="selectedIds.has(image.id)" @change="toggleSelect(image.id)" />
       </label>
-      <span class="fav-badge" @click.stop="toggleFavorite(image)">{{ image.is_favorite ? '★' : '☆' }}</span>
-      <div class="image-thumb-wrap">
+      <button type="button" class="fav-badge" :aria-pressed="image.is_favorite"
+        :aria-label="'收藏图片 ' + image.filename" @click="toggleFavorite(image)">{{ image.is_favorite ? '★' : '☆' }}</button>
+      <button type="button" class="image-thumb-wrap" :aria-label="'预览图片 ' + image.filename" @click="openViewer(index)">
         <img class="image-thumb" :src="previewUrl(image.id)" :alt="image.filename" :style="thumbAspect(image)" loading="lazy" decoding="async" />
         <PlatformBadge v-if="image.source_platform" :platform="image.source_platform" class="platform-tag" />
-      </div>
-      <div class="image-info">
-        <span class="text-xs">#{{ image.id }}</span>
-        <span class="text-xs">{{ new Date(image.created_at).toLocaleDateString('zh-CN') }}</span>
-      </div>
-      <div class="image-title image-title-btn" :title="image.prompt_id ? (image.prompt_title || '未命名提示词') : '手动提交'" @click.stop="openDetail(image)">
-        {{ image.prompt_id ? (image.prompt_title || '未命名提示词') : '手动提交' }}
-        <span class="title-info-hint">&#9432;</span>
-      </div>
+      </button>
+      <button type="button" class="image-title image-title-btn"
+        :title="image.prompt_title || image.filename"
+        :aria-label="'查看图片详情 ' + (image.prompt_title || image.filename)" @click="openDetail(image)">
+        {{ image.prompt_title || image.filename }}
+        <span class="title-info-hint" aria-hidden="true">&#9432;</span>
+      </button>
     </div>
   </div>
 
@@ -519,6 +554,13 @@ onMounted(() => {
   position: absolute;
   top: 8px;
   right: 8px;
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: rgba(0,0,0,.45);
   font-size: 18px;
   cursor: pointer;
   color: rgba(255,255,255,0.85);
@@ -530,7 +572,7 @@ onMounted(() => {
 .fav-badge:hover { transform: scale(1.3); }
 .image-card { position: relative; overflow: hidden; }
 /* 平台角标要贴着图片，不能相对卡片定位——卡片底部还有标题行，会错位 */
-.image-thumb-wrap { position: relative; display: block; }
+.image-thumb-wrap { position: relative; display: block; width: 100%; border: 0; background: transparent; cursor: zoom-in; }
 .platform-tag {
   position: absolute;
   left: 8px;
@@ -596,7 +638,8 @@ onMounted(() => {
   text-overflow: ellipsis;
 }
 /* 标题文案行：点击查看图片信息 */
-.image-title-btn { cursor: pointer; }
+.image-title-btn { width: 100%; border: 0; border-top: 1px solid var(--c-border); text-align: left; cursor: pointer; }
+.image-thumb-wrap:focus-visible, .image-title-btn:focus-visible, .fav-badge:focus-visible { outline: 2px solid var(--c-primary); outline-offset: -2px; }
 .image-title-btn:hover { color: var(--c-primary); background: var(--c-surface-hover); }
 .image-title-btn:hover .title-info-hint { opacity: 1; }
 .title-info-hint { float: right; opacity: 0; color: var(--c-primary); transition: opacity 0.15s; }

@@ -113,7 +113,6 @@ function formatTime(value?: string) {
 
 <template>
   <PageHeader
-    eyebrow="DEBUG"
     title="调试日志"
     description="后端在 DEBUG 模式下落盘的排查线索。目录挂在数据卷上，宿主机也能直接读。"
   />

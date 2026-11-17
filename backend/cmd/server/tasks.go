@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -28,15 +29,31 @@ type directTaskInput struct {
 	Parameters     map[string]any `json:"parameters"`
 }
 
+// beginTaskCreation validates the workflow under the same write transaction that queues the task.
+func (a *app) beginTaskCreation(w http.ResponseWriter, r *http.Request, workflowID int64) (*sql.Tx, string) {
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeError(w, 500, "create task failed")
+		return nil, ""
+	}
+	var name string
+	err = tx.QueryRowContext(r.Context(), "SELECT name FROM workflows WHERE id=? AND enabled=1", workflowID).Scan(&name)
+	if err == nil {
+		return tx, name
+	}
+	_ = tx.Rollback()
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, 400, "工作流不存在或已停用")
+	} else {
+		writeError(w, 500, "read workflow failed")
+	}
+	return nil, ""
+}
+
 func (a *app) createDirectTask(w http.ResponseWriter, r *http.Request) {
 	var input directTaskInput
 	if err := decodeJSON(r, &input); err != nil || input.WorkflowID <= 0 || strings.TrimSpace(input.PositivePrompt) == "" {
 		writeError(w, http.StatusBadRequest, "workflow_id and positive_prompt are required")
-		return
-	}
-	var workflowExists int
-	if err := a.db.QueryRowContext(r.Context(), "SELECT 1 FROM workflows WHERE id=? AND enabled=1", input.WorkflowID).Scan(&workflowExists); err != nil {
-		writeError(w, http.StatusBadRequest, "workflow not found or disabled")
 		return
 	}
 	comfyURL, err := a.setting(r.Context(), "comfyui_url")
@@ -50,11 +67,11 @@ func (a *app) createDirectTask(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now()
 	parameters, _ := json.Marshal(map[string]any{"positive_prompt": input.PositivePrompt, "parameters": input.Parameters})
-	tx, err := a.db.BeginTx(r.Context(), nil)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "create task failed")
+	tx, workflowName := a.beginTaskCreation(w, r, input.WorkflowID)
+	if tx == nil {
 		return
 	}
+	defer tx.Rollback()
 	// 单条提示词同样入库到 prompts 表（group_name 为手动提交）
 	promptResult, err := tx.ExecContext(r.Context(),
 		`INSERT INTO prompts(title, description, positive_prompt, negative_prompt, group_name, group_id, status, created_at, updated_at) VALUES(?, '', ?, ?, '手动提交', 'manual', 'running', ?, ?)`,
@@ -66,8 +83,8 @@ func (a *app) createDirectTask(w http.ResponseWriter, r *http.Request) {
 	}
 	promptID, _ := promptResult.LastInsertId()
 	result, err := tx.ExecContext(r.Context(),
-		`INSERT INTO generation_tasks(source_type, workflow_id, comfyui_url, parameters_json, workflow_name, created_at) VALUES('direct',?,?,?,(SELECT name FROM workflows WHERE id=?),?)`,
-		input.WorkflowID, comfyURL, string(parameters), input.WorkflowID, now)
+		`INSERT INTO generation_tasks(source_type, workflow_id, comfyui_url, parameters_json, workflow_name, created_at) VALUES('direct',?,?,?,?,?)`,
+		input.WorkflowID, comfyURL, string(parameters), workflowName, now)
 	if err != nil {
 		_ = tx.Rollback()
 		writeError(w, http.StatusInternalServerError, "create task failed")
@@ -227,7 +244,7 @@ func (a *app) getTask(w http.ResponseWriter, r *http.Request) {
 	// TRIM 与提交侧 resolveEffectiveNegative 的判空保持一致：纯空白的 item 负面提交时
 	// 会回落到工作流，列表里就不该再显示一个空的「负面」块。
 	// 用 LEFT JOIN workflows：工作流被删后 item 仍要照常列出（见 workflow_name 冗余列的同一考量）。
-	rows, rowsErr := a.db.QueryContext(r.Context(), `SELECT i.id, i.prompt_id, i.positive_prompt, COALESCE(NULLIF(TRIM(i.negative_prompt),''), w.negative_prompt, ''), COALESCE(i.comfy_prompt_id,''), i.status, i.error_message, COALESCE(i.notes,'')
+	rows, rowsErr := a.db.QueryContext(r.Context(), `SELECT i.id, i.prompt_id, i.positive_prompt, COALESCE(NULLIF(TRIM(i.negative_prompt),''), w.negative_prompt, ''), COALESCE(i.comfy_prompt_id,''), i.status, i.error_message, COALESCE(i.notes,''), i.output_count, i.saved_output_count
 		FROM generation_items i
 		JOIN generation_tasks t ON t.id=i.task_id
 		LEFT JOIN workflows w ON w.id=t.workflow_id
@@ -235,13 +252,13 @@ func (a *app) getTask(w http.ResponseWriter, r *http.Request) {
 	if rowsErr == nil {
 		defer rows.Close()
 		for rows.Next() {
-			var itemID int
+			var itemID, outputCount, savedOutputCount int
 			var promptID sql.NullInt64
 			var positive, negative, promptIDStr, itemStatus, itemError, itemNotes string
-			if err := rows.Scan(&itemID, &promptID, &positive, &negative, &promptIDStr, &itemStatus, &itemError, &itemNotes); err == nil {
+			if err := rows.Scan(&itemID, &promptID, &positive, &negative, &promptIDStr, &itemStatus, &itemError, &itemNotes, &outputCount, &savedOutputCount); err == nil {
 				items = append(items, map[string]any{"id": itemID, "prompt_id": promptID.Int64,
 					"positive_prompt": positive, "negative_prompt": negative, "comfy_prompt_id": promptIDStr,
-					"status": itemStatus, "error_message": itemError, "notes": itemNotes})
+					"status": itemStatus, "error_message": itemError, "notes": itemNotes, "output_count": outputCount, "saved_output_count": savedOutputCount})
 			}
 		}
 	}
@@ -401,8 +418,13 @@ func (a *app) forgetSaveFailures(ctx context.Context, taskID int64) {
 // cancelTaskByID 取消单个任务：更新 task 状态、通知 ComfyUI 清队列、推送事件。
 // 已终态或不存在时返回 errTaskNotCancellable / errTaskNotFound。
 func (a *app) cancelTaskByID(ctx context.Context, id int64) error {
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	var status string
-	if err := a.db.QueryRowContext(ctx, `SELECT status FROM generation_tasks WHERE id=?`, id).Scan(&status); err != nil {
+	if err := tx.QueryRowContext(ctx, "SELECT status FROM generation_tasks WHERE id=?", id).Scan(&status); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return errTaskNotFound
 		}
@@ -411,38 +433,62 @@ func (a *app) cancelTaskByID(ctx context.Context, id int64) error {
 	if status != "pending" && status != "running" {
 		return errTaskNotCancellable
 	}
-	// 先查出该 task 下所有已提交的 comfy_prompt_id（一个 task 可能有多个 item）
-	var comfyPromptIDs []string
-	if rows, err := a.db.QueryContext(ctx, `SELECT comfy_prompt_id FROM generation_items WHERE task_id=? AND COALESCE(comfy_prompt_id,'')!=''`, id); err == nil {
-		for rows.Next() {
-			var pid string
-			if err := rows.Scan(&pid); err == nil && pid != "" {
-				comfyPromptIDs = append(comfyPromptIDs, pid)
-			}
-		}
-		rows.Close()
+	var currentURL string
+	if err := tx.QueryRowContext(ctx, "SELECT COALESCE((SELECT value FROM settings WHERE key='comfyui_url'),'')").Scan(&currentURL); err != nil {
+		return err
 	}
-	// 地址取当前设置（同 submitter/downloader：task 快照会因地址变更而失效，
-	// 拿废弃地址去删队列只会静默失败，ComfyUI 里排队的任务就撤不掉了）
-	comfyURL, _ := a.setting(ctx, "comfyui_url")
-
-	result, err := a.db.ExecContext(ctx, `UPDATE generation_tasks SET status='cancelled', completed_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('pending','running')`, id)
+	queued, err := cancellableQueueEntries(ctx, tx, id, currentURL)
 	if err != nil {
 		return err
 	}
-	if n, _ := result.RowsAffected(); n == 0 {
-		// 状态在 SELECT 与 UPDATE 之间被改掉（并发），按不可取消处理
-		return errTaskNotCancellable
+	if _, err := tx.ExecContext(ctx, "UPDATE generation_tasks SET status='cancelled', completed_at=CURRENT_TIMESTAMP WHERE id=?", id); err != nil {
+		return err
 	}
-	// 通知 ComfyUI 从队列中删除（只删排队项；正在执行的不能靠 /interrupt，那会影响同实例的其它任务）
-	if len(comfyPromptIDs) > 0 && comfyURL != "" {
-		for _, pid := range comfyPromptIDs {
-			go a.deleteComfyQueueItem(comfyURL, pid)
-		}
+	if _, err := tx.ExecContext(ctx, "UPDATE generation_items SET status='cancelled', remote_missing_since=0 WHERE task_id=? AND status IN ('pending','running','submitted')", id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE prompts SET status=CASE WHEN completed_at IS NULL THEN 'pending' ELSE 'done' END, updated_at=CURRENT_TIMESTAMP
+		WHERE status='running' AND id IN (SELECT prompt_id FROM generation_items WHERE task_id=? AND status='cancelled')
+		AND NOT EXISTS (
+			SELECT 1 FROM generation_items i JOIN generation_tasks t ON t.id=i.task_id
+			WHERE i.prompt_id=prompts.id AND i.status IN ('pending','running','submitted') AND t.status IN ('pending','running')
+		)`, id); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	// 只撤排队项。已经开始执行的任务可能仍会在 ComfyUI 侧跑完。
+	for _, entry := range queued {
+		go a.deleteComfyQueueItem(entry.baseURL, entry.promptID)
 	}
 	a.forgetSaveFailures(ctx, id)
 	a.publish(id, map[string]any{"task_id": id, "status": "cancelled"})
 	return nil
+}
+
+type comfyQueueEntry struct {
+	baseURL, promptID string
+}
+
+func cancellableQueueEntries(ctx context.Context, tx *sql.Tx, taskID int64, currentURL string) ([]comfyQueueEntry, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT COALESCE(NULLIF(submitted_comfyui_url,''),?), comfy_prompt_id
+		FROM generation_items WHERE task_id=? AND status='submitted' AND COALESCE(comfy_prompt_id,'')!=''`, currentURL, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var entries []comfyQueueEntry
+	for rows.Next() {
+		var entry comfyQueueEntry
+		if err := rows.Scan(&entry.baseURL, &entry.promptID); err != nil {
+			return nil, err
+		}
+		if entry.baseURL != "" {
+			entries = append(entries, entry)
+		}
+	}
+	return entries, rows.Err()
 }
 
 // retryTaskByID 重跑失败任务：重置 task 与失败 item，成功的 item 保持不动，避免重复出图。
@@ -459,8 +505,11 @@ func (a *app) retryTaskByID(ctx context.Context, id int64) error {
 	if status != "failed" {
 		return errTaskNotFailed
 	}
-	// 工作流已被删除时禁止重试：submitter 的查询 JOIN workflows，
-	// 重置成 pending 也永远不会被捞起，只会变成"看起来在排队实则卡死"。
+	// 工作流已被删除时禁止重试。submitter 用的是 LEFT JOIN workflows，工作流没了也照样
+	// 会捞起这条 item，只是立刻给一句「找不到该任务的工作流」判失败——所以这里拦的不是
+	// 卡死，而是把一次注定失败的提交提前拦成一条明确的接口错误。
+	// 注意：这里只判存在、不判 enabled。停用的工作流不允许新建任务，但允许重跑旧任务
+	// （重跑是修历史，不是新开工），这是有意为之，别当成漏洞补上。
 	var workflowID int64
 	if err := a.db.QueryRowContext(ctx, `SELECT workflow_id FROM generation_tasks WHERE id=?`, id).Scan(&workflowID); err == nil {
 		var has int
@@ -483,8 +532,12 @@ func (a *app) retryTaskByID(ctx context.Context, id int64) error {
 	}
 	// 关键：只重置 task 是没用的，submitter 只捞 item.status='pending'。
 	// 必须把该 task 下失败的 item 一并重置（成功的 item 保持不动，避免重复出图）。
+	//
+	// 上一次尝试已经存下的图不动（收藏与否都不动）：重试可以换工作流，那本来就等于
+	// 重新生成另一批图，旧图是上一版的结果，删掉等于用户拿不回来。图片的清理只走
+	// 图库里的删除 / 整理页，重试不承担删图职责。
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE generation_items SET status='pending', comfy_prompt_id='', error_message='' WHERE task_id=? AND status='failed'`, id); err != nil {
+		`UPDATE generation_items SET status='pending', comfy_prompt_id='', error_message='', output_count=0, saved_output_count=0, submitted_comfyui_url='', remote_missing_since=0 WHERE task_id=? AND status='failed'`, id); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
@@ -504,6 +557,10 @@ func (a *app) retryTaskByID(ctx context.Context, id int64) error {
 }
 
 // deleteTaskByID 删除任务及其关联的 items / images（running 状态不允许删除）。
+//
+// 图片是**行和文件一起删**：只删行的话原图会变成没有任何记录引用的孤儿文件，占着磁盘
+// 直到有人去维护页点「清理孤儿」。收藏的图片例外——那是用户在图库里明确留下的，
+// 它的行、原图和缩略图都原地保留（只删掉所属的生成项，图库里照常能看到）。
 func (a *app) deleteTaskByID(ctx context.Context, id int64) error {
 	var status string
 	if err := a.db.QueryRowContext(ctx, `SELECT status FROM generation_tasks WHERE id=?`, id).Scan(&status); err != nil {
@@ -517,11 +574,22 @@ func (a *app) deleteTaskByID(ctx context.Context, id int64) error {
 	}
 	// 必须在删 items 之前清计数：删完就查不到 item id 了
 	a.forgetSaveFailures(ctx, id)
+	// 文件路径也得在删行之前取：删完就查不到 storage_path 了。
+	// 非 running 的任务不会再有 downloader 往里加图，所以事务外先查一遍是安全的。
+	purge, err := a.taskImagesToPurge(ctx, id)
+	if err != nil {
+		return err
+	}
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	_, _ = tx.ExecContext(ctx, `DELETE FROM images WHERE generation_item_id IN (SELECT id FROM generation_items WHERE task_id=?)`, id)
+	if len(purge) > 0 {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM images WHERE is_favorite=0 AND id IN (`+placeholders(len(purge))+`)`, imageIDs(purge)...); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
 	_, _ = tx.ExecContext(ctx, `DELETE FROM generation_items WHERE task_id=?`, id)
 	// 带上状态条件，避免 SELECT 之后任务转为 running 时被并发删除
 	result, err := tx.ExecContext(ctx, `DELETE FROM generation_tasks WHERE id=? AND status!='running'`, id)
@@ -537,5 +605,47 @@ func (a *app) deleteTaskByID(ctx context.Context, id int64) error {
 		_ = tx.Rollback()
 		return err
 	}
+	// 文件在提交之后删：事务回滚时盘上的原图必须还在。
+	// 删失败也不回滚——维护页的孤儿清理能兜底，为此让整个删除操作报错不值得。
+	for _, img := range purge {
+		if target := a.imageFilePath(img.storagePath); target != "" {
+			_ = os.Remove(target)
+		}
+		a.removeThumbs(img.id)
+	}
 	return nil
+}
+
+type taskImage struct {
+	id          int64
+	storagePath string
+}
+
+// taskImagesToPurge 取任务下「非收藏」的图片，供删除任务时清行+清盘。
+// 收藏的图不在结果里，删除任务不会碰它的行、原图和缩略图。
+func (a *app) taskImagesToPurge(ctx context.Context, taskID int64) ([]taskImage, error) {
+	rows, err := a.db.QueryContext(ctx, `SELECT img.id, COALESCE(img.storage_path,'') FROM images img
+		WHERE img.is_favorite=0
+		AND img.generation_item_id IN (SELECT id FROM generation_items WHERE task_id=?)`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []taskImage
+	for rows.Next() {
+		var img taskImage
+		if err := rows.Scan(&img.id, &img.storagePath); err != nil {
+			return nil, err
+		}
+		out = append(out, img)
+	}
+	return out, rows.Err()
+}
+
+func imageIDs(images []taskImage) []any {
+	args := make([]any, len(images))
+	for i, img := range images {
+		args[i] = img.id
+	}
+	return args
 }

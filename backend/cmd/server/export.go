@@ -6,21 +6,17 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"image"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
-
-// ExportRecord 导出数据结构
-type ExportRecord struct {
-	Prompts   []PromptRecord   `json:"prompts"`
-	Images    []ImageRecord    `json:"images"`
-	Workflows []WorkflowRecord `json:"workflows"`
-}
 
 type PromptRecord struct {
 	ID             int64  `json:"id"`
@@ -120,193 +116,219 @@ func (a *app) exportData(w http.ResponseWriter, r *http.Request) {
 		promptCond = " WHERE " + strings.Join(promptWhere, " AND ")
 	}
 
-	// 查询 prompts：负面优先取提示词自带列，没有则回落到关联工作流的静态负面（保留旧导出行为）。
-	// ⚠️ 子查询里的 negative_prompt 必须带 w. 前缀：这是相关子查询，外层 p 和内层 w 都有
-	// 同名列，不限定就报 ambiguous column name，整个导出接口直接 500。
-	rows, err := a.db.Query(`SELECT p.id, COALESCE(p.title,''), COALESCE(p.description,''), COALESCE(p.positive_prompt,''), COALESCE(NULLIF(p.negative_prompt,''),(SELECT w.negative_prompt FROM workflows w JOIN generation_tasks t ON t.workflow_id=w.id JOIN generation_items i ON i.task_id=t.id WHERE i.prompt_id=p.id LIMIT 1),''), COALESCE(p.group_name,''), COALESCE(p.group_id,''), COALESCE(p.status,''), p.is_favorite, COALESCE(p.source_platform,'') FROM prompts p`+promptCond, promptArgs...)
+	prompts, err := a.exportPrompts(r, promptCond, promptArgs)
 	if err != nil {
 		writeError(w, 500, "query prompts failed")
 		return
 	}
-	defer rows.Close()
-
-	var prompts []PromptRecord
-	var promptIDs []int64
-	for rows.Next() {
-		var p PromptRecord
-		var fav int
-		if err := rows.Scan(&p.ID, &p.Title, &p.Description, &p.PositivePrompt, &p.NegativePrompt, &p.GroupName, &p.GroupID, &p.Status, &fav, &p.SourcePlatform); err != nil {
-			continue
-		}
-		p.IsFavorite = fav == 1
-		prompts = append(prompts, p)
-		promptIDs = append(promptIDs, p.ID)
+	images, err := a.exportImages(r, promptCond, promptArgs)
+	if err != nil {
+		writeError(w, 500, "query images failed")
+		return
 	}
-
-	// 查询关联图片
-	var images []ImageRecord
-	imageStorage := map[int64]string{} // image id -> 磁盘路径
-	if len(promptIDs) > 0 {
-		// 构建 IN 子句
-		placeholders := make([]string, len(promptIDs))
-		imgArgs := make([]any, len(promptIDs))
-		for i, id := range promptIDs {
-			placeholders[i] = "?"
-			imgArgs[i] = id
-		}
-		imgCond := strings.Join(placeholders, ",")
-
-		// 双通道取图：本平台图走 generation_items，外部同步图走 images.prompt_id。
-		// 原来这里是 JOIN generation_items，外部图（generation_item_id=0）会被整批漏掉——
-		// 包里有提示词条目、却没有对应图片文件，导入回来就是「有词无图」。
-		imgRows, err := a.db.Query(`SELECT img.id, img.filename, img.storage_path,
-				COALESCE(NULLIF(img.prompt_id,0), gi.prompt_id, 0), COALESCE(p.positive_prompt,''), img.is_favorite,
-				COALESCE(img.source_platform,''), COALESCE(img.image_hash,''), img.width, img.height
-			FROM images img
-			LEFT JOIN generation_items gi ON gi.id=img.generation_item_id AND img.generation_item_id > 0
-			LEFT JOIN prompts p ON p.id=COALESCE(NULLIF(img.prompt_id,0), gi.prompt_id)
-			WHERE COALESCE(NULLIF(img.prompt_id,0), gi.prompt_id) IN (`+imgCond+`)`, imgArgs...)
-		if err == nil {
-			defer imgRows.Close()
-			for imgRows.Next() {
-				var img ImageRecord
-				var storage string
-				var fav int
-				if err := imgRows.Scan(&img.ID, &img.Filename, &storage, &img.PromptID, &img.PositivePrompt, &fav,
-					&img.SourcePlatform, &img.ImageHash, &img.Width, &img.Height); err == nil {
-					img.IsFavorite = fav == 1
-					// filename 与磁盘上的实际文件名常常不一致（下载时被重命名为 <时间戳>_<id>.png），
-					// ZIP 条目必须以磁盘文件名为准，否则导入侧按 filename 找不到文件。
-					archive := safeArchiveName(storage)
-					if archive != "" && archive != img.Filename {
-						img.ArchiveName = archive
-					}
-					imageStorage[img.ID] = storage
-					images = append(images, img)
-				}
-			}
-		}
-	}
-
-	// 工作流：JSON 本体在 data/workflows/ 下（库里只存 workflow_path），必须读盘内嵌。
-	// 读不到文件或内容坏掉的跳过并记日志——导出半个工作流比不导出更糟：导入端会得到
-	// 一条「有记录、打不开」的空壳，等提交时才发现。
-	// with_workflows=0 可关掉，兼容只想要素材的旧调用方。
-	var exportWorkflows []WorkflowRecord
+	var workflows []WorkflowRecord
+	var warnings []exportWarning
 	if q.Get("with_workflows") != "0" {
-		wrows, werr := a.db.Query(`SELECT name, COALESCE(description,''), COALESCE(negative_prompt,''), enabled, is_default, COALESCE(mapping_json,''), workflow_path FROM workflows ORDER BY id`)
-		if werr == nil {
-			defer wrows.Close()
-			for wrows.Next() {
-				var name, desc, negative, mapping, path string
-				var enabled, isDefault int
-				if err := wrows.Scan(&name, &desc, &negative, &enabled, &isDefault, &mapping, &path); err != nil {
-					continue
-				}
-				raw, err := readWorkflowFile(a.workflowFilePath(path))
-				if err != nil || len(raw) == 0 {
-					a.log.Printf("export: 跳过工作流 %q（读不到 %s：%v）", name, path, err)
-					continue
-				}
-				mappingJSON := json.RawMessage(mapping)
-				if !json.Valid(mappingJSON) {
-					mappingJSON = nil
-				}
-				exportWorkflows = append(exportWorkflows, WorkflowRecord{
-					Name:           name,
-					Description:    desc,
-					NegativePrompt: negative,
-					Enabled:        enabled == 1,
-					IsDefault:      isDefault == 1,
-					Mapping:        mappingJSON,
-					WorkflowJSON:   json.RawMessage(raw),
-					Hash:           workflowContentHash(raw),
-				})
-			}
+		workflows, warnings, err = a.exportWorkflows(r)
+		if err != nil {
+			writeError(w, 500, "query workflows failed")
+			return
 		}
 	}
 
-	export := ExportRecord{Prompts: prompts, Images: images, Workflows: exportWorkflows}
-
-	// 创建 ZIP
 	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="export-%s.zip"`, time.Now().Format("20060102_150405")))
-
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"export-%s.zip\"", time.Now().Format("20060102_150405")))
 	zw := zip.NewWriter(w)
-	defer zw.Close()
 
-	// 写入 prompts.json
-	pj, _ := json.MarshalIndent(export.Prompts, "", "  ")
-	pw, _ := zw.Create("prompts.json")
-	pw.Write(pj)
-
-	// 写入 images.json
-	ij, _ := json.MarshalIndent(export.Images, "", "  ")
-	iw, _ := zw.Create("images.json")
-	iw.Write(ij)
-
-	// 写入 workflows.json（JSON 内嵌，见 WorkflowRecord 的说明）
-	wj, _ := json.MarshalIndent(export.Workflows, "", "  ")
-	ww, _ := zw.Create("workflows.json")
-	ww.Write(wj)
-
-	// 写入图片文件
+	var savedImages []ImageRecord
 	for _, img := range images {
-		srcPath := a.imageFilePath(imageStorage[img.ID])
-		if srcPath == "" {
+		if err := a.writeExportImage(zw, img); err != nil {
+			reason := "read_failed"
+			if errors.Is(err, fs.ErrNotExist) {
+				reason = "missing"
+			}
+			warnings = append(warnings, exportWarning{Type: "image", ID: img.ID, Name: img.Filename, Reason: reason})
+			a.log.Printf("export image %d: %v", img.ID, err)
 			continue
 		}
-		srcFile, err := os.Open(srcPath)
-		if err != nil {
-			continue
+		savedImages = append(savedImages, img.ImageRecord)
+	}
+
+	for _, entry := range []struct {
+		name  string
+		value any
+	}{
+		{"prompts.json", prompts},
+		{"images.json", savedImages},
+		{"workflows.json", workflows},
+	} {
+		if err := writeExportJSON(zw, entry.name, entry.value); err != nil {
+			a.log.Printf("export %s: %v", entry.name, err)
+			break
 		}
-		entryName := safeArchiveName(img.ArchiveName)
-		if entryName == "" {
-			entryName = safeArchiveName(img.Filename)
+	}
+	if len(warnings) > 0 {
+		if err := writeExportJSON(zw, "export-warnings.json", warnings); err != nil {
+			a.log.Printf("export warnings: %v", err)
 		}
-		if entryName == "" {
-			// 名字不可用（空或含路径分隔符）——宁可少写一个条目，也不往 ZIP 里塞可疑路径
-			srcFile.Close()
-			continue
-		}
-		fw, err := zw.Create("images/" + entryName)
-		if err != nil {
-			srcFile.Close()
-			continue
-		}
-		_, _ = io.Copy(fw, srcFile)
-		srcFile.Close()
+	}
+	if err := zw.Close(); err != nil {
+		a.log.Printf("close export: %v", err)
 	}
 }
 
+type exportWarning struct {
+	Type   string `json:"type"`
+	ID     int64  `json:"id,omitempty"`
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
+}
+
+type exportImage struct {
+	ImageRecord
+	storagePath string
+}
+
+func (a *app) exportPrompts(r *http.Request, condition string, args []any) ([]PromptRecord, error) {
+	rows, err := a.db.QueryContext(r.Context(), `SELECT p.id, COALESCE(p.title,''), COALESCE(p.description,''), COALESCE(p.positive_prompt,''),
+		COALESCE(NULLIF(p.negative_prompt,''),(SELECT w.negative_prompt FROM workflows w JOIN generation_tasks t ON t.workflow_id=w.id JOIN generation_items i ON i.task_id=t.id WHERE i.prompt_id=p.id LIMIT 1),''),
+		COALESCE(p.group_name,''), COALESCE(p.group_id,''), COALESCE(p.status,''), p.is_favorite, COALESCE(p.source_platform,'')
+		FROM prompts p`+condition+" ORDER BY p.id", args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var prompts []PromptRecord
+	for rows.Next() {
+		var prompt PromptRecord
+		var favorite int
+		if err := rows.Scan(&prompt.ID, &prompt.Title, &prompt.Description, &prompt.PositivePrompt, &prompt.NegativePrompt, &prompt.GroupName, &prompt.GroupID, &prompt.Status, &favorite, &prompt.SourcePlatform); err != nil {
+			return nil, err
+		}
+		prompt.IsFavorite = favorite == 1
+		prompts = append(prompts, prompt)
+	}
+	return prompts, rows.Err()
+}
+
+func (a *app) exportImages(r *http.Request, condition string, args []any) ([]exportImage, error) {
+	// 无筛选时保留所有素材，包括提示词已经删除的图片。筛选时沿用提示词条件。
+	rows, err := a.db.QueryContext(r.Context(), `SELECT img.id, img.filename, img.storage_path,
+		COALESCE(p.id,0), COALESCE(p.positive_prompt,''), img.is_favorite,
+		COALESCE(img.source_platform,''), COALESCE(img.image_hash,''), img.width, img.height
+		FROM images img
+		LEFT JOIN generation_items gi ON gi.id=img.generation_item_id AND img.generation_item_id>0
+		LEFT JOIN prompts p ON p.id=COALESCE(NULLIF(img.prompt_id,0),gi.prompt_id)`+condition+" ORDER BY img.id", args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var images []exportImage
+	for rows.Next() {
+		var img exportImage
+		var favorite int
+		if err := rows.Scan(&img.ID, &img.Filename, &img.storagePath, &img.PromptID, &img.PositivePrompt, &favorite,
+			&img.SourcePlatform, &img.ImageHash, &img.Width, &img.Height); err != nil {
+			return nil, err
+		}
+		img.IsFavorite = favorite == 1
+		img.ArchiveName = fmt.Sprintf("image-%d%s", img.ID, filepath.Ext(safeArchiveName(img.storagePath)))
+		images = append(images, img)
+	}
+	return images, rows.Err()
+}
+
+func (a *app) exportWorkflows(r *http.Request) ([]WorkflowRecord, []exportWarning, error) {
+	rows, err := a.db.QueryContext(r.Context(), "SELECT id, name, COALESCE(description,''), COALESCE(negative_prompt,''), enabled, is_default, COALESCE(mapping_json,''), workflow_path FROM workflows ORDER BY id")
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	var workflows []WorkflowRecord
+	var warnings []exportWarning
+	for rows.Next() {
+		var id int64
+		var workflow WorkflowRecord
+		var mapping, path string
+		var enabled, isDefault int
+		if err := rows.Scan(&id, &workflow.Name, &workflow.Description, &workflow.NegativePrompt, &enabled, &isDefault, &mapping, &path); err != nil {
+			return nil, nil, err
+		}
+		raw, err := readWorkflowFile(a.workflowFilePath(path))
+		if err != nil || !json.Valid(raw) {
+			reason := "read_failed"
+			if errors.Is(err, fs.ErrNotExist) {
+				reason = "missing"
+			}
+			warnings = append(warnings, exportWarning{Type: "workflow", ID: id, Name: workflow.Name, Reason: reason})
+			continue
+		}
+		if json.Valid([]byte(mapping)) {
+			workflow.Mapping = json.RawMessage(mapping)
+		}
+		workflow.Enabled = enabled == 1
+		workflow.IsDefault = isDefault == 1
+		workflow.WorkflowJSON = json.RawMessage(raw)
+		workflow.Hash = workflowContentHash(raw)
+		workflows = append(workflows, workflow)
+	}
+	return workflows, warnings, rows.Err()
+}
+
+func (a *app) writeExportImage(zw *zip.Writer, img exportImage) error {
+	file, err := os.Open(a.imageFilePath(img.storagePath))
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Size() == 0 {
+		return errors.New("image file is empty or is not a regular file")
+	}
+	// 图片已有压缩，直接写入 ZIP，降低 NAS 导出时的 CPU 开销。
+	entry, err := zw.CreateHeader(&zip.FileHeader{Name: "images/" + img.ArchiveName, Method: zip.Store})
+	if err != nil {
+		return err
+	}
+	n, err := io.Copy(entry, file)
+	if err == nil && n != info.Size() {
+		return io.ErrUnexpectedEOF
+	}
+	return err
+}
+
+func writeExportJSON(zw *zip.Writer, name string, value any) error {
+	entry, err := zw.Create(name)
+	if err != nil {
+		return err
+	}
+	encoder := json.NewEncoder(entry)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(value)
+}
+
+const maxImportBytes = 500 << 20
+
 func (a *app) importData(w http.ResponseWriter, r *http.Request) {
-	// 解析 multipart form（最大 500MB）
-	r.ParseMultipartForm(500 << 20)
+	if err := r.ParseMultipartForm(8 << 20); err != nil {
+		writeError(w, 400, "无法读取导入文件")
+		return
+	}
+	defer r.MultipartForm.RemoveAll()
 	file, header, err := r.FormFile("file")
 	if err != nil {
 		writeError(w, 400, "missing file field")
 		return
 	}
 	defer file.Close()
-
 	if !strings.HasSuffix(strings.ToLower(header.Filename), ".zip") {
-		writeError(w, 400, "only .zip files are supported")
+		writeError(w, 400, "请选择 ZIP 文件")
 		return
 	}
-
-	// 读取 ZIP 到临时文件（zip.NewReader 需要 ReaderAt）
-	tmpFile, err := os.CreateTemp("", "import-*.zip")
-	if err != nil {
-		writeError(w, 500, "create temp file failed")
-		return
-	}
-	defer os.Remove(tmpFile.Name())
-	defer tmpFile.Close()
-	io.Copy(tmpFile, file)
-	tmpFile.Seek(0, 0)
-
-	stat, _ := tmpFile.Stat()
-	zr, err := zip.NewReader(tmpFile, stat.Size())
+	zr, err := zip.NewReader(file, header.Size)
 	if err != nil {
 		writeError(w, 400, "invalid zip file")
 		return
@@ -319,33 +341,37 @@ func (a *app) importData(w http.ResponseWriter, r *http.Request) {
 	fileMap := make(map[string]*zip.File) // filename -> zip file entry
 
 	for _, f := range zr.File {
-		switch {
-		case f.Name == "prompts.json":
-			rc, _ := f.Open()
-			json.NewDecoder(rc).Decode(&prompts)
-			rc.Close()
-		case f.Name == "images.json":
-			rc, _ := f.Open()
-			json.NewDecoder(rc).Decode(&images)
-			rc.Close()
-		case f.Name == "workflows.json":
-			// 旧包没有这个条目：workflows 保持空，行为与改动前一致
-			rc, _ := f.Open()
-			json.NewDecoder(rc).Decode(&workflows)
-			rc.Close()
-		case strings.HasPrefix(f.Name, "images/"):
-			if base := safeArchiveName(f.Name); base != "" {
-				fileMap[base] = f
+		var metadata any
+		switch f.Name {
+		case "prompts.json":
+			metadata = &prompts
+		case "images.json":
+			metadata = &images
+		case "workflows.json":
+			metadata = &workflows
+		default:
+			if strings.HasPrefix(f.Name, "images/") {
+				if base := safeArchiveName(f.Name); base != "" && !f.FileInfo().IsDir() {
+					fileMap[base] = f
+				}
+			}
+		}
+		if metadata != nil {
+			if err := decodeArchiveMetadata(f, metadata); err != nil {
+				writeError(w, 400, "导入清单无法读取："+f.Name)
+				return
 			}
 		}
 	}
 
 	// 合并 prompts（按 title + positive_prompt 去重）
-	tx, err := a.db.Begin()
+	tx, err := a.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeError(w, 500, "begin transaction failed")
 		return
 	}
+
+	defer tx.Rollback()
 
 	importedPrompts := 0
 	skippedPrompts := 0
@@ -376,28 +402,29 @@ func (a *app) importData(w http.ResponseWriter, r *http.Request) {
 		importedPrompts++
 	}
 
-	// 合并 workflows（按 name 判重；同名不同内容则加后缀共存）
-	// 放在 prompts 之后没有依赖关系，只是让响应里的计数顺序和打包顺序一致。
-	importedWorkflows, skippedWorkflows := a.importWorkflows(tx, workflows)
+	importedWorkflows, skippedWorkflows, savedPaths := a.importWorkflows(tx, workflows)
 
-	// 合并 images（按 filename 去重）
 	importedImages := 0
-	skippedImages := 0
 	importedExternal := 0
-	// 事务里插入成功的图片，提交后统一丢进缩略图队列
-	pendingThumbs := make([]thumbJob, 0, 16)
+	skippedImageReasons := map[string]int{}
+	var pendingThumbs []thumbJob
+	committed := false
+	defer func() {
+		if !committed {
+			for _, path := range savedPaths {
+				_ = os.Remove(path)
+			}
+		}
+	}()
 
 	for _, img := range images {
-		// ZIP 内的实际文件名：优先 archive_name，兼容旧导出包仅有 filename 的情况。
-		// 这两个字段都来自 ZIP 内的 images.json，是**不可信输入**，必须收敛成纯文件名——
-		// 否则构造过的包可以用 archive_name: "../../../.ssh/authorized_keys"
-		// 把文件写到 data/images/ 之外的任意路径（zip slip）。
 		archiveName := safeArchiveName(img.ArchiveName)
 		if archiveName == "" {
 			archiveName = safeArchiveName(img.Filename)
 		}
-		if archiveName == "" {
-			skippedImages++
+		entry := fileMap[archiveName]
+		if entry == nil {
+			skippedImageReasons["missing"]++
 			continue
 		}
 		displayName := safeArchiveName(img.Filename)
@@ -405,66 +432,53 @@ func (a *app) importData(w http.ResponseWriter, r *http.Request) {
 			displayName = archiveName
 		}
 
-		// 检查文件是否已存在
-		var existingID int64
-		err := tx.QueryRow(`SELECT id FROM images WHERE filename=?`, displayName).Scan(&existingID)
-		if err == nil {
-			skippedImages++
-			continue
-		}
-
-		// 查找对应的 prompt（通过映射后的 ID）
-		newPromptID := idMap[img.PromptID]
-
-		// 查找关联的 generation_item（仅本平台出图有）。外部同步图找不到，
-		// 但 prompt_id 会直连写入，图库/详情/搜索照样能用。
-		var itemID int64
-		if newPromptID > 0 {
-			tx.QueryRow(`SELECT id FROM generation_items WHERE prompt_id=? ORDER BY id DESC LIMIT 1`, newPromptID).Scan(&itemID)
-		}
-
-		// 写入图片文件
-		// archiveName 已被 safeArchiveName 收敛成纯文件名，落点必然在 data/images/ 之内
-		target := filepath.Join(a.dataDir, "images", archiveName)
-		if zf, ok := fileMap[archiveName]; ok {
-			rc, err := zf.Open()
-			if err == nil {
-				if dst, createErr := os.Create(target); createErr == nil {
-					_, _ = io.Copy(dst, rc)
-					dst.Close()
-				}
-				rc.Close()
-			}
-		}
-
-		// 插入图片记录。宽高优先用包内记录的值（省一次解码）；旧包没带就现读文件头，
-		// 都拿不到则留 0，由 backfillImageSizes 回填。
-		imgW, imgH := img.Width, img.Height
-		if imgW <= 0 || imgH <= 0 {
-			imgW, imgH = imageSizeFromFile(target)
-		}
-		res, err := tx.Exec(`INSERT INTO images(generation_item_id, prompt_id, source_platform, image_hash, filename, storage_path, is_favorite, width, height, created_at) VALUES(?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`,
-			itemID, newPromptID, img.SourcePlatform, img.ImageHash, displayName, target, boolToInt(img.IsFavorite), imgW, imgH)
+		target, hash, config, err := saveArchiveImage(entry, filepath.Join(a.dataDir, "images"))
 		if err != nil {
-			skippedImages++
+			reason := "unreadable"
+			if errors.Is(err, errImportImageWrite) {
+				reason = "write_failed"
+			}
+			skippedImageReasons[reason]++
+			a.log.Printf("import image %q: %v", archiveName, err)
 			continue
+		}
+		duplicate, err := a.hasImportedImage(tx, displayName, hash)
+		if err != nil {
+			_ = os.Remove(target)
+			writeError(w, 500, "check image duplicate failed")
+			return
+		}
+		if duplicate {
+			_ = os.Remove(target)
+			skippedImageReasons["duplicate"]++
+			continue
+		}
+
+		// 导出包只保留素材和提示词关联，不包含任务历史。
+		savedPaths = append(savedPaths, target)
+		res, err := tx.Exec("INSERT INTO images(generation_item_id, prompt_id, source_platform, image_hash, filename, storage_path, is_favorite, width, height, created_at) VALUES(0,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
+			idMap[img.PromptID], img.SourcePlatform, hash, displayName, target, boolToInt(img.IsFavorite), config.Width, config.Height)
+		if err != nil {
+			writeError(w, 500, "save imported image failed")
+			return
+		}
+		newID, err := res.LastInsertId()
+		if err != nil {
+			writeError(w, 500, "save imported image failed")
+			return
 		}
 		importedImages++
 		if img.SourcePlatform != "" {
 			importedExternal++
 		}
-		if newID, idErr := res.LastInsertId(); idErr == nil && imgW > 0 && imgH > 0 {
-			pendingThumbs = append(pendingThumbs, thumbJob{id: newID, src: target})
-		}
+		pendingThumbs = append(pendingThumbs, thumbJob{id: newID, src: target})
 	}
 
 	if err := tx.Commit(); err != nil {
-		tx.Rollback()
 		writeError(w, 500, "commit failed")
 		return
 	}
-
-	// 事务提交后再排队：回滚的图不该留下缩略图
+	committed = true
 	for _, job := range pendingThumbs {
 		a.queueThumbBuild(job.id, job.src)
 	}
@@ -473,21 +487,123 @@ func (a *app) importData(w http.ResponseWriter, r *http.Request) {
 		"imported_prompts":         importedPrompts,
 		"skipped_prompts":          skippedPrompts,
 		"imported_images":          importedImages,
-		"skipped_images":           skippedImages,
+		"skipped_images":           len(images) - importedImages,
+		"skipped_image_reasons":    skippedImageReasons,
 		"imported_external_images": importedExternal,
 		"imported_workflows":       importedWorkflows,
 		"skipped_workflows":        skippedWorkflows,
 	})
 }
 
-// importWorkflows 把导出包里的工作流写进库 + 盘，返回 (导入, 跳过)。
+func decodeArchiveMetadata(entry *zip.File, target any) error {
+	if entry.UncompressedSize64 > maxImportBytes {
+		return errors.New("ZIP metadata exceeds import size limit")
+	}
+	reader, err := entry.Open()
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+	decoder := json.NewDecoder(io.LimitReader(reader, maxImportBytes+1))
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return errors.New("invalid trailing ZIP metadata")
+	}
+	return nil
+}
+
+var errImportImageWrite = errors.New("write imported image")
+
+func saveArchiveImage(entry *zip.File, dir string) (path, hash string, config image.Config, err error) {
+	reader, err := entry.Open()
+	if err != nil {
+		return "", "", config, err
+	}
+	defer reader.Close()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", "", config, fmt.Errorf("%w: %v", errImportImageWrite, err)
+	}
+	dst, err := os.CreateTemp(dir, "import-*"+filepath.Ext(entry.Name))
+	if err != nil {
+		return "", "", config, fmt.Errorf("%w: %v", errImportImageWrite, err)
+	}
+	defer func() {
+		_ = dst.Close()
+		if err != nil {
+			_ = os.Remove(dst.Name())
+		}
+	}()
+	digest := sha256.New()
+	n, err := io.Copy(io.MultiWriter(dst, digest), io.LimitReader(reader, maxImportBytes+1))
+	if err != nil {
+		var pathError *os.PathError
+		if errors.As(err, &pathError) {
+			err = fmt.Errorf("%w: %v", errImportImageWrite, err)
+		}
+		return "", "", config, err
+	}
+	if n > maxImportBytes {
+		return "", "", config, errors.New("image exceeds import size limit")
+	}
+	if _, err := dst.Seek(0, io.SeekStart); err != nil {
+		return "", "", config, err
+	}
+	config, _, err = image.DecodeConfig(dst)
+	if err != nil {
+		return "", "", config, err
+	}
+	if err := dst.Close(); err != nil {
+		return "", "", config, fmt.Errorf("%w: %v", errImportImageWrite, err)
+	}
+	return dst.Name(), fmt.Sprintf("%x", digest.Sum(nil)), config, nil
+}
+
+func (a *app) hasImportedImage(tx *sql.Tx, filename, hash string) (bool, error) {
+	rows, err := tx.Query("SELECT storage_path, image_hash FROM images WHERE image_hash=? OR (image_hash='' AND filename=?)", hash, filename)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var storagePath, knownHash string
+		if err := rows.Scan(&storagePath, &knownHash); err != nil {
+			return false, err
+		}
+		file, err := os.Open(a.imageFilePath(storagePath))
+		if err != nil {
+			continue
+		}
+		if knownHash == hash {
+			info, err := file.Stat()
+			file.Close()
+			if err == nil && info.Mode().IsRegular() && info.Size() > 0 {
+				return true, nil
+			}
+			continue
+		}
+		// 旧版生成的图片没有哈希，读同名文件确认内容是否相同。
+		digest := sha256.New()
+		_, err = io.Copy(digest, file)
+		file.Close()
+		if err == nil && fmt.Sprintf("%x", digest.Sum(nil)) == hash {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
+// importWorkflows 把导出包里的工作流写进库 + 盘，返回导入数、跳过数和需要在事务失败时清理的文件。
 //
 // 两条必须做的收敛：
 //   - is_default 一律置 0。目标库若已有默认工作流，再来一个就有两个「默认」，
 //     pickWorkflowId（记忆 → 默认 → 首个启用）的结果会变成实现细节。
 //   - enabled 保留原值。备份时禁用的，导回来仍是禁用，用户能自己看出来。
-func (a *app) importWorkflows(tx *sql.Tx, workflows []WorkflowRecord) (int, int) {
+func (a *app) importWorkflows(tx *sql.Tx, workflows []WorkflowRecord) (int, int, []string) {
 	imported, skipped := 0, 0
+	var savedPaths []string
 	for _, wf := range workflows {
 		name := strings.TrimSpace(wf.Name)
 		if name == "" || len(wf.WorkflowJSON) == 0 {
@@ -519,20 +635,23 @@ func (a *app) importWorkflows(tx *sql.Tx, workflows []WorkflowRecord) (int, int)
 		}
 		id, _ := res.LastInsertId()
 		fileName := workflowFileName(finalName, id)
-		if err := writeAtomic(filepath.Join(a.dataDir, "workflows", fileName), raw); err != nil {
+		path := filepath.Join(a.dataDir, "workflows", fileName)
+		if err := writeAtomic(path, raw); err != nil {
 			// 落不了盘就把这行撤掉：留着「有记录、没文件」的工作流，等提交时才炸
 			_, _ = tx.Exec(`DELETE FROM workflows WHERE id=?`, id)
 			skipped++
 			continue
 		}
 		if _, err := tx.Exec(`UPDATE workflows SET workflow_path=? WHERE id=?`, fileName, id); err != nil {
+			_ = os.Remove(path)
 			_, _ = tx.Exec(`DELETE FROM workflows WHERE id=?`, id)
 			skipped++
 			continue
 		}
+		savedPaths = append(savedPaths, path)
 		imported++
 	}
-	return imported, skipped
+	return imported, skipped, savedPaths
 }
 
 // resolveImportedWorkflowName 给出一个不与现有工作流撞名的名字，并判断是否为重复。

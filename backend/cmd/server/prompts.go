@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -319,45 +320,54 @@ func (a *app) runPrompt(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "workflow_id is required")
 		return
 	}
-	var positive, negative string
-	if err := a.db.QueryRowContext(r.Context(), `SELECT positive_prompt, COALESCE(negative_prompt,'') FROM prompts WHERE id=?`, id).Scan(&positive, &negative); err != nil {
-		writeError(w, 404, "prompt not found")
-		return
-	}
 	comfyURL, err := a.setting(r.Context(), "comfyui_url")
 	if err != nil {
 		writeError(w, 500, "read ComfyUI URL failed")
 		return
 	}
-	parameters, _ := json.Marshal(map[string]any{"positive_prompt": positive, "parameters": input.Parameters})
-	now := time.Now()
-	tx, err := a.db.BeginTx(r.Context(), nil)
-	if err != nil {
+	tx, workflowName := a.beginTaskCreation(w, r, input.WorkflowID)
+	if tx == nil {
+		return
+	}
+	defer tx.Rollback()
+	taskID, err := queuePromptTask(r.Context(), tx, id, input.WorkflowID, workflowName, comfyURL, input.Parameters)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, 404, "prompt not found")
+		return
+	}
+	if err != nil || tx.Commit() != nil {
 		writeError(w, 500, "create task failed")
-		return
-	}
-	result, err := tx.ExecContext(r.Context(),
-		`INSERT INTO generation_tasks(source_type, workflow_id, comfyui_url, parameters_json, workflow_name, created_at) VALUES('prompt',?,?,?,(SELECT name FROM workflows WHERE id=?),?)`,
-		input.WorkflowID, comfyURL, string(parameters), input.WorkflowID, now)
-	if err != nil {
-		_ = tx.Rollback()
-		writeError(w, 500, "create task failed")
-		return
-	}
-	taskID, _ := result.LastInsertId()
-	_, err = tx.ExecContext(r.Context(),
-		`INSERT INTO generation_items(task_id, prompt_id, positive_prompt, negative_prompt, status) VALUES(?,?,?,?, 'pending')`, taskID, id, positive, negative)
-	if err != nil {
-		_ = tx.Rollback()
-		writeError(w, 500, "create task item failed")
-		return
-	}
-	_, _ = tx.ExecContext(r.Context(), `UPDATE prompts SET status='running', updated_at=CURRENT_TIMESTAMP WHERE id=?`, id)
-	if err := tx.Commit(); err != nil {
-		writeError(w, 500, "commit task failed")
 		return
 	}
 	writeJSON(w, 202, map[string]any{"task_id": taskID, "prompt_id": id, "status": "pending"})
+}
+
+func queuePromptTask(ctx context.Context, tx *sql.Tx, promptID, workflowID int64, workflowName, comfyURL string, parameters map[string]any) (int64, error) {
+	var positive, negative string
+	if err := tx.QueryRowContext(ctx, "SELECT positive_prompt, COALESCE(negative_prompt,'') FROM prompts WHERE id=?", promptID).Scan(&positive, &negative); err != nil {
+		return 0, err
+	}
+	payload, err := json.Marshal(map[string]any{"positive_prompt": positive, "parameters": parameters})
+	if err != nil {
+		return 0, err
+	}
+	result, err := tx.ExecContext(ctx,
+		"INSERT INTO generation_tasks(source_type, workflow_id, comfyui_url, parameters_json, workflow_name, created_at) VALUES('prompt',?,?,?,?,?)",
+		workflowID, comfyURL, string(payload), workflowName, time.Now())
+	if err != nil {
+		return 0, err
+	}
+	taskID, err := result.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx,
+		"INSERT INTO generation_items(task_id, prompt_id, positive_prompt, negative_prompt, status) VALUES(?,?,?,?,'pending')",
+		taskID, promptID, positive, negative); err != nil {
+		return 0, err
+	}
+	_, err = tx.ExecContext(ctx, "UPDATE prompts SET status='running', updated_at=CURRENT_TIMESTAMP WHERE id=?", promptID)
+	return taskID, err
 }
 
 func (a *app) listPromptGroups(w http.ResponseWriter, r *http.Request) {
@@ -439,38 +449,7 @@ func (a *app) batchRunPrompts(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "ids and workflow_id are required")
 		return
 	}
-	comfyURL, err := a.setting(r.Context(), "comfyui_url")
-	if err != nil {
-		writeError(w, 500, "read ComfyUI URL failed")
-		return
-	}
-	created := 0
-	for _, id := range input.IDs {
-		var positive, negative string
-		if err := a.db.QueryRowContext(r.Context(), `SELECT positive_prompt, COALESCE(negative_prompt,'') FROM prompts WHERE id=?`, id).Scan(&positive, &negative); err != nil {
-			continue
-		}
-		parameters, _ := json.Marshal(map[string]any{"positive_prompt": positive, "parameters": input.Parameters})
-		now := time.Now()
-		tx, err := a.db.BeginTx(r.Context(), nil)
-		if err != nil {
-			continue
-		}
-		result, err := tx.ExecContext(r.Context(),
-			`INSERT INTO generation_tasks(source_type, workflow_id, comfyui_url, parameters_json, created_at) VALUES('prompt',?,?,?,?)`,
-			input.WorkflowID, comfyURL, string(parameters), now)
-		if err != nil {
-			_ = tx.Rollback()
-			continue
-		}
-		taskID, _ := result.LastInsertId()
-		_, _ = tx.ExecContext(r.Context(),
-			`INSERT INTO generation_items(task_id, prompt_id, positive_prompt, negative_prompt, status) VALUES(?,?,?,?,'pending')`, taskID, id, positive, negative)
-		_, _ = tx.ExecContext(r.Context(), `UPDATE prompts SET status='running', updated_at=CURRENT_TIMESTAMP WHERE id=?`, id)
-		_ = tx.Commit()
-		created++
-	}
-	writeJSON(w, 200, map[string]any{"created": created})
+	a.queuePromptBatch(w, r, input.WorkflowID, input.Parameters, input.IDs, "")
 }
 
 func (a *app) groupRunPrompts(w http.ResponseWriter, r *http.Request) {
@@ -483,57 +462,60 @@ func (a *app) groupRunPrompts(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "group_name and workflow_id are required")
 		return
 	}
-	comfyURL, err := a.setting(r.Context(), "comfyui_url")
+	a.queuePromptBatch(w, r, input.WorkflowID, input.Parameters, nil, input.GroupName)
+}
+
+func (a *app) queuePromptBatch(w http.ResponseWriter, r *http.Request, workflowID int64, parameters map[string]any, ids []int64, group string) {
+	ctx := r.Context()
+	comfyURL, err := a.setting(ctx, "comfyui_url")
 	if err != nil {
 		writeError(w, 500, "read ComfyUI URL failed")
 		return
 	}
-	rows, err := a.db.QueryContext(r.Context(), `SELECT id, positive_prompt, COALESCE(negative_prompt,'') FROM prompts WHERE group_name=? AND status IN ('pending','failed')`, input.GroupName)
-	if err != nil {
-		writeError(w, 500, "query group prompts failed")
+	tx, workflowName := a.beginTaskCreation(w, r, workflowID)
+	if tx == nil {
 		return
 	}
-	type item struct {
-		id       int64
-		positive string
-		negative string
-	}
-	var items []item
-	for rows.Next() {
-		var it item
-		if err := rows.Scan(&it.id, &it.positive, &it.negative); err == nil {
-			items = append(items, it)
+	defer tx.Rollback()
+	if group != "" {
+		ids, err = groupPromptIDs(ctx, tx, group)
+		if err != nil {
+			writeError(w, 500, "read group prompts failed")
+			return
 		}
-	}
-	readErr := rows.Err()
-	// 先把结果读干净、关掉读游标，再开写事务：游标未关就 BeginTx，
-	// WAL 下能跑，但一旦 journal_mode 退回 delete 就会直接锁死。
-	rows.Close()
-	if readErr != nil {
-		writeError(w, 500, "read group prompts failed")
-		return
 	}
 	created := 0
-	for _, it := range items {
-		parameters, _ := json.Marshal(map[string]any{"positive_prompt": it.positive, "parameters": input.Parameters})
-		now := time.Now()
-		tx, err := a.db.BeginTx(r.Context(), nil)
-		if err != nil {
+	for _, id := range ids {
+		_, err := queuePromptTask(ctx, tx, id, workflowID, workflowName, comfyURL, parameters)
+		if errors.Is(err, sql.ErrNoRows) {
 			continue
 		}
-		result, err := tx.ExecContext(r.Context(),
-			`INSERT INTO generation_tasks(source_type, workflow_id, comfyui_url, parameters_json, created_at) VALUES('prompt',?,?,?,?)`,
-			input.WorkflowID, comfyURL, string(parameters), now)
 		if err != nil {
-			_ = tx.Rollback()
-			continue
+			writeError(w, 500, "create tasks failed")
+			return
 		}
-		taskID, _ := result.LastInsertId()
-		_, _ = tx.ExecContext(r.Context(),
-			`INSERT INTO generation_items(task_id, prompt_id, positive_prompt, negative_prompt, status) VALUES(?,?,?,?,'pending')`, taskID, it.id, it.positive, it.negative)
-		_, _ = tx.ExecContext(r.Context(), `UPDATE prompts SET status='running', updated_at=CURRENT_TIMESTAMP WHERE id=?`, it.id)
-		_ = tx.Commit()
 		created++
 	}
+	if err := tx.Commit(); err != nil {
+		writeError(w, 500, "commit tasks failed")
+		return
+	}
 	writeJSON(w, 200, map[string]any{"created": created})
+}
+
+func groupPromptIDs(ctx context.Context, tx *sql.Tx, group string) ([]int64, error) {
+	rows, err := tx.QueryContext(ctx, "SELECT id FROM prompts WHERE group_name=? AND status IN ('pending','failed')", group)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }

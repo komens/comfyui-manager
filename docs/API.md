@@ -539,7 +539,7 @@ DELETE /api/debug/files/{name}
 | `repair_not_possible` | 被拒但**无处可修**（值已无归属或有歧义） | `rejection` |
 | `comfy_execution_error` | ComfyUI 自己报执行错（`status_str == "error"`） | `history`（裁剪后的 `status` + `messages` 末尾 40 条） |
 | `no_outputs` | ComfyUI 说做完了但输出里没有图 | `history`（含 `outputs` 原文） |
-| `save_retry` | 图已产出但本轮没能保存，保留 `submitted` 重试 | `item_id` / `attempt` / `error` |
+| `save_retry` | 图已产出但本轮没能保存，保留 `submitted` 重试 | `item_id` / `attempt` / `saved` / `total` / `error` |
 | `waiting_for_output` | item 卡在 `submitted` 的周期心跳（每 60 轮 ≈5 分钟） | `item_id` / `rounds` / `reason` |
 | `node_def_missing` | 拉 `object_info/<类型>` 失败 | `class_type` / `url` / `error` |
 | `widget_slots_unparsed` | 节点定义的控件顺序解析不出来（老格式工作流会因此还原不出值） | `class_type` / `error` |
@@ -1026,8 +1026,11 @@ pending ──→ running ──→ submitted ──→ success
 | `submitted` | 已提交，等待出图 / 等待下载 |
 | `success` | 出图并已保存 |
 | `failed` | 失败（见 `error_message`） |
+| `cancelled` | 父任务已取消，本地停止处理该生成项 |
 
-**下载重试语义**：图片已在 ComfyUI 出好但保存失败（如磁盘错误）时，item **保持 `submitted`**，下一轮自动重试；连续失败 40 次才判定为失败。
+**下载重试**：只重试尚未保存的图片。仍有图片未保存时，生成项保持 `submitted`，连续 40 轮保存未完成后标记为失败。已保存的图片保留。
+
+**远端记录丢失**：ComfyUI 的历史记录和队列均查不到任务时，开始计算一分钟宽限期。宽限期后再次确认历史仍查不到任务，才将其标记为失败。连接中断或队列状态不可用时继续等待。
 
 ### 6.2 直接提交提示词
 
@@ -1063,8 +1066,8 @@ POST /api/tasks/direct
 | 状态码 | 触发条件 | 错误消息 |
 |---|---|---|
 | 400 | body 非法 / 缺必填 | `workflow_id and positive_prompt are required` |
-| 400 | 工作流不存在或已禁用 | `workflow not found or disabled` |
-| 500 | 读设置 / 写库失败 | `read ComfyUI URL failed` / `create task failed` / `create prompt failed` / `create task item failed` / `commit task failed` |
+| 400 | 工作流不存在或已禁用 | `工作流不存在或已停用` |
+| 500 | 读设置 / 写库失败 | `read ComfyUI URL failed` / `read workflow failed` / `create task failed` / `create prompt failed` / `create task item failed` / `commit task failed` |
 
 > 建任务只是入队。真正的提交由后台 submitter 每 3 秒扫 `pending` 的 item 完成，
 > 提交失败会写进该 item 的 `error_message`（原文形如
@@ -1174,6 +1177,8 @@ GET /api/tasks/{id}
 | `comfy_prompt_id` | string | ComfyUI 返回的 prompt id，未提交时为空串 |
 | `status` | string | item 状态 |
 | `error_message` | string | 失败原因 |
+| `output_count` | int | 本次执行发现的输出图片数，尚未发现时为 0 |
+| `saved_output_count` | int | 本次执行已保存的图片数 |
 | `notes` | string | 提交时的中性说明（目前只有「自动纠正了导出串位的控件值」这一种），无说明时为空串 |
 | `images` | array | 结果图，元素为 `{"id":int64,"filename":string,"width":int,"height":int}`（宽高供大图预览按比例排布，未知为 0）；无图时该字段不存在 |
 
@@ -1209,7 +1214,8 @@ GET /api/tasks/{id}/events
 | `status` | 携带字段 |
 |---|---|
 | `running` | `task_id`, `item_id`, `status` |
-| `success` | `task_id`, `item_id`, `status` |
+| `submitted` | `task_id`, `item_id`, `status`，提交成功或部分保存进度更新时推送 |
+| `success` | `task_id`, `item_id`, `status`, `error`（空字符串） |
 | `failed` | `task_id`, `item_id`, `status`, `error` |
 | `cancelled` | `task_id`, `status`（**无 `item_id`**） |
 | `pending` | `task_id`, `status`（重试时推送） |
@@ -1219,7 +1225,7 @@ GET /api/tasks/{id}/events
 ```
 data: {"task_id":11,"item_id":23,"status":"running"}
 
-data: {"task_id":11,"item_id":23,"status":"success"}
+data: {"task_id":11,"item_id":23,"status":"success","error":""}
 ```
 
 订阅者缓冲为 8；缓冲满时新事件会被丢弃（不阻塞服务端）。客户端断开时自动注销订阅。
@@ -1246,11 +1252,14 @@ POST /api/tasks/{id}/cancel
 
 | 状态码 | 触发条件 | 错误消息 |
 |---|---|---|
+| 400 | `id` 非法 | `invalid task id` |
 | 404 | 任务不存在 | `task not found` |
 | 409 | 状态不允许取消 | `task is not cancellable` |
 | 500 | 其它错误 | `cancel task failed` |
 
-> 取消时会异步通知 ComfyUI 从队列中移除已提交的任务（仅移除排队项，不中断正在执行的）。
+取消会将任务及其仍在等待、提交中或已提交的生成项置为 `cancelled`。关联提示词若处于 `running` 且没有其他在途生成项，会按历史完成记录回到 `done` 或 `pending`。
+
+服务随后尝试从 ComfyUI 异步撤掉排队项。新提交的生成项使用实际接单的 ComfyUI 地址，旧记录回落到当前设置。地址缺失时仍可完成本地取消。已开始执行的 ComfyUI 任务可能继续运行。
 
 ### 6.7 重试任务
 
@@ -1265,9 +1274,11 @@ POST /api/tasks/{id}/retry
 | `id` | int64 | |
 | `status` | string | 固定 `pending` |
 
-**前置条件**：任务状态必须是 `failed`，且其关联工作流仍然存在。
+**前置条件**：任务状态必须是 `failed`，且其关联工作流仍然存在。当前重试接口允许使用已停用的工作流。
 
 已成功的 item 保持不变（不会重复出图），只有失败的 item 被重置。
+
+**重试不删除任何已有图片**：重试可以换工作流，换了工作流就等于重新生成另一批图，上一版的结果属于用户资产。图片的清理只走图库删除或整理页，收藏与否都不受影响。
 
 | 状态码 | 触发条件 | 错误消息 |
 |---|---|---|
@@ -1291,7 +1302,9 @@ DELETE /api/tasks/{id}
 
 **前置条件**：任务状态不能是 `running`。
 
-删除会级联清理该任务的 items、图片记录与磁盘图片文件。
+删除会级联清理该任务的 items，以及图片的**记录、原图文件与缩略图**。
+
+**收藏的图片除外**：收藏是在图库里明确留下的标记，删除任务不会删掉它的记录、原图或缩略图（只失去与生成项的关联）。要删收藏图，请在图片库单独删除，或在整理页按条件清理。
 
 | 状态码 | 触发条件 | 错误消息 |
 |---|---|---|
@@ -1580,7 +1593,7 @@ POST /api/prompts/batch-run
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `ids` | array\<int64\> | 是 | 提示词 id 列表 |
-| `workflow_id` | int64 | 是 | 使用的工作流 |
+| `workflow_id` | int64 | 是 | 必须是存在且启用的工作流 |
 | `parameters` | object | 否 | 透传参数 |
 
 **响应 200**
@@ -1589,12 +1602,13 @@ POST /api/prompts/batch-run
 |---|---|---|
 | `created` | int | 成功创建的任务数 |
 
-> ⚠️ 单条创建失败会被**静默跳过**（不计入 `created`，也不报错）。此接口同样**不校验 500 上限**。
+不存在的提示词会跳过。其余任务在同一事务内创建，提交成功后返回 `created`。此接口没有 500 条上限。
 
 | 状态码 | 触发条件 | 错误消息 |
 |---|---|---|
 | 400 | 缺参数 | `ids and workflow_id are required` |
-| 500 | 读设置失败 | `read ComfyUI URL failed` |
+| 400 | 工作流不存在或已停用 | `工作流不存在或已停用` |
+| 500 | 读取配置或创建任务失败 | `read ComfyUI URL failed` / `read workflow failed` / `create task failed` / `create tasks failed` / `commit tasks failed` |
 
 ### 7.10 按分组出图
 
@@ -1607,10 +1621,10 @@ POST /api/prompts/group-run
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `group_name` | string | 是 | 分组名 |
-| `workflow_id` | int64 | 是 | 使用的工作流 |
+| `workflow_id` | int64 | 是 | 必须是存在且启用的工作流 |
 | `parameters` | object | 否 | 透传参数 |
 
-对分组下状态为 `pending` 或 `failed` 的提示词批量建任务。
+在同一事务中为分组下状态为 `pending` 或 `failed` 的提示词创建任务。
 
 **响应 200**
 
@@ -1621,7 +1635,8 @@ POST /api/prompts/group-run
 | 状态码 | 触发条件 | 错误消息 |
 |---|---|---|
 | 400 | 缺参数 | `group_name and workflow_id are required` |
-| 500 | 读设置 / 查询失败 | `read ComfyUI URL failed` / `query group prompts failed` / `read group prompts failed` |
+| 400 | 工作流不存在或已停用 | `工作流不存在或已停用` |
+| 500 | 读取配置、分组或创建任务失败 | `read ComfyUI URL failed` / `read workflow failed` / `read group prompts failed` / `create task failed` / `create tasks failed` / `commit tasks failed` |
 
 ### 7.11 单条出图
 
@@ -1633,7 +1648,7 @@ POST /api/prompts/{id}/run
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `workflow_id` | int64 | 是 | 使用的工作流 |
+| `workflow_id` | int64 | 是 | 必须是存在且启用的工作流 |
 | `parameters` | object | 否 | 透传参数 |
 
 **响应 202**
@@ -1647,8 +1662,9 @@ POST /api/prompts/{id}/run
 | 状态码 | 触发条件 | 错误消息 |
 |---|---|---|
 | 400 | `id` 非法 / 缺 `workflow_id` | `invalid prompt id` / `workflow_id is required` |
+| 400 | 工作流不存在或已停用 | `工作流不存在或已停用` |
 | 404 | 提示词不存在 | `prompt not found` |
-| 500 | 创建失败 | `read ComfyUI URL failed` / `create task failed` / `create task item failed` / `commit task failed` |
+| 500 | 创建失败 | `read ComfyUI URL failed` / `read workflow failed` / `create task failed` |
 
 > `7.9` / `7.10` / `7.11` 三个运行接口都**不接收** body 里的负面词：它们读取提示词记录自带的 `negative_prompt`，逐条写入各自的 `generation_items`，提交时再按「本条优先、空则回落工作流」生效（见 [13.2](#132-提示词与负向)）。
 
@@ -2532,13 +2548,16 @@ ZIP 结构：
 export-20261001_183000.zip
 ├── prompts.json        # 提示词数组（含 negative_prompt / group_id / is_favorite / source_platform）
 ├── images.json         # 图片数组（含 archive_name / prompt_id / positive_prompt / source_platform）
-├── workflows.json      # 工作流数组（JSON 本体内嵌，with_workflows=0 时为空数组）
+├── workflows.json      # 工作流 JSON 本体内嵌，with_workflows=0 时为 null
+├── export-warnings.json # 可选，记录缺失或读取失败的文件
 └── images/             # 图片二进制文件
-    ├── 1767000000_12.png
+    ├── image-12.png
     └── ...
 ```
 
-> 外部平台同步的图片同样会进包：取图不依赖 `generation_items`，而是 `COALESCE(NULLIF(images.prompt_id,0), generation_items.prompt_id)` 这条统一关联，所以「有提示词却没图片」不会发生。
+不设筛选条件时，导出包含外部平台图片及无提示词关联的图片。设了筛选条件时，图片随匹配的提示词导出。`images.json` 只列出成功写入 ZIP 的图片。没有记录的清单可能为 `null`。
+
+若文件缺失或读取失败，ZIP 会包含 `export-warnings.json`。每个元素包含 `type`（`image` 或 `workflow`）、`id`、`name` 和 `reason`（`missing` 或 `read_failed`）。
 
 `prompts.json` 元素：
 
@@ -2561,13 +2580,13 @@ export-20261001_183000.zip
 |---|---|---|
 | `id` | int64 | |
 | `filename` | string | 展示名 |
-| `archive_name` | string | ZIP 内的实际文件名；与 `filename` 相同时省略 |
+| `archive_name` | string | ZIP 内图片文件名，形如 `image-<id>.png`。导入旧包时，该字段缺省则回落到 `filename` |
 | `prompt_id` | int64 | |
 | `positive_prompt` | string | |
 | `is_favorite` | bool | |
 | `source_platform` | string | 空/缺省 = 本平台 |
-| `image_hash` | string | sha256，导回后可继续参与去重 |
-| `width` / `height` | int | 原始像素尺寸；缺省时导入端重新读文件头 |
+| `image_hash` | string | 已存储的 SHA-256，旧记录可能省略。导入时使用实际文件计算哈希 |
+| `width` / `height` | int | 原始像素尺寸。导入时从文件头读取 |
 
 `workflows.json` 元素：
 
@@ -2582,11 +2601,9 @@ export-20261001_183000.zip
 | `workflow_json` | object | **工作流 JSON 本体**（`workflows` 表只存 `workflow_path`，本体在 `data/workflows/`，导出时读盘内嵌） |
 | `hash` | string | 规范化 JSON 的 sha256，导入端用于「同名同内容」判重 |
 
-> `workflow_json` 读不到文件的工作流会被跳过并写日志——宁可少一个条目，也不给导入端一个「有记录、打不开」的空壳。
-
 | 状态码 | 触发条件 | 错误消息 |
 |---|---|---|
-| 500 | 提示词查询失败 | `query prompts failed` |
+| 500 | 提示词、图片或工作流查询失败 | `query prompts failed` / `query images failed` / `query workflows failed` |
 
 ### 12.2 导入 ZIP
 
@@ -2599,14 +2616,16 @@ Content-Type: multipart/form-data
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `file` | file | 是 | 必须是 `.zip` 文件，最大 500 MiB |
+| `file` | file | 是 | `.zip` 文件 |
+
+500 MiB 上限针对单个解压后的图片或 JSON 清单条目。multipart 使用 8 MiB 的内存阈值，超出的文件内容由解析器暂存到磁盘。
 
 **去重规则**
 
 | 对象 | 去重键 |
 |---|---|
 | 提示词 | `title` + `positive_prompt` + `source_platform` 完全相同 |
-| 图片 | `filename` 已存在 |
+| 图片 | 实际文件内容的 SHA-256。对没有哈希的旧记录，读取同名文件计算 SHA-256 后比对 |
 | 工作流 | `name` 相同且 JSON 内容指纹相同 → 跳过；`name` 相同但内容不同 → 存为 `name (2)`、`name (3)`…… |
 
 > 来源必须进去重键：两个平台可能撞出完全一样的提示词，合并会让来源标识丢失。
@@ -2625,18 +2644,21 @@ Content-Type: multipart/form-data
 | `skipped_prompts` | int | 跳过的提示词数 |
 | `imported_images` | int | 新插入的图片数 |
 | `skipped_images` | int | 跳过的图片数 |
+| `skipped_image_reasons` | object | 按原因计数，未出现的原因省略。`duplicate` 为内容重复，`missing` 为缺少 ZIP 图片条目，`unreadable` 为内容读取或识别失败，`write_failed` 为无法保存文件 |
 | `imported_external_images` | int | 其中带来源标识的外部平台图片数 |
 | `imported_workflows` | int | 新插入的工作流数（旧包没有 `workflows.json` 时为 0） |
 | `skipped_workflows` | int | 跳过的工作流数（重复或 JSON 坏掉） |
 
 | 状态码 | 触发条件 | 错误消息 |
 |---|---|---|
+| 400 | multipart 请求无法解析 | `无法读取导入文件` |
 | 400 | 缺 `file` 字段 | `missing file field` |
-| 400 | 非 `.zip` 文件 | `only .zip files are supported` |
+| 400 | 非 `.zip` 文件 | `请选择 ZIP 文件` |
 | 400 | ZIP 无法解析 | `invalid zip file` |
-| 500 | 写临时文件 / 事务失败 | `create temp file failed` / `begin transaction failed` / `commit failed` |
+| 400 | 清单无法读取 | `导入清单无法读取：<清单文件名>` |
+| 500 | 查重或写入数据库失败 | `begin transaction failed` / `check image duplicate failed` / `save imported image failed` / `commit failed` |
 
-> ZIP 内的文件名会被收敛为纯文件名，含路径分隔符或 `..` 的条目直接跳过（防止路径穿越）。
+导入会提取 ZIP 条目的基本文件名。图片使用本地生成的存储名，展示名保留在数据库中。
 
 ---
 
@@ -2667,7 +2689,7 @@ Content-Type: multipart/form-data
 - 工作流文件名带 id 后缀，两个同名工作流不会共用文件。
 - 删除工作流会拦住在途任务，顺序为先删库、后删文件。
 - 默认工作流全局唯一。
-- 提交时**实时读取**当前的 ComfyUI 地址；`generation_tasks.comfyui_url` 只是创建时的审计快照。
+- 提交时读取当前 ComfyUI 地址，并在生成项上记录实际接单地址供后续取图和撤队列使用。`generation_tasks.comfyui_url` 仍是任务创建时的快照。
 
 **提示词与负向**
 
@@ -2689,7 +2711,7 @@ Content-Type: multipart/form-data
 **任务**
 
 - 创建任务是异步的，返回 202 不代表已提交给 ComfyUI。
-- 出图成功但保存失败时任务不会立刻判失败，而是保持 `submitted` 自动重试，连续 40 次失败才终止。
+- 出图后只自动重试尚未保存的图片。连续 40 轮保存未完成后，生成项标记为失败并保留已保存的图片。
 - 已成功的结果在重试时不会被重跑。
 
 **收藏联动**

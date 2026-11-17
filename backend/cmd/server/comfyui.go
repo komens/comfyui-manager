@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -249,11 +251,11 @@ func (a *app) submitter() {
 			a.log.Printf("submitter: read comfyui_url failed, skip this round: %v", err)
 			continue
 		}
-		rows, err := a.db.Query(`SELECT i.id, i.task_id, i.positive_prompt, COALESCE(i.negative_prompt,''), t.parameters_json, w.workflow_path, w.mapping_json, COALESCE(w.negative_prompt,'')
+		rows, err := a.db.Query(`SELECT i.id, i.task_id, i.positive_prompt, COALESCE(i.negative_prompt,''), t.parameters_json, COALESCE(w.workflow_path,''), COALESCE(w.mapping_json,''), COALESCE(w.negative_prompt,'')
 			FROM generation_items i
 			JOIN generation_tasks t ON t.id=i.task_id
-			JOIN workflows w ON w.id=t.workflow_id
-			WHERE i.status='pending' AND t.status='pending'
+			LEFT JOIN workflows w ON w.id=t.workflow_id
+			WHERE i.status='pending' AND t.status IN ('pending','running')
 			ORDER BY i.id LIMIT 10`)
 		if err != nil {
 			a.log.Printf("submitter query error: %v", err)
@@ -296,16 +298,47 @@ func resolveEffectiveNegative(itemNegative, workflowNegative string) string {
 	return itemNegative
 }
 
+func (a *app) claimPendingItem(ctx context.Context, itemID, taskID int64) (bool, error) {
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, "UPDATE generation_items SET status='running' WHERE id=? AND status='pending' AND EXISTS (SELECT 1 FROM generation_tasks WHERE id=? AND status IN ('pending','running'))", itemID, taskID)
+	if err != nil {
+		return false, err
+	}
+	if changed, err := result.RowsAffected(); changed == 0 || err != nil {
+		return false, err
+	}
+	_, err = tx.ExecContext(ctx, "UPDATE generation_tasks SET status='running', started_at=COALESCE(started_at,?) WHERE id=? AND status='pending'", time.Now(), taskID)
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // submitItem 提交单个 item 到 ComfyUI
 func (a *app) submitItem(itemID, taskID int64, positive, baseURL, parameters, workflowPath, mappingJSON, negativePrompt string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// 标记 task 为 running
-	_, _ = a.db.Exec(`UPDATE generation_tasks SET status='running', started_at=CASE WHEN started_at IS NULL THEN ? ELSE started_at END WHERE id=? AND status='pending'`, time.Now(), taskID)
-	_, _ = a.db.Exec(`UPDATE generation_items SET status='running' WHERE id=?`, itemID)
+	claimed, err := a.claimPendingItem(ctx, itemID, taskID)
+	if err != nil {
+		a.log.Printf("claim item %d: %v", itemID, err)
+	}
+	if !claimed {
+		return
+	}
 	a.publish(taskID, map[string]any{"task_id": taskID, "item_id": itemID, "status": "running"})
 
+	if workflowPath == "" {
+		a.failItem(itemID, taskID, "找不到该任务的工作流，请选择现有工作流重新提交")
+		return
+	}
 	// workflow_path 在库里可能是纯文件名（新）或绑定旧 cwd 的相对路径，统一按当前 dataDir 解析
 	resolvedPath := a.workflowFilePath(workflowPath)
 	workflowBytes, err := readWorkflowFile(resolvedPath)
@@ -347,14 +380,14 @@ func (a *app) submitItem(itemID, taskID int64, positive, baseURL, parameters, wo
 		a.failItem(itemID, taskID, fmt.Sprintf("submit to ComfyUI failed: %v", err))
 		return
 	}
+	note := ""
 	if len(notes) > 0 {
-		// 自动改过值就必须留痕：任务详情里看得到「这次提交和文件里的值不一样」，
-		// 否则出图结果与「我明明选的不是这个模型」对不上时无从追起。
-		note := "提交时自动纠正了导出串位的控件值——" + strings.Join(notes, "；")
+		note = "提交时自动纠正了导出串位的控件值——" + strings.Join(notes, "；")
 		a.log.Printf("item %d %s", itemID, note)
-		_, _ = a.db.Exec(`UPDATE generation_items SET notes=? WHERE id=?`, note, itemID)
 	}
-	_, _ = a.db.Exec(`UPDATE generation_items SET status='submitted', comfy_prompt_id=? WHERE id=?`, comfyPromptID, itemID)
+	if !a.recordComfySubmission(itemID, taskID, baseURL, comfyPromptID, note) {
+		return
+	}
 	a.log.Printf("item %d submitted to ComfyUI (prompt_id=%s)", itemID, comfyPromptID)
 	debugEvent("item_submitted", map[string]any{
 		"item_id":         itemID,
@@ -362,6 +395,24 @@ func (a *app) submitItem(itemID, taskID int64, positive, baseURL, parameters, wo
 		"comfy_prompt_id": comfyPromptID,
 		"notes":           strings.Join(notes, "；"),
 	})
+}
+
+// recordComfySubmission handles cancellation that wins while ComfyUI is answering /prompt.
+func (a *app) recordComfySubmission(itemID, taskID int64, baseURL, promptID, note string) bool {
+	result, err := a.db.Exec(`UPDATE generation_items SET status='submitted', comfy_prompt_id=?, submitted_comfyui_url=?, notes=?, remote_missing_since=0
+		WHERE id=? AND task_id=? AND status='running'
+		AND EXISTS (SELECT 1 FROM generation_tasks WHERE id=? AND status='running')`, promptID, baseURL, note, itemID, taskID, taskID)
+	if err != nil {
+		a.failItem(itemID, taskID, "ComfyUI 已接收任务，但保存提交记录失败："+err.Error())
+		go a.deleteComfyQueueItem(baseURL, promptID)
+		return false
+	}
+	if n, _ := result.RowsAffected(); n == 0 {
+		go a.deleteComfyQueueItem(baseURL, promptID)
+		return false
+	}
+	a.publish(taskID, map[string]any{"task_id": taskID, "item_id": itemID, "status": "submitted"})
+	return true
 }
 
 // failItem 标记 item 失败
@@ -374,13 +425,70 @@ func (a *app) failItem(itemID, taskID int64, errMsg string) {
 		"task_id": taskID,
 		"error":   errMsg,
 	})
-	// 统一在这里清保存失败计数：item 已进终态，残留的计数只会让 saveFailures 无界增长。
-	// 放在 failItem 内部而不是各调用点，是为了避免以后新增调用点时再次漏掉。
+	a.finishItem(itemID, taskID, "failed", errMsg)
+}
+
+// finishItem applies the item outcome and task totals together, preserving cancellation.
+func (a *app) finishItem(itemID, taskID int64, status, message string) {
+	finished, err := a.persistItemOutcome(itemID, taskID, status, message)
+	if err != nil {
+		a.log.Printf("item %d save %s outcome: %v", itemID, status, err)
+		return
+	}
 	a.resetSaveFailure(itemID)
-	_, _ = a.db.Exec(`UPDATE generation_items SET status='failed', error_message=? WHERE id=?`, errMsg, itemID)
-	_, _ = a.db.Exec(`UPDATE prompts SET status='failed', updated_at=CURRENT_TIMESTAMP WHERE id=(SELECT prompt_id FROM generation_items WHERE id=?)`, itemID)
-	_, _ = a.db.Exec(`UPDATE generation_tasks SET status='failed', failed_count=failed_count+1, completed_at=? WHERE id=?`, time.Now(), taskID)
-	a.publish(taskID, map[string]any{"task_id": taskID, "item_id": itemID, "status": "failed", "error": errMsg})
+	if finished {
+		a.publish(taskID, map[string]any{"task_id": taskID, "item_id": itemID, "status": status, "error": message})
+	}
+}
+
+func (a *app) persistItemOutcome(itemID, taskID int64, status, message string) (bool, error) {
+	tx, err := a.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec("UPDATE generation_items SET status=?, error_message=? WHERE id=? AND status IN ('running','submitted') AND EXISTS (SELECT 1 FROM generation_tasks WHERE id=? AND status!='cancelled')",
+		status, message, itemID, taskID)
+	if err != nil {
+		return false, err
+	}
+	if changed, err := result.RowsAffected(); changed == 0 || err != nil {
+		return false, err
+	}
+	promptStatus := status
+	if status == "success" {
+		promptStatus = "done"
+	}
+	_, err = tx.Exec("UPDATE prompts SET status=?, updated_at=CURRENT_TIMESTAMP, completed_at=CASE WHEN ?='done' THEN CURRENT_TIMESTAMP ELSE completed_at END WHERE id=(SELECT prompt_id FROM generation_items WHERE id=?)",
+		promptStatus, promptStatus, itemID)
+	if err != nil {
+		return false, err
+	}
+	var pending, succeeded, failed int
+	// 「未完成」要显式枚举，不能写 status NOT IN ('success','failed')：那样 cancelled 也会
+	// 被算成未完成，一旦将来支持取消单条生成项，任务就会永远停在 running。
+	err = tx.QueryRow("SELECT COUNT(*) FILTER (WHERE status IN ('pending','running','submitted')), COUNT(*) FILTER (WHERE status='success'), COUNT(*) FILTER (WHERE status='failed') FROM generation_items WHERE task_id=?", taskID).
+		Scan(&pending, &succeeded, &failed)
+	if err != nil {
+		return false, err
+	}
+	taskStatus := "running"
+	var completedAt any
+	if pending == 0 {
+		taskStatus = "completed"
+		if succeeded == 0 {
+			taskStatus = "failed"
+		}
+		completedAt = time.Now()
+	}
+	_, err = tx.Exec("UPDATE generation_tasks SET status=?, success_count=?, failed_count=?, completed_at=? WHERE id=?", taskStatus, succeeded, failed, completedAt, taskID)
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // maxSaveAttempts 是「图已生成、但保存失败」的连续重试上限。
@@ -405,63 +513,47 @@ func (a *app) resetSaveFailure(itemID int64) {
 
 // saveFailureIDs 返回当前处于「保存失败重试」中的 item id。
 // downloader 用它把这些 item 排到取数队列末尾，避免它们长期霸占每轮的名额。
-func (a *app) saveFailureIDs() []int64 {
-	a.saveFailMu.Lock()
-	defer a.saveFailMu.Unlock()
-	ids := make([]int64, 0, len(a.saveFailures))
-	for id := range a.saveFailures {
-		ids = append(ids, id)
-	}
-	return ids
-}
+const downloadBatchSize = 20
 
-// downloader 下载阶段（每5秒扫描 submitted items 拉取结果）
-//
-// 与 submitter 同理，ComfyUI 地址取当前设置，不用 task 快照——
-// 否则改完配置，卡在 submitted 的旧任务会一直拿废弃地址查 history，永久静默卡住。
 func (a *app) downloader() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
+	var afterID int64
 	for range ticker.C {
-		comfyURL, err := a.setting(context.Background(), "comfyui_url")
-		if err != nil || comfyURL == "" {
-			a.log.Printf("downloader: read comfyui_url failed, skip this round: %v", err)
-			continue
-		}
-		// 正在退避重试的 item 排到最后：它们这一轮大概率还会失败，
-		// 若长期占据 LIMIT 20 的名额，排在后面的 item 即使 ComfyUI 早已出图也轮不到。
-		orderBy := "i.id"
-		if stuck := a.saveFailureIDs(); len(stuck) > 0 {
-			ids := make([]string, len(stuck))
-			for i, id := range stuck {
-				ids[i] = strconv.FormatInt(id, 10)
-			}
-			orderBy = "(CASE WHEN i.id IN (" + strings.Join(ids, ",") + ") THEN 1 ELSE 0 END), i.id"
-		}
-		rows, err := a.db.Query(`SELECT i.id, i.task_id, i.comfy_prompt_id
-			FROM generation_items i
-			JOIN generation_tasks t ON t.id=i.task_id
-			WHERE i.status='submitted' AND i.comfy_prompt_id!=''
-			ORDER BY ` + orderBy + ` LIMIT 20`)
+		// 旧记录未保存实际提交地址，沿用旧版按当前配置查询的行为。
+		rows, err := a.db.Query(`SELECT i.id, i.task_id, i.comfy_prompt_id,
+			COALESCE(NULLIF(i.submitted_comfyui_url,''),(SELECT value FROM settings WHERE key='comfyui_url'),'')
+			FROM generation_items i JOIN generation_tasks t ON t.id=i.task_id
+			WHERE i.id>? AND i.status='submitted' AND i.comfy_prompt_id!='' AND t.status!='cancelled'
+			ORDER BY i.id LIMIT ?`, afterID, downloadBatchSize)
 		if err != nil {
-			a.log.Printf("downloader query error: %v", err)
+			a.log.Printf("downloader query: %v", err)
 			continue
 		}
-		type submittedItem struct {
-			ItemID        int64
-			TaskID        int64
-			ComfyPromptID string
+		type submission struct {
+			itemID, taskID    int64
+			promptID, baseURL string
 		}
-		var items []submittedItem
+		var items []submission
 		for rows.Next() {
-			var s submittedItem
-			if err := rows.Scan(&s.ItemID, &s.TaskID, &s.ComfyPromptID); err == nil {
-				items = append(items, s)
+			var item submission
+			if err := rows.Scan(&item.itemID, &item.taskID, &item.promptID, &item.baseURL); err == nil {
+				items = append(items, item)
 			}
+		}
+		if err := rows.Err(); err != nil {
+			a.log.Printf("read submitted items: %v", err)
 		}
 		rows.Close()
-		for _, s := range items {
-			a.checkAndDownload(s.ItemID, s.TaskID, s.ComfyPromptID, comfyURL)
+
+		// 轮转游标，避免前面的长任务或故障项长期占满查询批次。
+		afterID = 0
+		if len(items) == downloadBatchSize {
+			afterID = items[len(items)-1].itemID
+		}
+		queues := make(map[string]comfyQueueSnapshot)
+		for _, item := range items {
+			a.checkAndDownload(item.itemID, item.taskID, item.promptID, item.baseURL, queues)
 		}
 	}
 }
@@ -470,8 +562,7 @@ func (a *app) downloader() {
 //
 // 为什么需要它：「任务卡着不动」是这个项目最常见的抱怨，而轮询本身全是有来有回的 200
 // ——按设计不该逐条记，于是日志里一片空白，完全看不出「到底还在轮询没有」。
-// 尤其是 ComfyUI 侧悄悄重启过的情况：/history 是内存态、重启即清空，任务会永远
-// 停在 submitted，而下载器每 5 秒都规规矩矩地回一句「还没好」。
+// ComfyUI 重启后可能清空历史。下载器会先向队列核对，再判定结果是否丢失。
 const maxWaitingSilenceRounds = 60
 
 // noteWaiting 记一次「这个 item 还在等」。只在 DEBUG 开启时维护计数与落盘。
@@ -506,7 +597,115 @@ func (a *app) clearWaiting(itemID int64) {
 }
 
 // checkAndDownload 检查单个 item 是否完成并下载图片
-func (a *app) checkAndDownload(itemID, taskID int64, comfyPromptID, baseURL string) {
+type comfyImageOutput struct {
+	filename, subfolder, kind string
+}
+
+func comfyImageOutputs(outputs map[string]any) []comfyImageOutput {
+	var result []comfyImageOutput
+	seen := make(map[comfyImageOutput]bool)
+	for _, nodeOutput := range outputs {
+		node, _ := nodeOutput.(map[string]any)
+		images, _ := node["images"].([]any)
+		for _, img := range images {
+			image, _ := img.(map[string]any)
+			filename, _ := image["filename"].(string)
+			subfolder, _ := image["subfolder"].(string)
+			kind, _ := image["type"].(string)
+			output := comfyImageOutput{filename, subfolder, kind}
+			if filename != "" && !seen[output] {
+				result = append(result, output)
+				seen[output] = true
+			}
+		}
+	}
+	return result
+}
+
+var errComfyOutputInactive = errors.New("generation item is no longer active")
+
+func (a *app) saveComfyOutput(ctx context.Context, itemID int64, promptID, baseURL string, output comfyImageOutput) error {
+	// Scope the key to one execution so an explicit rerun can publish its own outputs.
+	identity, err := json.Marshal([]any{itemID, promptID, output.kind, output.subfolder, output.filename})
+	if err != nil {
+		return err
+	}
+	key := fmt.Sprintf("%x", sha256.Sum256(identity))
+	var existingPath string
+	err = a.db.QueryRowContext(ctx, "SELECT storage_path FROM images WHERE comfy_output_key=? AND comfy_output_key!=''", key).Scan(&existingPath)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if info, err := os.Stat(a.imageFilePath(existingPath)); err == nil && info.Mode().IsRegular() && info.Size() > 0 {
+		return nil
+	}
+
+	imgData, err := downloadComfyImage(ctx, baseURL, output.filename, output.subfolder, output.kind)
+	if err != nil {
+		return err
+	}
+	width, height := imageSizeFromBytes(imgData)
+	if width <= 0 || height <= 0 {
+		return fmt.Errorf("ComfyUI output %q is not a readable image", output.filename)
+	}
+
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var active int
+	err = tx.QueryRowContext(ctx, "SELECT 1 FROM generation_items i JOIN generation_tasks t ON t.id=i.task_id WHERE i.id=? AND i.status='submitted' AND i.comfy_prompt_id=? AND t.status!='cancelled'", itemID, promptID).Scan(&active)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errComfyOutputInactive
+	}
+	if err != nil {
+		return err
+	}
+	// Recheck under the write lock so a concurrent saver cannot replace an existing file.
+	var imageID int64
+	err = tx.QueryRowContext(ctx, "SELECT id, storage_path FROM images WHERE comfy_output_key=? AND comfy_output_key!=''", key).Scan(&imageID, &existingPath)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if info, err := os.Stat(a.imageFilePath(existingPath)); err == nil && info.Mode().IsRegular() && info.Size() > 0 {
+		return nil
+	}
+
+	target := filepath.Join(a.dataDir, "images", "comfy-"+key+".png")
+	if err := writeAtomic(target, imgData); err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.Remove(target)
+		}
+	}()
+
+	digest := fmt.Sprintf("%x", sha256.Sum256(imgData))
+	if imageID != 0 {
+		_, err = tx.ExecContext(ctx, "UPDATE images SET storage_path=?, image_hash=?, width=?, height=? WHERE id=?", target, digest, width, height, imageID)
+	} else {
+		var result sql.Result
+		result, err = tx.ExecContext(ctx, "INSERT INTO images(generation_item_id, filename, storage_path, image_hash, comfy_output_key, width, height, created_at) VALUES(?,?,?,?,?,?,?,?)",
+			itemID, output.filename, target, digest, key, width, height, time.Now())
+		if err == nil {
+			imageID, err = result.LastInsertId()
+		}
+	}
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	a.queueThumbBuild(imageID, target)
+	return nil
+}
+
+func (a *app) checkAndDownload(itemID, taskID int64, comfyPromptID, baseURL string, queues map[string]comfyQueueSnapshot) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -521,12 +720,22 @@ func (a *app) checkAndDownload(itemID, taskID int64, comfyPromptID, baseURL stri
 	// 查询 ComfyUI /history
 	history, err := pollComfyHistory(ctx, baseURL, comfyPromptID)
 	if err != nil {
-		// 还没完成或查询出错，下次再试。
-		// 轮询本身不逐条记（每 5 秒一次），但要定期留一条心跳，
-		// 否则「任务卡住」在日志里等于什么都没发生。
 		a.noteWaiting(itemID, err.Error())
+		if errors.Is(err, errComfyHistoryMissing) {
+			queue, known := queues[baseURL]
+			if !known {
+				queue = fetchComfyQueue(ctx, baseURL)
+				queues[baseURL] = queue
+			}
+			if queue.available && !queue.promptIDs[comfyPromptID] {
+				a.checkMissingRemote(ctx, itemID, taskID, comfyPromptID, baseURL)
+				return
+			}
+		}
+		a.clearRemoteMissing(itemID, comfyPromptID)
 		return
 	}
+	a.clearRemoteMissing(itemID, comfyPromptID)
 	a.clearWaiting(itemID)
 
 	// ComfyUI 自己执行报错时 status.status_str == "error"，此时 outputs 往往是空的。
@@ -553,73 +762,8 @@ func (a *app) checkAndDownload(itemID, taskID int64, comfyPromptID, baseURL stri
 		a.failItem(itemID, taskID, "ComfyUI response missing outputs")
 		return
 	}
-	found := false
-	var saveErr error
-	for _, nodeOutput := range outputs {
-		nodeMap, _ := nodeOutput.(map[string]any)
-		if nodeMap == nil {
-			continue
-		}
-		images, _ := nodeMap["images"].([]any)
-		for _, img := range images {
-			imgMap, _ := img.(map[string]any)
-			if imgMap == nil {
-				continue
-			}
-			filename, _ := imgMap["filename"].(string)
-			subfolder, _ := imgMap["subfolder"].(string)
-			imgType, _ := imgMap["type"].(string)
-			if filename == "" {
-				continue
-			}
-			imgData, dlErr := downloadComfyImage(ctx, baseURL, filename, subfolder, imgType)
-			if dlErr != nil {
-				a.log.Printf("download image failed: %v", dlErr)
-				saveErr = dlErr
-				continue
-			}
-			// 尺寸直接从内存里的原始字节解（只读文件头），预览端才能拿到真比例
-			imgW, imgH := imageSizeFromBytes(imgData)
-			res, insertErr := a.db.Exec(`INSERT INTO images(generation_item_id, filename, storage_path, width, height, created_at) VALUES(?,?,'',?,?,?)`, itemID, filename, imgW, imgH, time.Now())
-			if insertErr != nil {
-				a.log.Printf("insert image record failed: %v", insertErr)
-				saveErr = insertErr
-				continue
-			}
-			imageID, _ := res.LastInsertId()
-			imgFilename := fmt.Sprintf("%s_%d.png", time.Now().Format("20060102_150405"), imageID)
-			target := filepath.Join(a.dataDir, "images", imgFilename)
-			if writeErr := os.WriteFile(target, imgData, 0o644); writeErr != nil {
-				a.log.Printf("write image file failed: %v", writeErr)
-				saveErr = writeErr
-				continue
-			}
-			_, _ = a.db.Exec(`UPDATE images SET storage_path=? WHERE id=?`, target, imageID)
-			// 缩略图异步生成：不阻塞出图流程，失败也不影响这张图本身可用
-			// （前端请求缩略图时会按需补生成）。
-			a.queueThumbBuild(imageID, target)
-			found = true
-		}
-	}
-	if !found {
-		if saveErr != nil {
-			// ComfyUI 确实产出了图，但本轮没能下载/落库/落盘（如 SQLITE_BUSY、磁盘错误）。
-			// 这属于**可恢复的基础设施错误**，不能判定成「无输出」——否则会丢掉已生成的图，
-			// 且重跑还要重新作图。保持 submitted，交给下一轮轮询自动重试；
-			// 连续失败过多（见 maxSaveAttempts）才判失败，避免因持续故障永久卡住。
-			if n := a.bumpSaveFailure(itemID); n >= maxSaveAttempts {
-				a.failItem(itemID, taskID, fmt.Sprintf("保存图片连续失败 %d 次: %v", n, saveErr))
-				return
-			} else {
-				a.log.Printf("item %d 保存失败（第 %d 次），保留 submitted 等待重试: %v", itemID, n, saveErr)
-				debugEvent("save_retry", map[string]any{
-					"item_id": itemID,
-					"attempt": n,
-					"error":   saveErr.Error(),
-				})
-				return
-			}
-		}
+	expected := comfyImageOutputs(outputs)
+	if len(expected) == 0 {
 		// 「ComfyUI 说做完了，但输出里没有图」最容易被误判成下载逻辑的锅。
 		// outputs 原样留下来才能看出到底是哪个节点没产出、还是产出被静音了。
 		debugEvent("no_outputs", map[string]any{
@@ -631,26 +775,107 @@ func (a *app) checkAndDownload(itemID, taskID int64, comfyPromptID, baseURL stri
 		a.failItem(itemID, taskID, "no images in ComfyUI output")
 		return
 	}
-	a.resetSaveFailure(itemID)
-	// 成功
-	_, _ = a.db.Exec(`UPDATE generation_items SET status='success' WHERE id=?`, itemID)
-	_, _ = a.db.Exec(`UPDATE prompts SET status='done', completed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=(SELECT prompt_id FROM generation_items WHERE id=?)`, itemID)
-	// 检查 task 下所有 items 是否都完成了
-	var pending int
-	_ = a.db.QueryRow(`SELECT COUNT(*) FROM generation_items WHERE task_id=? AND status NOT IN ('success','failed')`, taskID).Scan(&pending)
-	if pending == 0 {
-		var successCt, failedCt int
-		_ = a.db.QueryRow(`SELECT COUNT(*) FROM generation_items WHERE task_id=? AND status='success'`, taskID).Scan(&successCt)
-		_ = a.db.QueryRow(`SELECT COUNT(*) FROM generation_items WHERE task_id=? AND status='failed'`, taskID).Scan(&failedCt)
-		taskStatus := "completed"
-		if failedCt > 0 && successCt == 0 {
-			taskStatus = "failed"
-		} else if failedCt > 0 {
-			taskStatus = "completed" // 部分成功也算完成
+	var saveErr error
+	saved := 0
+	for _, output := range expected {
+		err := a.saveComfyOutput(ctx, itemID, comfyPromptID, baseURL, output)
+		if errors.Is(err, errComfyOutputInactive) {
+			return
 		}
-		_, _ = a.db.Exec(`UPDATE generation_tasks SET status=?, success_count=?, failed_count=?, completed_at=? WHERE id=?`, taskStatus, successCt, failedCt, time.Now(), taskID)
+		if err != nil {
+			saveErr = err
+			continue
+		}
+		saved++
 	}
-	a.publish(taskID, map[string]any{"task_id": taskID, "item_id": itemID, "status": "success"})
+	progress, err := a.db.Exec("UPDATE generation_items SET output_count=?, saved_output_count=? WHERE id=? AND status='submitted' AND comfy_prompt_id=? AND (output_count!=? OR saved_output_count!=?)",
+		len(expected), saved, itemID, comfyPromptID, len(expected), saved)
+	if err != nil {
+		a.log.Printf("item %d update save progress: %v", itemID, err)
+		return
+	}
+	if saveErr != nil {
+		n := a.bumpSaveFailure(itemID)
+		if n >= maxSaveAttempts {
+			a.failItem(itemID, taskID, fmt.Sprintf("已保存 %d/%d 张图片，连续 %d 次保存未完成：%v", saved, len(expected), n, saveErr))
+			return
+		}
+		if changed, _ := progress.RowsAffected(); changed > 0 {
+			a.publish(taskID, map[string]any{"task_id": taskID, "item_id": itemID, "status": "submitted"})
+		}
+		a.log.Printf("item %d 已保存 %d/%d 张图片（第 %d 次），等待重试: %v", itemID, saved, len(expected), n, saveErr)
+		debugEvent("save_retry", map[string]any{
+			"item_id": itemID, "attempt": n, "saved": saved, "total": len(expected), "error": saveErr.Error(),
+		})
+		return
+	}
+	a.finishItem(itemID, taskID, "success", "")
+}
+
+// Only mark a job lost when both endpoints repeatedly show it missing.
+const remoteMissingGrace = time.Minute
+
+var errComfyHistoryMissing = errors.New("prompt not found in history")
+
+type comfyQueueSnapshot struct {
+	available bool
+	promptIDs map[string]bool
+}
+
+func fetchComfyQueue(ctx context.Context, baseURL string) comfyQueueSnapshot {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/queue", nil)
+	if err != nil {
+		return comfyQueueSnapshot{}
+	}
+	resp, _, err := tracedDo(http.DefaultClient, req, "queue status", 2048)
+	if err != nil {
+		return comfyQueueSnapshot{}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return comfyQueueSnapshot{}
+	}
+	var queue struct {
+		Running [][]json.RawMessage `json:"queue_running"`
+		Pending [][]json.RawMessage `json:"queue_pending"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&queue); err != nil || queue.Running == nil || queue.Pending == nil {
+		return comfyQueueSnapshot{}
+	}
+	result := comfyQueueSnapshot{available: true, promptIDs: make(map[string]bool)}
+	for _, entries := range [][][]json.RawMessage{queue.Running, queue.Pending} {
+		for _, entry := range entries {
+			var promptID string
+			if len(entry) < 2 || json.Unmarshal(entry[1], &promptID) != nil || promptID == "" {
+				return comfyQueueSnapshot{}
+			}
+			result.promptIDs[promptID] = true
+		}
+	}
+	return result
+}
+
+func (a *app) clearRemoteMissing(itemID int64, promptID string) {
+	if _, err := a.db.Exec("UPDATE generation_items SET remote_missing_since=0 WHERE id=? AND comfy_prompt_id=? AND remote_missing_since!=0", itemID, promptID); err != nil {
+		a.log.Printf("clear missing remote state for item %d: %v", itemID, err)
+	}
+}
+
+func (a *app) checkMissingRemote(ctx context.Context, itemID, taskID int64, promptID, baseURL string) {
+	now := time.Now()
+	var since int64
+	err := a.db.QueryRowContext(ctx, `UPDATE generation_items
+		SET remote_missing_since=CASE WHEN remote_missing_since=0 THEN ? ELSE remote_missing_since END
+		WHERE id=? AND comfy_prompt_id=? AND status='submitted' RETURNING remote_missing_since`, now.Unix(), itemID, promptID).Scan(&since)
+	if err != nil || now.Sub(time.Unix(since, 0)) < remoteMissingGrace {
+		return
+	}
+	// A job can finish between the first history and queue requests.
+	if _, err := pollComfyHistory(ctx, baseURL, promptID); !errors.Is(err, errComfyHistoryMissing) {
+		a.clearRemoteMissing(itemID, promptID)
+		return
+	}
+	a.failItem(itemID, taskID, "ComfyUI 队列和历史记录均找不到这条任务。ComfyUI 可能已重启或清空队列，可点击重试重新提交。")
 }
 
 // pollComfyHistory 查询 /history/{prompt_id} 来检查任务是否完成
@@ -670,7 +895,7 @@ func pollComfyHistory(ctx context.Context, baseURL, promptID string) (map[string
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == 204 || resp.StatusCode == 404 {
-		return nil, fmt.Errorf("not ready")
+		return nil, errComfyHistoryMissing
 	}
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("history HTTP %d", resp.StatusCode)
@@ -681,7 +906,7 @@ func pollComfyHistory(ctx context.Context, baseURL, promptID string) (map[string
 		return nil, err
 	}
 	if _, ok := result[promptID]; !ok {
-		return nil, fmt.Errorf("prompt not found in history")
+		return nil, errComfyHistoryMissing
 	}
 	promptResult, _ := result[promptID].(map[string]any)
 	if promptResult == nil {

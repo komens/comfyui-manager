@@ -420,7 +420,7 @@ onMounted(load)
 </script>
 
 <template>
-  <PageHeader eyebrow="WORKFLOWS" title="工作流" description="管理工作流，并指定正/负向提示词写到哪个节点。" />
+  <PageHeader title="工作流" description="管理工作流，并指定正/负向提示词写到哪个节点。" />
 
   <!-- Create/Edit Form -->
   <div class="card mb-4" v-if="showForm" style="max-width:860px;">

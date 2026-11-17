@@ -331,7 +331,6 @@ onUnmounted(closeStream)
 
 <template>
   <PageHeader
-    eyebrow="SCRIPTS"
     title="脚本运行台"
     description="贴一段代码直接跑，跑完把产出带走。适合一次性的数据整理，不必为每种场景做一个功能。"
   />

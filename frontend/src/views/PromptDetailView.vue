@@ -174,7 +174,7 @@ onUnmounted(() => setPolling(false))
 </script>
 
 <template>
-  <PageHeader eyebrow="PROMPT DETAIL" title="提示词详情" description="查看提示词内容和历史生成结果。" />
+  <PageHeader title="提示词详情" description="查看提示词内容和历史生成结果。" />
 
   <div v-if="loading" class="card">
     <div class="card-body flex items-center gap-3">

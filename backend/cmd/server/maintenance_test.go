@@ -350,6 +350,7 @@ func TestIndexesCreated(t *testing.T) {
 	want := []string{
 		"idx_images_created", "idx_images_item", "idx_items_task",
 		"idx_items_prompt", "idx_tasks_created", "idx_prompts_group", "idx_prompts_created",
+		"idx_images_hash", "idx_images_comfy_output",
 	}
 	for _, name := range want {
 		var n int

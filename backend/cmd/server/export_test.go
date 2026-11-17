@@ -203,7 +203,7 @@ func TestImportWorkflowsDedupe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	imported, skipped := dst.importWorkflows(tx, changed)
+	imported, skipped, _ := dst.importWorkflows(tx, changed)
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}

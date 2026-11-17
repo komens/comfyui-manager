@@ -122,16 +122,28 @@ async function handleImport(e: Event) {
   try {
     const formData = new FormData()
     formData.append('file', file)
-    const result = await api<{ imported_prompts: number; skipped_prompts: number; imported_images: number; skipped_images: number; imported_external_images?: number; imported_workflows?: number; skipped_workflows?: number }>('/api/import', {
+    const result = await api<{ imported_prompts: number; skipped_prompts: number; imported_images: number; skipped_images: number; skipped_image_reasons?: Record<string, number>; imported_external_images?: number; imported_workflows?: number; skipped_workflows?: number }>('/api/import', {
       method: 'POST',
       body: formData,
     })
     const external = result.imported_external_images ?? 0
     const workflows = result.imported_workflows ?? 0
     const skippedWorkflows = result.skipped_workflows ?? 0
-    importResult.value = `导入成功！\n提示词：导入 ${result.imported_prompts} 条，跳过 ${result.skipped_prompts} 条重复\n图片：导入 ${result.imported_images} 张，跳过 ${result.skipped_images} 张重复` +
-      (external > 0 ? `\n其中外部平台来源 ${external} 张（来源标识已保留）` : '') +
-      (workflows > 0 || skippedWorkflows > 0 ? `\n工作流：导入 ${workflows} 个，跳过 ${skippedWorkflows} 个重复` : '')
+    const reasons = result.skipped_image_reasons
+    const skippedLabels = [
+      ['duplicate', '内容重复'],
+      ['missing', '包内缺少图片'],
+      ['unreadable', '图片无法读取'],
+      ['write_failed', '图片保存失败'],
+    ] as const
+    const reasonSummary = reasons
+      ? skippedLabels.filter(([key]) => reasons[key]).map(([key, label]) => label + ' ' + reasons[key] + ' 张').join('，')
+      : ''
+    importResult.value = '导入完成\n提示词：导入 ' + result.imported_prompts + ' 条，跳过 ' + result.skipped_prompts + ' 条' +
+      '\n图片：导入 ' + result.imported_images + ' 张，跳过 ' + result.skipped_images + ' 张' +
+      (reasonSummary ? '（' + reasonSummary + '）' : '') +
+      (external > 0 ? '\n其中外部平台来源 ' + external + ' 张' : '') +
+      (workflows > 0 || skippedWorkflows > 0 ? '\n工作流：导入 ' + workflows + ' 个，跳过 ' + skippedWorkflows + ' 个' : '')
   } catch (e) {
     importResult.value = '导入失败：' + (e instanceof Error ? e.message : '未知错误')
   } finally {
@@ -160,7 +172,7 @@ async function test() {
 </script>
 
 <template>
-  <PageHeader eyebrow="SETTINGS" title="服务设置" description="配置 ComfyUI 服务地址和连接参数。" />
+  <PageHeader title="服务设置" description="配置 ComfyUI 服务地址和连接参数。" />
 
   <div class="card" style="max-width:640px;">
     <div class="card-header">
@@ -208,7 +220,7 @@ async function test() {
       <!-- 导出数据 -->
       <div class="data-section">
         <h3>导出数据</h3>
-        <p class="muted">按条件导出提示词、图片和可选的<strong>工作流</strong>为 ZIP 包，导入到新设备即可继续出图（不含任务历史与设置）。</p>
+        <p class="muted">按条件导出提示词、图片和可选的<strong>工作流</strong>为 ZIP 包，可导入到新设备（不含任务历史与设置）。缺失或读取失败的文件会列在包内的 export-warnings.json。</p>
         <button class="btn btn-primary" @click="openExportModal">&#8681; 导出数据</button>
       </div>
 

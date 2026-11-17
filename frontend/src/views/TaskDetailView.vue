@@ -12,7 +12,7 @@ function backToList() {
   backToListOr(router, '/tasks')
 }
 
-type TaskItem = { id: number; status: string; positive_prompt: string; negative_prompt: string; error_message: string; notes?: string; images?: { id: number; filename: string; width?: number; height?: number }[] }
+type TaskItem = { id: number; status: string; positive_prompt: string; negative_prompt: string; error_message: string; notes?: string; output_count?: number; saved_output_count?: number; images?: { id: number; filename: string; width?: number; height?: number }[] }
 
 const route = useRoute()
 const router = useRouter()
@@ -119,7 +119,7 @@ onUnmounted(() => stream?.close())
 </script>
 
 <template>
-  <PageHeader eyebrow="TASK DETAIL" :title="`任务 #${route.params.id}`" description="重点查看每个生成项的提示词与结果图。" />
+  <PageHeader :title="`任务 #${route.params.id}`" description="重点查看每个生成项的提示词与结果图。" />
 
   <button class="btn btn-ghost btn-sm" style="margin-bottom:12px;" @click="backToList">&larr; 返回任务列表</button>
 
@@ -148,6 +148,9 @@ onUnmounted(() => stream?.close())
       <div class="ic-head">
         <span class="badge" :class="statusClass(item.status)">{{ statusLabel(item.status) }}</span>
         <span class="text-xs muted">生成项 #{{ item.id }}</span>
+        <span v-if="item.status === 'submitted' && item.output_count" class="text-xs muted">
+          已保存 {{ item.saved_output_count ?? 0 }}/{{ item.output_count }} 张
+        </span>
       </div>
       <div class="ic-body">
         <div class="ic-texts">

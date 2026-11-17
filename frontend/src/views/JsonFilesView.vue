@@ -137,7 +137,7 @@ onMounted(load)
 </script>
 
 <template>
-  <PageHeader eyebrow="PROMPT DATA" title="JSON 文件" description="上传提示词 JSON 自动入提示词库，源文件仅作备份。" />
+  <PageHeader title="JSON 文件" description="上传提示词 JSON 自动入提示词库，源文件仅作备份。" />
 
   <div class="toolbar">
     <label class="upload-btn">

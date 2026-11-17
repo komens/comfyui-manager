@@ -237,7 +237,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 </script>
 
 <template>
-  <PageHeader eyebrow="TASKS" title="任务列表" description="查看所有生成任务状态，支持多选批量取消、重跑、删除。" />
+  <PageHeader title="任务列表" description="查看所有生成任务状态，支持多选批量取消、重跑、删除。" />
 
   <div class="toolbar" style="flex-wrap:wrap; gap:10px; margin-bottom:16px;">
     <select v-model="state.status" class="input" style="width:auto;" @change="onFilterChange">

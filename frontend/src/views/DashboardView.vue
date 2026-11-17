@@ -80,7 +80,7 @@ function formatTime(t: string) {
 </script>
 
 <template>
-  <PageHeader eyebrow="OVERVIEW" title="作图概览" description="查看 ComfyUI 连接状态和最近任务。" />
+  <PageHeader title="作图概览" description="查看 ComfyUI 连接状态和最近任务。" />
 
   <!-- Connection Status -->
   <div class="card mb-4">

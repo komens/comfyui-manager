@@ -430,6 +430,19 @@ VALUES ('comfyui_url', ?, CURRENT_TIMESTAMP);
 			// Ignore duplicate column errors
 		}
 	}
+	// These columns track in-flight submissions and saved outputs. Fail startup on a partial migration.
+	for _, stmt := range []string{
+		"ALTER TABLE images ADD COLUMN comfy_output_key TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE generation_items ADD COLUMN output_count INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE generation_items ADD COLUMN saved_output_count INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE generation_items ADD COLUMN submitted_comfyui_url TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE generation_items ADD COLUMN remote_missing_since INTEGER NOT NULL DEFAULT 0",
+		"CREATE UNIQUE INDEX IF NOT EXISTS idx_images_comfy_output ON images(comfy_output_key) WHERE comfy_output_key!=''",
+	} {
+		if _, err := a.db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return err
+		}
+	}
 	// Migrate data from prompt_entries to prompts if prompt_entries exists
 	var hasPromptEntries int
 	_ = a.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='prompt_entries'`).Scan(&hasPromptEntries)

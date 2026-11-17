@@ -253,7 +253,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <PageHeader eyebrow="PROMPT LIBRARY" title="提示词库" description="统一管理所有提示词，支持分组、搜索、批量操作。" />
+  <PageHeader title="提示词库" description="统一管理所有提示词，支持分组、搜索、批量操作。" />
 
   <div class="prompts-layout">
     <!-- 分组侧栏 -->

@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { RouterLink, RouterView, useRoute } from 'vue-router'
+import { RouterLink, RouterView } from 'vue-router'
+import { DataBoard, Delete, Document, EditPen, Files, Link, List, Monitor, Picture, SetUp, Setting, Tools } from '@element-plus/icons-vue'
 import { api } from '../api/client'
 
-const route = useRoute()
 const sidebarOpen = ref(false)
+const menuButton = ref<HTMLButtonElement | null>(null)
 // 版本号由后端 ldflags 注入，只有 /api/version 拿得到（前端本身不打包版本）
 const version = ref('')
 // 调试入口只在后端 DEBUG 开启时出现（接口 404 即视为未开启）
@@ -34,38 +35,42 @@ onMounted(async () => {
 })
 
 const baseItems = [
-  { path: '/', label: '概览', icon: '&#9633;' },
-  { path: '/submit', label: '直接提交', icon: '&#9998;' },
-  { path: '/external', label: '平台同步', icon: '&#8644;' },
-  { path: '/prompts', label: '提示词库', icon: '&#128221;' },
-  { path: '/json-files', label: 'JSON 文件', icon: '&#128196;' },
-  { path: '/workflows', label: '工作流', icon: '&#9881;' },
-  { path: '/tasks', label: '任务列表', icon: '&#9854;' },
-  { path: '/gallery', label: '图片库', icon: '&#128247;' },
+  { path: '/', label: '概览', icon: DataBoard },
+  { path: '/submit', label: '直接提交', icon: EditPen },
+  { path: '/external', label: '平台同步', icon: Link },
+  { path: '/prompts', label: '提示词库', icon: Document },
+  { path: '/json-files', label: 'JSON 文件', icon: Files },
+  { path: '/workflows', label: '工作流', icon: SetUp },
+  { path: '/tasks', label: '任务列表', icon: List },
+  { path: '/gallery', label: '图片库', icon: Picture },
 ]
 
 // 系统区永远有「设置」与「数据整理」；调试与脚本按需追加，对应开关打开后才出现
 const systemItems = computed(() => {
   const items = [
-    { path: '/settings', label: '设置', icon: '&#9881;' },
-    { path: '/maintenance', label: '数据整理', icon: '&#128465;' },
+    { path: '/settings', label: '设置', icon: Setting },
+    { path: '/maintenance', label: '数据整理', icon: Delete },
   ]
   if (scriptsOn.value) {
-    items.push({ path: '/scripts', label: '脚本运行台', icon: '&#128187;' })
+    items.push({ path: '/scripts', label: '脚本运行台', icon: Monitor })
   }
   if (debugOn.value) {
-    items.push({ path: '/debug', label: '调试日志', icon: '&#128295;' })
+    items.push({ path: '/debug', label: '调试日志', icon: Tools })
   }
   return items
 })
 
-function closeSidebar() { sidebarOpen.value = false }
+function closeSidebar() {
+  if (!sidebarOpen.value) return
+  sidebarOpen.value = false
+  menuButton.value?.focus()
+}
 </script>
 
 <template>
   <!-- Mobile Header -->
   <div class="mobile-header">
-    <button class="hamburger" @click="sidebarOpen = !sidebarOpen">&#9776;</button>
+    <button ref="menuButton" class="hamburger" type="button" aria-label="菜单" aria-controls="main-sidebar" :aria-expanded="sidebarOpen" @click="sidebarOpen = !sidebarOpen">&#9776;</button>
     <strong>素材管理平台</strong>
     <div style="width:36px"></div>
   </div>
@@ -75,7 +80,7 @@ function closeSidebar() { sidebarOpen.value = false }
 
   <div class="app-layout">
     <!-- Sidebar -->
-    <aside class="sidebar" :class="{ open: sidebarOpen }">
+    <aside id="main-sidebar" class="sidebar" :class="{ open: sidebarOpen }" @keydown.esc="closeSidebar">
       <div class="brand">
         <div class="brand-icon">素</div>
         <div class="brand-text">
@@ -93,7 +98,7 @@ function closeSidebar() { sidebarOpen.value = false }
           class="nav-link"
           @click="closeSidebar"
         >
-          <span class="nav-icon" v-html="item.icon"></span>
+          <component :is="item.icon" class="nav-icon" aria-hidden="true" />
           {{ item.label }}
         </RouterLink>
 
@@ -105,7 +110,7 @@ function closeSidebar() { sidebarOpen.value = false }
           class="nav-link"
           @click="closeSidebar"
         >
-          <span class="nav-icon" v-html="item.icon"></span>
+          <component :is="item.icon" class="nav-icon" aria-hidden="true" />
           {{ item.label }}
         </RouterLink>
       </nav>
