@@ -9,6 +9,7 @@ const router = useRouter()
 const workflows = ref<Workflow[]>([])
 const workflowId = ref(0)
 const positive = ref('')
+const negative = ref('')
 const title = ref('')
 const message = ref('')
 const messageType = ref<'success' | 'error' | 'info'>('info')
@@ -34,6 +35,7 @@ async function submit() {
       body: JSON.stringify({
         workflow_id: workflowId.value,
         positive_prompt: positive.value,
+        negative_prompt: negative.value,
         title: title.value,
       }),
     })
@@ -42,6 +44,7 @@ async function submit() {
     // 提交成功才算「上次用过的选择」，换页再回来仍是这条
     rememberWorkflowId(workflowId.value)
     positive.value = ''
+    negative.value = ''
     title.value = ''
     setTimeout(() => router.push(`/tasks/${data.id}`), 800)
   } catch (e) {
@@ -65,7 +68,7 @@ async function submit() {
         </select>
         <p v-if="!workflows.length" class="form-hint" style="color:var(--c-danger);">请先创建工作流</p>
         <p v-if="selectedWorkflow?.negative_prompt" class="form-hint">
-          负面提示词（工作流默认）：{{ selectedWorkflow.negative_prompt }}
+          工作流默认负面：{{ selectedWorkflow.negative_prompt }}（下方留空则使用它）
         </p>
       </div>
 
@@ -77,6 +80,11 @@ async function submit() {
       <div class="form-group">
         <label for="positive">正向提示词</label>
         <textarea id="positive" v-model="positive" rows="8" placeholder="描述你想要生成的图像内容..." />
+      </div>
+
+      <div class="form-group">
+        <label for="negative">负面提示词 <span class="text-xs muted">(可选，留空则用工作流默认)</span></label>
+        <textarea id="negative" v-model="negative" rows="4" placeholder="描述你想要避免的内容，如 blurry / extra fingers / watermark..." />
       </div>
 
       <div class="btn-group" style="margin-top:24px;">

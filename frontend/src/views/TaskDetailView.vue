@@ -150,7 +150,10 @@ onUnmounted(() => stream?.close())
         <span class="text-xs muted">生成项 #{{ item.id }}</span>
       </div>
       <div class="ic-body">
-        <div class="ic-prompt">{{ item.positive_prompt || '（无提示词）' }}</div>
+        <div class="ic-texts">
+          <div class="ic-prompt">{{ item.positive_prompt || '（无提示词）' }}</div>
+          <div v-if="item.negative_prompt" class="ic-neg"><span class="ic-neg-tag">负面</span>{{ item.negative_prompt }}</div>
+        </div>
         <div v-if="item.images?.length" class="ic-images">
           <img
             v-for="(img, i) in item.images"
@@ -219,7 +222,10 @@ onUnmounted(() => stream?.close())
 .item-card { padding: 14px 16px; }
 .ic-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
 .ic-body { display: flex; gap: 14px; align-items: flex-start; }
-.ic-prompt { flex: 1; min-width: 0; font-size: 14px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; }
+.ic-texts { flex: 1; min-width: 0; }
+.ic-neg { margin-top: 8px; font-size: 13px; line-height: 1.6; color: var(--c-text-muted, #888); white-space: pre-wrap; word-break: break-word; }
+.ic-neg-tag { display: inline-block; margin-right: 6px; padding: 0 6px; font-size: 11px; border-radius: var(--radius-sm, 4px); background: var(--c-bg-muted, #eee); }
+.ic-prompt { font-size: 14px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; }
 .ic-images { display: flex; gap: 8px; flex-wrap: wrap; flex-shrink: 0; max-width: 46%; }
 .ic-thumb { width: 128px; height: 128px; object-fit: cover; border-radius: 10px; border: 1px solid var(--c-border); cursor: zoom-in; background: var(--c-bg-subtle); transition: border-color .15s; }
 .ic-thumb:hover { border-color: var(--c-primary); }

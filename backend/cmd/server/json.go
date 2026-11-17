@@ -19,10 +19,12 @@ type jsonEntry struct {
 	Title    string `json:"title"`
 	Desc     string `json:"desc"`
 	Positive string `json:"positive"`
+	Negative string `json:"negative"`
 }
 
 type jsonDocument struct {
-	Entries []jsonEntry `json:"entries"`
+	Negative string      `json:"negative"` // 全局兜底负面：entry.negative 为空时使用
+	Entries  []jsonEntry `json:"entries"`
 }
 
 // importJSONStats 是 JSON 导入（文件或文本）的统一统计结果。
@@ -105,8 +107,8 @@ func (a *app) importJSONEntries(ctx context.Context, content []byte, entries []j
 			continue
 		}
 		if _, err := a.db.ExecContext(ctx,
-			`INSERT INTO prompts(title, description, positive_prompt, group_name, group_id, status, created_at, updated_at) VALUES(?,?,?,?,?,'pending',?,?)`,
-			title, entry.Desc, entry.Positive, groupName, groupID, now, now); err != nil {
+			`INSERT INTO prompts(title, description, positive_prompt, negative_prompt, group_name, group_id, status, created_at, updated_at) VALUES(?,?,?,?,?,?,?,'pending',?,?)`,
+			title, entry.Desc, entry.Positive, entry.Negative, groupName, groupID, now, now); err != nil {
 			continue
 		}
 		inserted++
@@ -173,6 +175,15 @@ func sanitizeJSONGroupName(name string) string {
 func parseEntries(content []byte) ([]jsonEntry, error) {
 	var doc jsonDocument
 	if err := json.Unmarshal(content, &doc); err == nil && doc.Entries != nil {
+		// 全局 negative 兜底：逐条没写 negative 的用文档级 negative 填充；
+		// 仍为空则留空，提交时自动回落到所属工作流的静态负面（见 comfyui.go）。
+		if strings.TrimSpace(doc.Negative) != "" {
+			for i := range doc.Entries {
+				if strings.TrimSpace(doc.Entries[i].Negative) == "" {
+					doc.Entries[i].Negative = doc.Negative
+				}
+			}
+		}
 		return validateEntries(doc.Entries)
 	}
 	var entries []jsonEntry

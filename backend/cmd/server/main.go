@@ -417,6 +417,10 @@ VALUES ('comfyui_url', ?, CURRENT_TIMESTAMP);
 		`ALTER TABLE images ADD COLUMN source_platform TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE images ADD COLUMN image_hash TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE prompts ADD COLUMN source_platform TEXT NOT NULL DEFAULT ''`,
+		// 按条负面词：正面能独立，负面也要能独立。空串=沿用所属工作流的静态负面（见 comfyui.go 提交处）。
+		// prompts 存资产级负面（提示词库/JSON 导入落这里），generation_items 存这条实际提交的负面（回显/单条微调）。
+		`ALTER TABLE prompts ADD COLUMN negative_prompt TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE generation_items ADD COLUMN negative_prompt TEXT NOT NULL DEFAULT ''`,
 		// 索引单独执行：上面这批 ALTER 失败会被静默忽略，索引不能跟着一起吞错
 		`CREATE INDEX IF NOT EXISTS idx_images_platform ON images(source_platform)`,
 		`CREATE INDEX IF NOT EXISTS idx_images_hash ON images(image_hash)`,

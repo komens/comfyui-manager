@@ -10,6 +10,7 @@ const router = useRouter()
 const title = ref('')
 const description = ref('')
 const positive = ref('')
+const negative = ref('')
 const groupName = ref('')
 const groups = ref<{ group_name: string }[]>([])
 const busy = ref(false)
@@ -30,6 +31,7 @@ async function load() {
     title.value = p.title
     description.value = p.description
     positive.value = p.positive_prompt
+    negative.value = p.negative_prompt ?? ''
     groupName.value = p.group_name
   }
 }
@@ -46,6 +48,7 @@ async function save() {
       title: title.value,
       description: description.value,
       positive_prompt: positive.value,
+      negative_prompt: negative.value,
       group_name: groupName.value,
     })
     if (isEdit.value) {
@@ -103,6 +106,10 @@ onMounted(() => {
       <div class="form-group">
         <label for="p-positive">正面提示词</label>
         <textarea id="p-positive" v-model="positive" rows="10" placeholder="描述你想要生成的图像内容..." />
+      </div>
+      <div class="form-group">
+        <label for="p-negative">负面提示词 <span class="text-xs muted">(可选)</span></label>
+        <textarea id="p-negative" v-model="negative" rows="4" placeholder="描述你想要避免的内容；提交时若为空则使用所属工作流的默认负面" />
       </div>
       <div class="btn-group" style="margin-top:20px;">
         <button class="btn btn-primary" :disabled="busy || !positive.trim()" @click="save">

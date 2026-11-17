@@ -26,6 +26,7 @@ type PromptDetail = {
   title: string
   description: string
   positive_prompt: string
+  negative_prompt: string
   group_name: string
   status: string
   is_favorite: boolean
@@ -213,6 +214,10 @@ onUnmounted(() => setPolling(false))
         </div>
         <div v-if="prompt.description" class="text-sm muted detail-desc">{{ prompt.description }}</div>
         <div class="prompt-box">{{ prompt.positive_prompt }}</div>
+        <template v-if="prompt.negative_prompt">
+          <div class="prompt-sub-label">负面提示词</div>
+          <div class="prompt-box prompt-box-neg">{{ prompt.negative_prompt }}</div>
+        </template>
       </div>
     </div>
 
@@ -299,6 +304,8 @@ onUnmounted(() => setPolling(false))
 .detail-actions { display: flex; gap: 8px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
 .detail-desc { margin-bottom: 12px; }
 .prompt-box { background: var(--c-bg-subtle); border: 1px solid var(--c-border); border-radius: 8px; padding: 14px; font-size: 14px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; }
+.prompt-sub-label { margin: 14px 0 6px; font-size: 12px; font-weight: 600; color: var(--c-text-muted, #888); letter-spacing: .04em; }
+.prompt-box-neg { color: var(--c-text-muted, #666); }
 .btn-danger { color: var(--c-danger); }
 .run-item { padding: 14px; margin-bottom: 12px; }
 .run-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }

@@ -23,6 +23,7 @@ var (
 type directTaskInput struct {
 	WorkflowID     int64          `json:"workflow_id"`
 	PositivePrompt string         `json:"positive_prompt"`
+	NegativePrompt string         `json:"negative_prompt"`
 	Title          string         `json:"title"`
 	Parameters     map[string]any `json:"parameters"`
 }
@@ -56,8 +57,8 @@ func (a *app) createDirectTask(w http.ResponseWriter, r *http.Request) {
 	}
 	// 单条提示词同样入库到 prompts 表（group_name 为手动提交）
 	promptResult, err := tx.ExecContext(r.Context(),
-		`INSERT INTO prompts(title, description, positive_prompt, group_name, group_id, status, created_at, updated_at) VALUES(?, '', ?, '手动提交', 'manual', 'running', ?, ?)`,
-		title, input.PositivePrompt, now, now)
+		`INSERT INTO prompts(title, description, positive_prompt, negative_prompt, group_name, group_id, status, created_at, updated_at) VALUES(?, '', ?, ?, '手动提交', 'manual', 'running', ?, ?)`,
+		title, input.PositivePrompt, input.NegativePrompt, now, now)
 	if err != nil {
 		_ = tx.Rollback()
 		writeError(w, http.StatusInternalServerError, "create prompt failed")
@@ -74,8 +75,8 @@ func (a *app) createDirectTask(w http.ResponseWriter, r *http.Request) {
 	}
 	taskID, _ := result.LastInsertId()
 	_, err = tx.ExecContext(r.Context(),
-		`INSERT INTO generation_items(task_id, prompt_id, positive_prompt, status) VALUES(?,?,?,'pending')`,
-		taskID, promptID, input.PositivePrompt)
+		`INSERT INTO generation_items(task_id, prompt_id, positive_prompt, negative_prompt, status) VALUES(?,?,?,?,'pending')`,
+		taskID, promptID, input.PositivePrompt, input.NegativePrompt)
 	if err != nil {
 		_ = tx.Rollback()
 		writeError(w, http.StatusInternalServerError, "create task item failed")
@@ -222,16 +223,24 @@ func (a *app) getTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items := make([]map[string]any, 0)
-	rows, rowsErr := a.db.QueryContext(r.Context(), `SELECT id, prompt_id, positive_prompt, COALESCE(comfy_prompt_id,''), status, error_message, COALESCE(notes,'') FROM generation_items WHERE task_id=? ORDER BY id`, id)
+	// 回显「本条实际用的负面」：item 自带非空优先，否则回落工作流静态负面。
+	// TRIM 与提交侧 resolveEffectiveNegative 的判空保持一致：纯空白的 item 负面提交时
+	// 会回落到工作流，列表里就不该再显示一个空的「负面」块。
+	// 用 LEFT JOIN workflows：工作流被删后 item 仍要照常列出（见 workflow_name 冗余列的同一考量）。
+	rows, rowsErr := a.db.QueryContext(r.Context(), `SELECT i.id, i.prompt_id, i.positive_prompt, COALESCE(NULLIF(TRIM(i.negative_prompt),''), w.negative_prompt, ''), COALESCE(i.comfy_prompt_id,''), i.status, i.error_message, COALESCE(i.notes,'')
+		FROM generation_items i
+		JOIN generation_tasks t ON t.id=i.task_id
+		LEFT JOIN workflows w ON w.id=t.workflow_id
+		WHERE i.task_id=? ORDER BY i.id`, id)
 	if rowsErr == nil {
 		defer rows.Close()
 		for rows.Next() {
 			var itemID int
 			var promptID sql.NullInt64
-			var positive, promptIDStr, itemStatus, itemError, itemNotes string
-			if err := rows.Scan(&itemID, &promptID, &positive, &promptIDStr, &itemStatus, &itemError, &itemNotes); err == nil {
+			var positive, negative, promptIDStr, itemStatus, itemError, itemNotes string
+			if err := rows.Scan(&itemID, &promptID, &positive, &negative, &promptIDStr, &itemStatus, &itemError, &itemNotes); err == nil {
 				items = append(items, map[string]any{"id": itemID, "prompt_id": promptID.Int64,
-					"positive_prompt": positive, "comfy_prompt_id": promptIDStr,
+					"positive_prompt": positive, "negative_prompt": negative, "comfy_prompt_id": promptIDStr,
 					"status": itemStatus, "error_message": itemError, "notes": itemNotes})
 			}
 		}

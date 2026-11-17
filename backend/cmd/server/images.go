@@ -155,10 +155,14 @@ func (a *app) getImage(w http.ResponseWriter, r *http.Request) {
 	// 一次左连接取全：图片 → 任务项 → 任务 → 工作流（负向词），以及提示词（title / 正向词）。
 	// 用 LEFT JOIN 是因为直接提交/外部同步的图可能没有关联生成项，INNER JOIN 会整行丢失。
 	// 提示词关联有两条路径：本平台走 generation_items.prompt_id，外部同步走 images.prompt_id。
+	// ⚠️ 正负向必须按同一顺序回落（提示词 → 生成项 → 工作流）：外部同步图没有生成项，
+	// 只有提示词那一级能命中；若负向跳过提示词级，同一面板里就会出现「正向有、负向空」，
+	// 或者正向是新值、负向是旧值。提交侧的有效负面见 comfyui.go 的 resolveEffectiveNegative。
 	err = a.db.QueryRowContext(r.Context(),
 		`SELECT i.generation_item_id, i.filename, i.storage_path, i.is_favorite, i.created_at,
 		        COALESCE(NULLIF(i.prompt_id,0), gi.prompt_id, 0), COALESCE(p.title, ''),
-		        COALESCE(p.positive_prompt, gi.positive_prompt, ''), COALESCE(w.negative_prompt, ''),
+		        COALESCE(p.positive_prompt, gi.positive_prompt, ''),
+		        COALESCE(NULLIF(p.negative_prompt,''), NULLIF(TRIM(gi.negative_prompt),''), w.negative_prompt, ''),
 		        i.width, i.height, i.source_platform
 		 FROM images i
 		 LEFT JOIN generation_items gi ON gi.id = i.generation_item_id AND i.generation_item_id > 0

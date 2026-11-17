@@ -43,20 +43,20 @@
 ### POST /api/tasks/direct
 
 ```json
-// 请求
-{"workflow_id":7,"positive_prompt":"a lone lighthouse at sunset, cinematic lighting","title":"海边日落"}
+// 请求（negative_prompt 可选：非空则本次用它，留空回落到工作流默认负面）
+{"workflow_id":7,"positive_prompt":"a lone lighthouse at sunset, cinematic lighting","negative_prompt":"lowres, bad anatomy","title":"海边日落"}
 // 202
 {"id":101,"prompt_id":55,"status":"pending","comfyui_url":"http://192.168.1.20:8188"}
 ```
 
-`workflow_id`、`positive_prompt` 必填；`title` 可省（默认取提示词前 50 字）。
+`workflow_id`、`positive_prompt` 必填；`negative_prompt`、`title` 可省（标题默认取提示词前 50 字；负面留空则用工作流的 `negative_prompt`）。
 **任务 id 在 `id` 字段，不是 `task_id`。**
 
 ### GET /api/tasks/{id}
 
 ```json
 {"id":101,"status":"completed","total_count":1,"success_count":1,"failed_count":0,"created_at":"2026-11-05T14:30:00+08:00",
- "items":[{"id":88,"prompt_id":55,"positive_prompt":"a lone lighthouse...","status":"success","error_message":"","notes":"",
+ "items":[{"id":88,"prompt_id":55,"positive_prompt":"a lone lighthouse...","negative_prompt":"lowres, bad anatomy","status":"success","error_message":"","notes":"",
            "images":[{"id":301,"filename":"ComfyUI_00001_.png","width":832,"height":1216}]}]}
 ```
 
@@ -64,6 +64,7 @@
 条目状态：`pending` → `running` → `submitted` → `success` / `failed`
 成功判定：`status=="completed" && success_count>=1 && items[].images` 非空。
 `items[].images` 可能为空数组（失败或尚未取回）。失败原因在 `items[].error_message`。
+`items[].negative_prompt` 是「有效负面」：本条自带非空优先，否则回落所属工作流的默认负面。
 
 ### POST /api/json-files/import-text
 
@@ -79,12 +80,12 @@
 | `content` | 是 | **字符串**，内容为 JSON，≤10 MiB。传数组本体 → 400 `invalid request body` |
 | `filename` | 否 | 决定 `group_name`：去扩展名、非法路径字符换成 `_`；缺省 `手动导入-年月日时分秒` |
 
-`content` 两种等价形态：`{"entries":[{...}]}` 或 `[{...}]`。条目：`positive`（必填）、`title`（缺省取 `positive` 前 50 字）、`desc`、`id`（仅自用）。
+`content` 两种等价形态：`{"entries":[{...}]}` 或 `[{...}]`。条目：`positive`（必填）、`negative`（可选）、`title`（缺省取 `positive` 前 50 字）、`desc`、`id`（仅自用）。
 
 - 任一 `positive` 空白 → 整批 400 `each entry requires a positive prompt`，不做部分导入
 - 空数组 → 400 `no entries found in JSON`
 - 去重键 `(group_name, positive)`，命中计入 `skipped_duplicates`；换 `filename` 即换组
-- 顶层无 `negative` 字段，写了被忽略
+- 对象形态可带顶层 `negative`：逐条没写 `negative` 时用它兜底（逐条已写的不覆盖）；数组形态无顶层字段
 - **不返回提示词 id**，验证走 `GET /api/prompts?group=`
 
 ### POST /api/prompts/group-run
@@ -157,6 +158,6 @@
 |---|---|
 | `parameters` | 所有接口里传了都不生效，不要依赖 |
 | 种子 | 每次随机，同提示词出图不同属正常 |
-| 负向提示词 | 只取工作流的 `negative_prompt`，调用方不能逐次指定 |
+| 负向提示词 | 三级：直提 body / 提示词记录自带优先，留空回落工作流 `negative_prompt`；`negative_shared` 工作流不生效 |
 | 并发 | 服务端串行消化队列，交 20 条 ≠ 同时跑 20 张 |
 | 无鉴权 | 不要暴露公网 |

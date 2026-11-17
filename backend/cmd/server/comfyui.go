@@ -249,7 +249,7 @@ func (a *app) submitter() {
 			a.log.Printf("submitter: read comfyui_url failed, skip this round: %v", err)
 			continue
 		}
-		rows, err := a.db.Query(`SELECT i.id, i.task_id, i.positive_prompt, t.parameters_json, w.workflow_path, w.mapping_json, COALESCE(w.negative_prompt,'')
+		rows, err := a.db.Query(`SELECT i.id, i.task_id, i.positive_prompt, COALESCE(i.negative_prompt,''), t.parameters_json, w.workflow_path, w.mapping_json, COALESCE(w.negative_prompt,'')
 			FROM generation_items i
 			JOIN generation_tasks t ON t.id=i.task_id
 			JOIN workflows w ON w.id=t.workflow_id
@@ -260,26 +260,40 @@ func (a *app) submitter() {
 			continue
 		}
 		type pendingItem struct {
-			ItemID         int64
-			TaskID         int64
-			Positive       string
-			Parameters     string
-			WorkflowPath   string
-			MappingJSON    string
-			NegativePrompt string
+			ItemID           int64
+			TaskID           int64
+			Positive         string
+			ItemNegative     string
+			Parameters       string
+			WorkflowPath     string
+			MappingJSON      string
+			WorkflowNegative string
 		}
 		var items []pendingItem
 		for rows.Next() {
 			var p pendingItem
-			if err := rows.Scan(&p.ItemID, &p.TaskID, &p.Positive, &p.Parameters, &p.WorkflowPath, &p.MappingJSON, &p.NegativePrompt); err == nil {
+			if err := rows.Scan(&p.ItemID, &p.TaskID, &p.Positive, &p.ItemNegative, &p.Parameters, &p.WorkflowPath, &p.MappingJSON, &p.WorkflowNegative); err == nil {
 				items = append(items, p)
 			}
 		}
 		rows.Close()
 		for _, p := range items {
-			a.submitItem(p.ItemID, p.TaskID, p.Positive, comfyURL, p.Parameters, p.WorkflowPath, p.MappingJSON, p.NegativePrompt)
+			negative := resolveEffectiveNegative(p.ItemNegative, p.WorkflowNegative)
+			a.submitItem(p.ItemID, p.TaskID, p.Positive, comfyURL, p.Parameters, p.WorkflowPath, p.MappingJSON, negative)
 		}
 	}
+}
+
+// resolveEffectiveNegative 计算本条提交实际生效的负面词。
+//
+// 本条自带（prompts / generation_items 的 negative_prompt）非空 → 用它，支持按图换负面；
+// 自带为空 → 回落到工作流静态负面列。后者是既有约定：injectDirectPrompt 里「negative
+// 传空 = 保留工作流自带负向」，老工作流零行为变化，不要改成清空。
+func resolveEffectiveNegative(itemNegative, workflowNegative string) string {
+	if strings.TrimSpace(itemNegative) == "" {
+		return workflowNegative
+	}
+	return itemNegative
 }
 
 // submitItem 提交单个 item 到 ComfyUI
@@ -319,6 +333,10 @@ func (a *app) submitItem(itemID, taskID int64, positive, baseURL, parameters, wo
 		a.failItem(itemID, taskID, fmt.Sprintf("parse parameters failed: %v", err))
 		return
 	}
+	// 正负向都以 generation_items 的列为准：parameters_json 是建任务时的快照副本，
+	// 而任务详情 / 图片详情展示的是 item 列。只读 parameters_json 会让「页面上看到的正向」
+	// 和「实际提交的正向」靠巧合保持一致；负面本来就走 item 列，两列同源才不会各说各话。
+	input["positive_prompt"] = positive
 	input["negative_prompt"] = negativePrompt
 	if err := injectDirectPrompt(workflow, mappingJSON, input); err != nil {
 		a.failItem(itemID, taskID, fmt.Sprintf("inject prompt failed: %v", err))

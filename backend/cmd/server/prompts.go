@@ -14,10 +14,11 @@ import (
 var errPromptNotFound = errors.New("prompt not found")
 
 type promptInput struct {
-	Title          string `json:"title"`
-	Description    string `json:"description"`
-	PositivePrompt string `json:"positive_prompt"`
-	GroupName      string `json:"group_name"`
+	Title          string  `json:"title"`
+	Description    string  `json:"description"`
+	PositivePrompt string  `json:"positive_prompt"`
+	NegativePrompt *string `json:"negative_prompt"`
+	GroupName      string  `json:"group_name"`
 }
 
 func (a *app) listPrompts(w http.ResponseWriter, r *http.Request) {
@@ -113,9 +114,10 @@ func (a *app) createPrompt(w http.ResponseWriter, r *http.Request) {
 		groupID = slugify(input.GroupName)
 	}
 	now := time.Now()
+	// 新建没有「原值」，nil（未提供）直接落空串，与旧行为一致。
 	result, err := a.db.ExecContext(r.Context(),
-		`INSERT INTO prompts(title, description, positive_prompt, group_name, group_id, status, created_at, updated_at) VALUES(?,?,?,?,?,'pending',?,?)`,
-		input.Title, input.Description, input.PositivePrompt, input.GroupName, groupID, now, now)
+		`INSERT INTO prompts(title, description, positive_prompt, negative_prompt, group_name, group_id, status, created_at, updated_at) VALUES(?,?,?,?,?,?,'pending',?,?)`,
+		input.Title, input.Description, input.PositivePrompt, strOrFallback(input.NegativePrompt, ""), input.GroupName, groupID, now, now)
 	if err != nil {
 		writeError(w, 500, "create prompt failed")
 		return
@@ -130,13 +132,13 @@ func (a *app) getPrompt(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid prompt id")
 		return
 	}
-	var title, desc, positive, groupName, groupID, status, platform string
+	var title, desc, positive, negative, groupName, groupID, status, platform string
 	var isFav int
 	var completedAt sql.NullString
 	var createdAt, updatedAt string
 	err = a.db.QueryRowContext(r.Context(),
-		`SELECT title, description, positive_prompt, group_name, group_id, status, is_favorite, completed_at, created_at, updated_at, source_platform FROM prompts WHERE id=?`, id).
-		Scan(&title, &desc, &positive, &groupName, &groupID, &status, &isFav, &completedAt, &createdAt, &updatedAt, &platform)
+		`SELECT title, description, positive_prompt, COALESCE(negative_prompt,''), group_name, group_id, status, is_favorite, completed_at, created_at, updated_at, source_platform FROM prompts WHERE id=?`, id).
+		Scan(&title, &desc, &positive, &negative, &groupName, &groupID, &status, &isFav, &completedAt, &createdAt, &updatedAt, &platform)
 	if err != nil {
 		writeError(w, 404, "prompt not found")
 		return
@@ -192,7 +194,7 @@ func (a *app) getPrompt(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, 200, map[string]any{
-		"id": id, "title": title, "description": desc, "positive_prompt": positive,
+		"id": id, "title": title, "description": desc, "positive_prompt": positive, "negative_prompt": negative,
 		"group_name": groupName, "group_id": groupID, "status": status, "is_favorite": isFav == 1,
 		"completed_at": completedAt.String, "created_at": createdAt, "updated_at": updatedAt, "runs": runs,
 		"source_platform": platform, "external_images": externalImages,
@@ -210,8 +212,8 @@ func (a *app) updatePrompt(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid JSON body")
 		return
 	}
-	var oldTitle, oldDesc, oldPositive, oldGroupName, oldGroupID string
-	err = a.db.QueryRowContext(r.Context(), `SELECT title, description, positive_prompt, group_name, group_id FROM prompts WHERE id=?`, id).Scan(&oldTitle, &oldDesc, &oldPositive, &oldGroupName, &oldGroupID)
+	var oldTitle, oldDesc, oldPositive, oldNegative, oldGroupName, oldGroupID string
+	err = a.db.QueryRowContext(r.Context(), `SELECT title, description, positive_prompt, COALESCE(negative_prompt,''), group_name, group_id FROM prompts WHERE id=?`, id).Scan(&oldTitle, &oldDesc, &oldPositive, &oldNegative, &oldGroupName, &oldGroupID)
 	if err != nil {
 		writeError(w, 404, "prompt not found")
 		return
@@ -228,6 +230,11 @@ func (a *app) updatePrompt(w http.ResponseWriter, r *http.Request) {
 	if positive == "" {
 		positive = oldPositive
 	}
+	// negative 用指针区分「没传这个字段」和「传了空串」：nil=保持原值，""=清空，有值=改。
+	// 这与 workflows.go 的 negative_prompt 同一套约定（strOrFallback）。前端编辑表单
+	// 恒定带 negative_prompt 键，所以「清空文本框再保存」能真正清掉——清成空串后，
+	// 提交时 resolveEffectiveNegative 会回落到所属工作流的默认负面，语义自洽。
+	negative := strOrFallback(input.NegativePrompt, oldNegative)
 	groupName := input.GroupName
 	if groupName == "" {
 		groupName = oldGroupName
@@ -242,8 +249,8 @@ func (a *app) updatePrompt(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	_, err = a.db.ExecContext(r.Context(),
-		`UPDATE prompts SET title=?, description=?, positive_prompt=?, group_name=?, group_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
-		title, desc, positive, groupName, groupID, id)
+		`UPDATE prompts SET title=?, description=?, positive_prompt=?, negative_prompt=?, group_name=?, group_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+		title, desc, positive, negative, groupName, groupID, id)
 	if err != nil {
 		writeError(w, 500, "update prompt failed")
 		return
@@ -312,8 +319,8 @@ func (a *app) runPrompt(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "workflow_id is required")
 		return
 	}
-	var positive string
-	if err := a.db.QueryRowContext(r.Context(), `SELECT positive_prompt FROM prompts WHERE id=?`, id).Scan(&positive); err != nil {
+	var positive, negative string
+	if err := a.db.QueryRowContext(r.Context(), `SELECT positive_prompt, COALESCE(negative_prompt,'') FROM prompts WHERE id=?`, id).Scan(&positive, &negative); err != nil {
 		writeError(w, 404, "prompt not found")
 		return
 	}
@@ -339,7 +346,7 @@ func (a *app) runPrompt(w http.ResponseWriter, r *http.Request) {
 	}
 	taskID, _ := result.LastInsertId()
 	_, err = tx.ExecContext(r.Context(),
-		`INSERT INTO generation_items(task_id, prompt_id, positive_prompt, status) VALUES(?,?,?,'pending')`, taskID, id, positive)
+		`INSERT INTO generation_items(task_id, prompt_id, positive_prompt, negative_prompt, status) VALUES(?,?,?,?, 'pending')`, taskID, id, positive, negative)
 	if err != nil {
 		_ = tx.Rollback()
 		writeError(w, 500, "create task item failed")
@@ -439,8 +446,8 @@ func (a *app) batchRunPrompts(w http.ResponseWriter, r *http.Request) {
 	}
 	created := 0
 	for _, id := range input.IDs {
-		var positive string
-		if err := a.db.QueryRowContext(r.Context(), `SELECT positive_prompt FROM prompts WHERE id=?`, id).Scan(&positive); err != nil {
+		var positive, negative string
+		if err := a.db.QueryRowContext(r.Context(), `SELECT positive_prompt, COALESCE(negative_prompt,'') FROM prompts WHERE id=?`, id).Scan(&positive, &negative); err != nil {
 			continue
 		}
 		parameters, _ := json.Marshal(map[string]any{"positive_prompt": positive, "parameters": input.Parameters})
@@ -458,7 +465,7 @@ func (a *app) batchRunPrompts(w http.ResponseWriter, r *http.Request) {
 		}
 		taskID, _ := result.LastInsertId()
 		_, _ = tx.ExecContext(r.Context(),
-			`INSERT INTO generation_items(task_id, prompt_id, positive_prompt, status) VALUES(?,?,?,'pending')`, taskID, id, positive)
+			`INSERT INTO generation_items(task_id, prompt_id, positive_prompt, negative_prompt, status) VALUES(?,?,?,?,'pending')`, taskID, id, positive, negative)
 		_, _ = tx.ExecContext(r.Context(), `UPDATE prompts SET status='running', updated_at=CURRENT_TIMESTAMP WHERE id=?`, id)
 		_ = tx.Commit()
 		created++
@@ -481,7 +488,7 @@ func (a *app) groupRunPrompts(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "read ComfyUI URL failed")
 		return
 	}
-	rows, err := a.db.QueryContext(r.Context(), `SELECT id, positive_prompt FROM prompts WHERE group_name=? AND status IN ('pending','failed')`, input.GroupName)
+	rows, err := a.db.QueryContext(r.Context(), `SELECT id, positive_prompt, COALESCE(negative_prompt,'') FROM prompts WHERE group_name=? AND status IN ('pending','failed')`, input.GroupName)
 	if err != nil {
 		writeError(w, 500, "query group prompts failed")
 		return
@@ -489,11 +496,12 @@ func (a *app) groupRunPrompts(w http.ResponseWriter, r *http.Request) {
 	type item struct {
 		id       int64
 		positive string
+		negative string
 	}
 	var items []item
 	for rows.Next() {
 		var it item
-		if err := rows.Scan(&it.id, &it.positive); err == nil {
+		if err := rows.Scan(&it.id, &it.positive, &it.negative); err == nil {
 			items = append(items, it)
 		}
 	}
@@ -522,7 +530,7 @@ func (a *app) groupRunPrompts(w http.ResponseWriter, r *http.Request) {
 		}
 		taskID, _ := result.LastInsertId()
 		_, _ = tx.ExecContext(r.Context(),
-			`INSERT INTO generation_items(task_id, prompt_id, positive_prompt, status) VALUES(?,?,?,'pending')`, taskID, it.id, it.positive)
+			`INSERT INTO generation_items(task_id, prompt_id, positive_prompt, negative_prompt, status) VALUES(?,?,?,?,'pending')`, taskID, it.id, it.positive, it.negative)
 		_, _ = tx.ExecContext(r.Context(), `UPDATE prompts SET status='running', updated_at=CURRENT_TIMESTAMP WHERE id=?`, it.id)
 		_ = tx.Commit()
 		created++

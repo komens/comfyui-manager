@@ -3,7 +3,7 @@
 > 后端：Go（`net/http` + `modernc.org/sqlite`）｜前端：Vue 3
 > 文档基于源码逐字段核对（`backend/cmd/server/`），共 **75 个接口**（72 个常驻 + 3 个仅 `DEBUG` 开启时注册）。
 > 其中脚本运行台的 9 个接口仅在 `ENABLE_SCRIPTS=1` 时注册，关闭时一律 404。
-> 最后更新：2026-10-22
+> 最后更新：2026-11-17（负面提示词改为支持每条自带 + 「本条优先、空则回落工作流」的三级优先级）
 
 ---
 
@@ -132,15 +132,15 @@ curl -s -X POST $BASE/api/workflows \
 # 2) 查看自动识别出的提示词落点与候选节点
 curl -s $BASE/api/workflows/8/prompt-targets
 
-# 3) 设置负向提示词（可选，存在 workflow 上）
+# 3) 设置工作流的默认负面提示词（本条不写负面时的回落值，可选）
 curl -s -X PUT $BASE/api/workflows/8 \
   -H 'Content-Type: application/json' \
   -d '{"negative_prompt":"worst quality, blurry"}'
 
-# 4) 直接提交一条提示词
+# 4) 直接提交一条提示词（可带本条专属负面；省略则回落到上面那份工作流负面）
 curl -s -X POST $BASE/api/tasks/direct \
   -H 'Content-Type: application/json' \
-  -d '{"workflow_id":8,"positive_prompt":"a cat, cinematic lighting"}'
+  -d '{"workflow_id":8,"positive_prompt":"a cat, cinematic lighting","negative_prompt":"extra fingers, watermark"}'
 # → 202 {"id":11,"prompt_id":9,"status":"pending","comfyui_url":"http://127.0.0.1:8188"}
 
 # 5) 查询任务（含每个 item 的状态与结果图）
@@ -1036,11 +1036,13 @@ POST /api/tasks/direct
 |---|---|---|---|
 | `workflow_id` | int64 | 是 | 必须是存在且启用的工作流 |
 | `positive_prompt` | string | 是 | 正向提示词，去空格后不能为空 |
+| `negative_prompt` | string | 否 | 本条负面提示词。**非空**则本次提交用它；**留空**回落到工作流的 `negative_prompt`。该值会同时存入本次的 `prompts`（「手动提交」分组）与 `generation_items` |
 | `title` | string | 否 | 标题；省略时自动取正向提示词前 50 个字符 |
 | `parameters` | object | 否 | 透传参数，原样存入任务记录 |
 
-> ⚠️ 由于请求体拒绝未知字段，**不要传 `negative_prompt`**——它不在结构体里，会导致整个请求解析失败并返回
-> `workflow_id and positive_prompt are required`。负向提示词配置在**工作流**上。
+> 负面优先级统一规则见 [13.2 提示词与负向](#132-提示词与负向)：**本条非空 → 用它，空 → 回落工作流**。
+> 对没有独立负面框的工作流（负向由正向 `ConditioningZeroOut` 派生，`negative_shared: true`），传了也不会生效——
+> 注入逻辑会安全跳过、不会覆盖正向、不报错。
 
 **响应 202**
 
@@ -1163,6 +1165,7 @@ GET /api/tasks/{id}
 | `id` | int | item id |
 | `prompt_id` | int64 | 关联提示词 id，无关联为 0 |
 | `positive_prompt` | string | 正向提示词 |
+| `negative_prompt` | string | 本条实际使用的负面：item 自带非空优先，否则回落工作流静态负面（LEFT JOIN，工作流已删除时为空串） |
 | `comfy_prompt_id` | string | ComfyUI 返回的 prompt id，未提交时为空串 |
 | `status` | string | item 状态 |
 | `error_message` | string | 失败原因 |
@@ -1382,6 +1385,7 @@ POST /api/prompts
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `positive_prompt` | string | 是 | 正向提示词 |
+| `negative_prompt` | string | 否 | 本条自带的负面提示词；不传或传空串按空存入（提交时回落到所属工作流的负面）。更新的清空语义见 [7.5](#75-更新提示词) |
 | `title` | string | 否 | 省略时自动取正向提示词前 50 个字符 |
 | `description` | string | 否 | |
 | `group_name` | string | 否 | 分组名，决定 `group_id` |
@@ -1439,6 +1443,7 @@ GET /api/prompts/{id}
 | `title` | string | |
 | `description` | string | |
 | `positive_prompt` | string | |
+| `negative_prompt` | string | 本条自带的负面；空串表示「跟随工作流」。**注意列表接口 `7.1` 不返回该字段**，要看负面须走详情 |
 | `group_name` / `group_id` | string | |
 | `status` | string | |
 | `is_favorite` | bool | |
@@ -1472,9 +1477,12 @@ GET /api/prompts/{id}
 PUT /api/prompts/{id}
 ```
 
-**请求体**：同 7.2。
+**请求体**：字段同 [7.2](#72-新建提示词)。
 
-> 各字段**传空串表示保留原值**（不清空）。
+> - `title` / `description` / `positive_prompt` / `group_name`：传空串表示**保留原值**（不清空）。
+> - `negative_prompt` 用指针区分「没传」与「传空」，与工作流接口同一套约定：
+>   **不传该字段 → 保留原值；传空串 `""` → 清空**（清空后提交时回落到工作流静态负面）；传非空 → 改成新值。
+>   前端编辑表单恒定带上 `negative_prompt` 键，所以「清空负面框再保存」能真正清掉。
 
 **响应 200**
 
@@ -1637,6 +1645,8 @@ POST /api/prompts/{id}/run
 | 404 | 提示词不存在 | `prompt not found` |
 | 500 | 创建失败 | `read ComfyUI URL failed` / `create task failed` / `create task item failed` / `commit task failed` |
 
+> `7.9` / `7.10` / `7.11` 三个运行接口都**不接收** body 里的负面词：它们读取提示词记录自带的 `negative_prompt`，逐条写入各自的 `generation_items`，提交时再按「本条优先、空则回落工作流」生效（见 [13.2](#132-提示词与负向)）。
+
 ---
 
 ## 8. JSON 导入接口
@@ -1646,19 +1656,22 @@ POST /api/prompts/{id}/run
 支持两种等价写法：
 
 ```json
-{ "entries": [ { "id": "1", "title": "标题", "desc": "描述", "positive": "提示词" } ] }
+{ "negative": "全局兜底负面(可选)", "entries": [ { "id": "1", "title": "标题", "desc": "描述", "positive": "提示词", "negative": "本条负面" } ] }
 ```
 
 ```json
-[ { "id": "1", "title": "标题", "desc": "描述", "positive": "提示词" } ]
+[ { "id": "1", "title": "标题", "desc": "描述", "positive": "提示词", "negative": "本条负面" } ]
 ```
 
 | 字段 | 必填 | 说明 |
 |---|---|---|
 | `positive` | 是 | 正向提示词，不能为空 |
+| `negative` | 否 | 本条负面提示词；逐条为空时可由**文档级 `negative`** 兜底（仅「对象 + entries」形态有，数组形态没有） |
 | `title` | 否 | 省略时取正向提示词前 50 个字符 |
 | `desc` | 否 | 描述 |
 | `id` | 否 | 仅用于文件内部去重 |
+
+> 顶层 `negative` 只在「对象 + `entries`」形态下生效：逐条 `negative` 为空时用它填充，**已写的逐条不被覆盖**；纯空白的顶层值视为缺省。填充结果连同提示词一起存入 `prompts.negative_prompt`，提交时仍按「本条优先、空则回落工作流」生效（见 [13.2](#132-提示词与负向)）。
 
 **关键行为**：
 
@@ -1876,7 +1889,7 @@ GET /api/images/{id}
 | `filename` | string | 展示名 |
 | `storage_path` | string | 真实路径 |
 | `positive_prompt` | string | 生成时使用的正向提示词；外部同步图取所属提示词的内容 |
-| `negative_prompt` | string | 工作流上的负向提示词（外部同步图为空串） |
+| `negative_prompt` | string | 本条实际使用的负面，与 `positive_prompt` **同序回落**：提示词自带 → 生成项自带 → 工作流静态负面。外部同步图没有生成项，取所属提示词的负面 |
 | `is_favorite` | bool | |
 | `created_at` | string | |
 | `prompt_id` | int | 无关联为 0 |
@@ -2627,8 +2640,20 @@ Content-Type: multipart/form-data
 
 **提示词与负向**
 
-- 负向提示词配置在**工作流**上，不在提交接口里。同一个工作流的所有任务共用同一份负向。
-- 部分工作流的负向由正向派生（`negative_shared: true`），此时负向不会生效，接口会明确提示。
+负面提示词有**三级**，提交时取一个「有效负面」写进工作流的负向落点：
+
+1. **本条自带**（`generation_items.negative_prompt`）非空 → 用它。来源可以是直提 body 的 `negative_prompt`，或提示词记录（`POST/PUT /api/prompts`、JSON 导入）里存的负面。
+2. 本条为空 → 回落到**工作流静态负面**（`workflows.negative_prompt`）。
+3. 工作流的负向若由正向派生（`negative_shared: true`，没有独立负向文本框），两级都不会生效——注入逻辑安全跳过，不覆盖正向、不报错。
+
+要点：
+
+- 负面**每条独立**：同一工作流下不同图可用不同负面，互不串味；留空即沿用工作流默认。老工作流（所有历史 item 的负面为空）行为与改动前完全一致。
+- 列表接口 `GET /api/prompts` **不返回**负面；要看走详情 `GET /api/prompts/{id}`，或任务/图片详情的 `negative_prompt`（后两者回显的就是「有效负面」，与本条优先、空则回落工作流的规则一致）。
+- 运行类接口（`7.9`~`7.11`）从提示词记录自带负面生效，body 不接收负面。
+- 编辑清空：`PUT /api/prompts/{id}` 的 `negative_prompt` 传空串即清空，不传该字段则保留原值（见 [7.5](#75-更新提示词)）。
+- **无法显式关掉负面**：清空提示词 / item 的负面只会让它回落到工作流负面。工作流负面非空时，没有任何接口能为某一条图单独提交「空负面」，这是 `injectDirectPrompt` 的既有约定（空 = 保留工作流自带负向），不要当成 bug 去改成清空。
+- **导出是有效值快照**：`GET /api/export` 里的 `negative_prompt` 是导出那一刻的**有效值**（提示词自带优先，为空则折进关联工作流的负面），导入后变成提示词自带值。这样备份还原后行为可复现；代价是还原出来的提示词不再跟随工作流的后续修改。一条提示词在多个工作流跑过且自身没写负面时，取其中一次的工作流负面（`LIMIT 1`，不保证每次导出相同）。
 
 **任务**
 

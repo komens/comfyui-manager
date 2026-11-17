@@ -85,8 +85,8 @@ func (a *app) exportData(w http.ResponseWriter, r *http.Request) {
 		promptCond = " WHERE " + strings.Join(promptWhere, " AND ")
 	}
 
-	// 查询 prompts
-	rows, err := a.db.Query(`SELECT p.id, COALESCE(p.title,''), COALESCE(p.description,''), COALESCE(p.positive_prompt,''), COALESCE((SELECT negative_prompt FROM workflows w JOIN generation_tasks t ON t.workflow_id=w.id JOIN generation_items i ON i.task_id=t.id WHERE i.prompt_id=p.id LIMIT 1),''), COALESCE(p.group_name,''), COALESCE(p.group_id,''), COALESCE(p.status,''), p.is_favorite, COALESCE(p.source_platform,'') FROM prompts p`+promptCond, promptArgs...)
+	// 查询 prompts：负面优先取提示词自带列，没有则回落到关联工作流的静态负面（保留旧导出行为）
+	rows, err := a.db.Query(`SELECT p.id, COALESCE(p.title,''), COALESCE(p.description,''), COALESCE(p.positive_prompt,''), COALESCE(NULLIF(p.negative_prompt,''),(SELECT negative_prompt FROM workflows w JOIN generation_tasks t ON t.workflow_id=w.id JOIN generation_items i ON i.task_id=t.id WHERE i.prompt_id=p.id LIMIT 1),''), COALESCE(p.group_name,''), COALESCE(p.group_id,''), COALESCE(p.status,''), p.is_favorite, COALESCE(p.source_platform,'') FROM prompts p`+promptCond, promptArgs...)
 	if err != nil {
 		writeError(w, 500, "query prompts failed")
 		return
@@ -279,8 +279,8 @@ func (a *app) importData(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// 插入新 prompt
-		res, err := tx.Exec(`INSERT INTO prompts(title, description, positive_prompt, group_name, group_id, status, is_favorite, source_platform, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
-			p.Title, p.Description, p.PositivePrompt, p.GroupName, p.GroupID, p.Status, boolToInt(p.IsFavorite), p.SourcePlatform)
+		res, err := tx.Exec(`INSERT INTO prompts(title, description, positive_prompt, negative_prompt, group_name, group_id, status, is_favorite, source_platform, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
+			p.Title, p.Description, p.PositivePrompt, p.NegativePrompt, p.GroupName, p.GroupID, p.Status, boolToInt(p.IsFavorite), p.SourcePlatform)
 		if err != nil {
 			skippedPrompts++
 			continue
