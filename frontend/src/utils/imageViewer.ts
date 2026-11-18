@@ -1,5 +1,6 @@
 // 统一图片查看器：基于 PhotoSwipe 5（双指缩放/滑动切换/键盘导航），
-// 底部挂自定义 caption：移动端默认摘要一行、点击展开，支持复制提示词、跳转来源、收藏/下载/删除。
+// 底部挂自定义 caption：默认只留一行摘要、点击展开，支持复制提示词、跳转来源、收藏/下载/删除。
+// 桌面端也是默认收起——此前桌面端默认铺开 50vh 提示词且隐藏了切换行，导致一打开就挡住图、还收不起来。
 import PhotoSwipeLightbox from 'photoswipe/lightbox'
 import PhotoSwipe from 'photoswipe'
 import 'photoswipe/style.css'
@@ -239,7 +240,12 @@ export async function openImageViewer(input: ViewerRef[], startIndex: number, cb
 
   const detailCache = new Map<number, ViewerDetail>()
   let mutated = false
-  let expanded = typeof window !== 'undefined' && window.innerWidth > 768
+  /**
+   * 详情区是否展开：所有端统一默认收起。
+   * 以前这里是 `window.innerWidth > 768`，桌面端一打开就把提示词铺满底部 50vh，
+   * 再叠加 CSS 里桌面端 `display:none` 掉了摘要行 —— 结果是既挡图又无法收起。
+   */
+  let expanded = false
 
   const lightbox = new PhotoSwipeLightbox({
     pswpModule: PhotoSwipe,
@@ -296,8 +302,14 @@ export async function openImageViewer(input: ViewerRef[], startIndex: number, cb
   let lastIndex = startIndex
   let renderSeq = 0
 
+  /** 收起态交给 CSS 处理：.ps-caption.is-collapsed 是底部一条窄信息条，不再是铺满的渐变遮罩 */
+  function syncCaptionState() {
+    captionEl?.classList.toggle('is-collapsed', !expanded)
+  }
+
   function renderCaption(detail: ViewerDetail | null, loading: boolean) {
     if (!captionEl) return
+    syncCaptionState()
     if (loading || !detail) {
       captionEl.innerHTML = `<div class="ps-caps-summary"><span class="ps-caps-spinner"></span>加载中…</div>`
       return
@@ -328,9 +340,9 @@ export async function openImageViewer(input: ViewerRef[], startIndex: number, cb
       </div>`
     captionEl.innerHTML = `
       <div class="ps-caps-summary" data-action="toggle">
-        <span>#${detail.id}</span>
+        <span class="ps-caps-id">#${detail.id}</span>
         <span class="ps-caps-dot">·</span>
-        <span>${escapeHtml(detail.prompt_id ? (detail.prompt_title || '未命名提示词') : '手动提交')}</span>
+        <span class="ps-caps-title">${escapeHtml(detail.prompt_id ? (detail.prompt_title || '未命名提示词') : '手动提交')}</span>
         <span class="ps-caps-caret">${expanded ? '▴ 收起' : '▾ 展开详情'}</span>
       </div>
       <div class="ps-caps-body" ${expanded ? '' : 'hidden'}>
@@ -387,10 +399,10 @@ export async function openImageViewer(input: ViewerRef[], startIndex: number, cb
     setFabTip(favBtn, fav ? '取消收藏' : '收藏')
   }
 
-  /** 已删除占位图的说明：不请求详情，也没什么可展开的 */
+  /** 已删除占位图的说明：不请求详情，也没什么可展开的，固定用一行窄条 */
   function renderDeletedCaption(id: number) {
     if (!captionEl) return
-    // 不能用 .ps-caps-summary：它在桌面端是 display:none（详情默认展开），会一行字都看不到
+    captionEl.classList.add('is-collapsed')
     captionEl.innerHTML = `<div class="ps-caps-deleted">#${id} · 这张图片已删除</div>`
   }
 

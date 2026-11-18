@@ -712,21 +712,63 @@ select.page-size-select {
   margin-top: 10px;
 }
 
+/* 收起态：底部只留一行摘要窄条，不再压一块渐变在图上。
+   摘要行在所有端都常驻（此前桌面端 display:none 掉了它，导致展不开也收不起）。 */
+.ps-caption.is-collapsed {
+  padding: 0;
+  max-height: none;
+  overflow: visible;
+  background: rgba(0, 0, 0, .62);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+}
+.ps-caption.is-collapsed .ps-caps-summary {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 10px 16px;
+  min-height: 38px;
+  box-sizing: border-box;
+}
+.ps-caption.is-collapsed .ps-caps-summary:hover .ps-caps-caret { color: #c7d2fe; }
+
+/* 展开态：顶部那行顺带做成「收起」胶囊，避免白字压在渐变的透明区上看不清 */
+.ps-caption:not(.is-collapsed) .ps-caps-summary {
+  display: inline-flex;
+  max-width: 100%;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, .42);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+
+/* 长标题在窄条里截断，别把「展开详情」挤出屏幕 */
+.ps-caps-id,
+.ps-caps-caret { flex-shrink: 0; }
+.ps-caps-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* 桌面端：展开区更宽，图片让位 */
 @media (min-width: 769px) {
   .ps-caption {
     padding: 40px 24px 16px;
     max-height: 50vh;
   }
-  .ps-caps-summary { display: none; }
 }
 @media (max-width: 768px) {
   .ps-caption { padding: 28px 12px 10px; }
   .ps-caps-text { max-height: 120px; }
+  .ps-caption.is-collapsed .ps-caps-summary { padding: 9px 12px; }
 }
 
-/* 已删除图片的占位说明（桌面端 .ps-caps-summary 是隐藏的，这里单独给一条） */
-.ps-caps-deleted {
+/* 已删除图片的占位说明：没有可展开的内容，固定一行 */
+.ps-caption.is-collapsed .ps-caps-deleted {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 10px 16px;
   font-size: 13px;
   color: rgba(255, 255, 255, .68);
   line-height: 1.6;
