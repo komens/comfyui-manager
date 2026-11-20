@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import ViewFeedback from '../components/ViewFeedback.vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import PageHeader from '../components/PageHeader.vue'
 import { api } from '../api/client'
-import { thumbUrl } from '../utils/imageUrls'
+import { previewUrl, thumbUrl } from '../utils/imageUrls'
 import type { CleanupPreview, CleanupStats, TrashBatch, Workflow } from '../api/client'
 
 /**
@@ -33,6 +34,10 @@ const minCount = ref(1)
 const filtersOpen = ref(['filters'])
 const previewing = ref(false)
 const preview = ref<CleanupPreview | null>(null)
+const previewImagesStart = ref<HTMLElement | null>(null)
+const previewPageError = ref('')
+const viewerIndex = ref<number | null>(null)
+let previewRequest: AbortController | undefined
 const running = ref(false)
 const error = ref('')
 const result = ref<any>(null)
@@ -150,36 +155,67 @@ onMounted(async () => {
   }
 })
 
-async function doPreview() {
+const previewImageUrls = computed(() => preview.value?.samples.map(image => previewUrl(image.id)) ?? [])
+const previewImageRange = computed(() => {
+  const data = preview.value
+  if (!data?.samples.length) return ''
+  const offset = (data.image_page - 1) * data.image_page_size
+  return `第 ${offset + 1}–${offset + data.samples.length} 张，共 ${data.stats.images} 张`
+})
+
+async function doPreview(page?: number) {
+  if (running.value) return
+  previewRequest?.abort()
+  const request = new AbortController()
+  previewRequest = request
   previewing.value = true
   error.value = ''
+  previewPageError.value = ''
   result.value = null
+  viewerIndex.value = null
+  if (page === undefined) preview.value = null
   try {
-    preview.value = await api<CleanupPreview>('/api/maintenance/preview', {
+    const data = await api<CleanupPreview>(`/api/maintenance/preview?image_page=${page ?? 1}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(buildFilter(false)),
+      signal: request.signal,
     })
+    if (request.signal.aborted) return
+    preview.value = data
+    if (page !== undefined) {
+      await nextTick()
+      if (!request.signal.aborted) previewImagesStart.value?.scrollIntoView({ block: 'start' })
+    }
   } catch (e) {
-    preview.value = null
-    error.value = e instanceof Error ? e.message : '预览失败'
+    if (request.signal.aborted) return
+    const message = e instanceof Error ? e.message : '预览失败'
+    if (page === undefined) error.value = message
+    else previewPageError.value = message
   } finally {
-    previewing.value = false
+    if (previewRequest === request) {
+      previewRequest = undefined
+      previewing.value = false
+    }
   }
 }
 
 // 任何条件变化都让旧预览失效：否则用户会拿着上一个条件的预览点删除。
 watch([target, dateRange, keyword, groupNames, workflowIds, status, includeFavorite, withPrompts, cascadeImages, minCount], () => {
+  previewRequest?.abort()
   preview.value = null
+  previewPageError.value = ''
+  viewerIndex.value = null
   result.value = null
 })
+onBeforeUnmount(() => previewRequest?.abort())
 
 /** 真正要删的主体数量，不是级联后的图片数。 */
 const primaryCount = computed(() => preview.value?.primary_count ?? 0)
-const canRun = computed(() => !!preview.value && primaryCount.value > 0 && !preview.value.blocked && !running.value)
+const canRun = computed(() => !!preview.value && primaryCount.value > 0 && !preview.value.blocked && !running.value && !previewing.value)
 
 async function doCleanup() {
-  if (!preview.value) return
+  if (!canRun.value) return
   const extra = includeFavorite.value
     ? '\n\n⚠ 你勾选了「包含收藏」，收藏内容也会被删除。'
     : ''
@@ -215,12 +251,17 @@ function resetFilters() {
   cascadeImages.value = false
 }
 
+const restoreMessage = ref('')
+
 async function restoreBatch(id: number) {
-  if (!window.confirm(`还原批次 #${id}？图片文件会移回图片目录。`)) return
+  if (!window.confirm(`还原批次 #${id}？图片会恢复到图库，仍存在的任务或提示词关联会一并恢复。`)) return
   busyTrash.value = id
   error.value = ''
   try {
-    await api(`/api/maintenance/trash/${id}/restore`, { method: 'POST' })
+    restoreMessage.value = ''
+    const result = await api<{ files_restored: number; files_skipped: number }>(`/api/maintenance/trash/${id}/restore`, { method: 'POST' })
+    restoreMessage.value = `已还原 ${result.files_restored} 张图片`
+    if (result.files_skipped > 0) restoreMessage.value += `，${result.files_skipped} 张还原失败，仍留在回收站`
     await Promise.all([loadStats(), loadTrash()])
   } catch (e) {
     error.value = e instanceof Error ? e.message : '还原失败'
@@ -289,7 +330,7 @@ function formatBytes(bytes: number) {
       description="按条件批量清理图片、任务与提示词。删除的图片会先进回收站，确认无误后再彻底清除。"
     />
 
-    <el-alert v-if="error" type="error" :closable="false" show-icon :title="error" />
+    <ViewFeedback kind="error" :message="error" />
     <el-alert v-if="result?.note" type="success" :closable="false" show-icon :title="result.note" />
 
     <!-- 数据概览 -->
@@ -320,7 +361,7 @@ function formatBytes(bytes: number) {
         </div>
         <p class="note">收藏图片 {{ stats.favorite_images }} 张、收藏提示词 {{ stats.favorite_prompts }} 条，永远不会被清理。</p>
         <div class="btn-row">
-          <el-button v-if="stats.orphan_files.length" size="small" @click="purgeOrphans">
+          <el-button v-if="stats.orphan_files?.length" size="small" @click="purgeOrphans">
             清理 {{ stats.orphan_files.length }} 个孤儿文件
           </el-button>
           <el-button size="small" @click="runVacuum">整理数据库（VACUUM）</el-button>
@@ -461,7 +502,7 @@ function formatBytes(bytes: number) {
             </div>
 
             <div class="filter-actions">
-              <el-button type="primary" :loading="previewing" @click="doPreview">
+              <el-button type="primary" :loading="previewing && !preview" :disabled="running || previewing" @click="doPreview()">
                 {{ previewing ? '统计中…' : '预览将删除的数据' }}
               </el-button>
               <el-button @click="resetFilters">重置条件</el-button>
@@ -490,7 +531,7 @@ function formatBytes(bytes: number) {
           </div>
           <div class="stat-tile">
             <span class="v">{{ preview.stats.items }}</span>
-            <span class="k">连带生成项</span>
+            <span class="k">{{ target === 'images' ? '关联生成项' : target === 'prompts' && !cascadeImages ? '解绑生成项' : '连带生成项' }}</span>
           </div>
           <div v-if="target === 'tasks'" class="stat-tile">
             <span class="v">{{ preview.stats.prompts }}</span>
@@ -506,31 +547,32 @@ function formatBytes(bytes: number) {
           </div>
         </div>
 
-        <el-collapse v-if="preview.samples.length" class="mt sample-collapse">
-          <el-collapse-item title="查看样本（最多 8 条）" name="samples">
-            <el-table :data="preview.samples" size="small" style="width: 100%">
-              <el-table-column label="预览" width="64">
-                <template #default="{ row }">
-                  <img
-                    class="sample-thumb"
-                    :src="thumbUrl(row.id)"
-                    :alt="row.filename"
-                    loading="lazy"
-                    @error="(e: Event) => (e.target as HTMLImageElement).style.visibility = 'hidden'"
-                  />
-                </template>
-              </el-table-column>
-              <el-table-column prop="id" label="ID" width="70" />
-              <el-table-column label="标题" show-overflow-tooltip>
-                <template #default="{ row }">{{ row.title || '（无关联提示词）' }}</template>
-              </el-table-column>
-              <el-table-column prop="filename" label="文件名" show-overflow-tooltip />
-              <el-table-column label="分组" width="180" show-overflow-tooltip>
-                <template #default="{ row }">{{ row.group || '—' }}</template>
-              </el-table-column>
-            </el-table>
+        <el-collapse v-if="preview.stats.images > 0" class="mt preview-collapse">
+          <el-collapse-item :title="`查看待删除图片（共 ${preview.stats.images} 张）`" name="images">
+            <div ref="previewImagesStart" class="preview-image-range" role="status">
+              {{ previewImageRange }}
+            </div>
+            <ViewFeedback kind="error" :message="previewPageError" />
+            <div class="preview-image-grid" :aria-busy="previewing">
+              <div v-for="(image, index) in preview.samples" :key="image.id" class="preview-image-tile">
+                <el-button class="preview-image-button" :aria-label="`放大图片 ${image.filename || `#${image.id}`}`"
+                  :disabled="previewing || running" @click="viewerIndex = index">
+                  <el-image class="preview-thumbnail" :src="thumbUrl(image.id)" :alt="image.filename" fit="contain" loading="lazy">
+                    <template #error><span class="preview-image-unavailable">图片不可用</span></template>
+                  </el-image>
+                </el-button>
+                <div class="preview-image-name" :title="[image.title, image.filename, image.group].filter(Boolean).join(' · ')">
+                  {{ image.filename || `#${image.id}` }}
+                </div>
+              </div>
+            </div>
+            <el-pagination v-if="preview.stats.images > preview.image_page_size" class="preview-pagination" small background
+              layout="prev, pager, next" :pager-count="5" :current-page="preview.image_page" :page-size="preview.image_page_size"
+              :total="preview.stats.images" :disabled="previewing || running" @update:current-page="doPreview" />
           </el-collapse-item>
         </el-collapse>
+        <el-image-viewer v-if="viewerIndex !== null" :url-list="previewImageUrls" :initial-index="viewerIndex"
+          :infinite="false" show-progress teleported hide-on-click-modal @close="viewerIndex = null" />
 
         <div v-if="result && !result.note" class="mt">
           <el-alert type="success" :closable="false" show-icon>
@@ -552,8 +594,9 @@ function formatBytes(bytes: number) {
     <!-- 回收站 -->
     <section class="card">
       <h2>回收站</h2>
+      <ViewFeedback :kind="restoreMessage.includes('失败') ? 'warning' : 'success'" :message="restoreMessage" />
       <div class="card-body">
-        <el-empty v-if="!trashBatches.length" description="回收站是空的" :image-size="64" />
+        <ViewFeedback v-if="!trashBatches.length" kind="empty" message="回收站是空的" />
         <el-table v-else :data="trashBatches" size="small" style="width: 100%">
           <el-table-column label="批次" width="80">
             <template #default="{ row }">#{{ row.id }}</template>
@@ -577,7 +620,7 @@ function formatBytes(bytes: number) {
             </template>
           </el-table-column>
         </el-table>
-        <p class="note">还原只会把图片文件移回图片目录；生成项已被级联删除，图片库条目不会自动重建。</p>
+        <p class="note">还原会把图片重新加入图库。旧批次缺少关联记录时，图片会以独立条目恢复。</p>
       </div>
     </section>
   </div>
@@ -794,22 +837,56 @@ function formatBytes(bytes: number) {
 .mt {
   margin-top: 14px;
 }
-.sample-thumb {
-  width: 44px;
-  height: 44px;
-  object-fit: cover;
-  border-radius: 6px;
-  border: 1px solid var(--c-border);
-  background: var(--c-bg-subtle);
-  display: block;
-}
-/* 样本折叠面板嵌在 .card-body 里（已有内边距），横向保持 0 与上方统计块对齐；
-   只修纵向：Element 默认 padding-bottom:25px 导致底部一大块空白、顶部却贴边。 */
-.sample-collapse :deep(.el-collapse-item__header) {
+.preview-collapse :deep(.el-collapse-item__header) {
   padding: 0 12px;
 }
-.sample-collapse :deep(.el-collapse-item__content) {
+.preview-collapse :deep(.el-collapse-item__content) {
   padding: 4px 12px 8px;
+}
+.preview-image-range {
+  scroll-margin-top: 16px;
+  margin-bottom: 8px;
+  color: var(--c-text-muted);
+}
+.preview-image-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 110px), 1fr));
+  gap: 12px;
+}
+.preview-image-tile {
+  min-width: 0;
+}
+.preview-image-button {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1;
+  padding: 0;
+  overflow: hidden;
+  background: var(--el-fill-color-light);
+}
+.preview-image-button :deep(> span),
+.preview-thumbnail {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.preview-image-unavailable {
+  display: grid;
+  height: 100%;
+  place-items: center;
+  color: var(--c-text-muted);
+}
+.preview-image-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  margin-top: 4px;
+}
+.preview-pagination {
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
 }
 @media (max-width: 1024px) {
   /* 中等宽度：说明文字换到控件下方，避免与控件抢横向空间 */
@@ -822,6 +899,9 @@ function formatBytes(bytes: number) {
   }
 }
 @media (max-width: 768px) {
+  .preview-image-range {
+    scroll-margin-top: 80px;
+  }
   /* 卡片内边距收紧，给控件更多横向空间（手机屏本来就窄） */
   .card-body {
     padding: 16px;
@@ -831,7 +911,7 @@ function formatBytes(bytes: number) {
   }
   /* 标签在上、控件在下，单列堆叠 */
   .filter-row {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     gap: 6px;
   }
   .fl {
@@ -873,7 +953,16 @@ function formatBytes(bytes: number) {
   }
 }
 @media (max-width: 480px) {
-  /* 超窄屏：操作按钮竖排占满整行，避免互相挤压或被截断 */
+  .checks {
+    width: 100%;
+    min-width: 0;
+  }
+  .checks :deep(.el-checkbox) {
+    height: auto;
+    min-width: 0;
+    white-space: normal;
+    margin-right: 0;
+  }
   .filter-actions {
     flex-direction: column;
   }

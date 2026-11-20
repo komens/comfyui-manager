@@ -307,8 +307,7 @@ func TestUIToAPIFormatLinkBeatsStaleWidgetValue(t *testing.T) {
 	}
 }
 
-// 子图（Subgraph）是前端虚拟节点，提交前必须展开；本系统还不能展开，
-// 必须明确报错——照原样发出去只会换来一句含糊的 400，静默丢弃会跑出错图。
+// 缺少内部节点的子图定义应在提交前明确报错。
 const subgraphFixture = `{
   "definitions": {"subgraphs": [{"id": "9de1bd0a-0000-0000-0000-000000000001", "name": "MySubgraph"}]},
   "nodes": [
@@ -319,7 +318,7 @@ const subgraphFixture = `{
   "links": [[1, 1, 0, 2, 0, "IMAGE"]]
 }`
 
-func TestUIToAPIFormatRejectsSubgraph(t *testing.T) {
+func TestUIToAPIFormatRejectsIncompleteSubgraph(t *testing.T) {
 	var ui map[string]any
 	if err := json.Unmarshal([]byte(subgraphFixture), &ui); err != nil {
 		t.Fatalf("fixture 解析失败: %v", err)
@@ -354,5 +353,56 @@ func TestNodeSkipReason(t *testing.T) {
 		if got != c.reason {
 			t.Errorf("nodeSkipReason(%v) = %v, 期望 %v", c.node, got, c.reason)
 		}
+	}
+}
+
+func TestUIToAPIFormatExpandsNestedSubgraphs(t *testing.T) {
+	const fixture = `{
+	  "nodes": [
+	    {"id":1,"type":"CLIPLoader"},
+	    {"id":2,"type":"outer","inputs":[{"name":"clip","link":1},{"name":"text","widget":{"name":"text"}}],"widgets_values":["positive"]},
+	    {"id":3,"type":"outer","inputs":[{"name":"clip","link":2},{"name":"text","widget":{"name":"text"}}],"widgets_values_named":{"text":"negative"}},
+	    {"id":4,"type":"KSampler","inputs":[{"name":"positive","link":3},{"name":"negative","link":4}]}
+	  ],
+	  "links":[[1,1,0,2,0],[2,1,0,3,0],[3,2,0,4,0],[4,3,0,4,1]],
+	  "definitions":{"subgraphs":[
+	    {"id":"outer","inputNode":{"id":-10},"outputNode":{"id":-20},
+	     "inputs":[{"name":"clip"},{"name":"text"}],
+	     "nodes":[{"id":5,"type":"inner","inputs":[{"name":"clip","link":1},{"name":"text","link":2}]}],
+	     "links":[
+	       {"id":1,"origin_id":-10,"origin_slot":0,"target_id":5,"target_slot":0},
+	       {"id":2,"origin_id":-10,"origin_slot":1,"target_id":5,"target_slot":1},
+	       {"id":3,"origin_id":5,"origin_slot":0,"target_id":-20,"target_slot":0}
+	     ]},
+	    {"id":"inner","inputNode":{"id":-10},"outputNode":{"id":-20},
+	     "nodes":[{"id":6,"type":"CLIPTextEncode","inputs":[{"name":"clip","link":1},{"name":"text","link":2}],
+	             "widgets_values_named":{"text":"default"}}],
+	     "links":[[1,-10,0,6,0],[2,-10,1,6,1],[3,6,0,-20,0]]}
+	  ]}
+	}`
+	var workflow map[string]any
+	if err := json.Unmarshal([]byte(fixture), &workflow); err != nil {
+		t.Fatal(err)
+	}
+	api, err := uiToAPIFormat(workflow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(api) != 4 {
+		t.Fatalf("expected four executable nodes, got %v", api)
+	}
+	for id, expected := range map[string]string{"2:5:6": "positive", "3:5:6": "negative"} {
+		inputs := inputsOf(t, api, id)
+		if inputs["text"] != expected || linkUpstream(inputs["clip"]) != "1" {
+			t.Fatalf("node %s: %v", id, inputs)
+		}
+	}
+	sampler := inputsOf(t, api, "4")
+	if linkUpstream(sampler["positive"]) != "2:5:6" || linkUpstream(sampler["negative"]) != "3:5:6" {
+		t.Fatalf("sampler links: %v", sampler)
+	}
+	targets := buildPromptTargetsResponse(workflow).Detected
+	if targets.Positive == nil || targets.Positive.NodeID != "2:5:6" || targets.Negative == nil || targets.Negative.NodeID != "3:5:6" {
+		t.Fatalf("prompt target detection: %+v", targets)
 	}
 }

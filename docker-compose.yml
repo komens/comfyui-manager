@@ -9,11 +9,13 @@ services:
       # 宿主端口对齐实机 40016，容器内端口由 SERVER_PORT 控制（始终 1:1 指向容器监听口）
       - "${HOST_PORT:-40016}:${SERVER_PORT:-8080}"
     environment:
-      COMFYUI_URL: ${COMFYUI_URL:-http://127.0.0.1:8188}
+      # 地址必须能从容器内访问。已有数据库继续使用设置页保存的地址。
+      COMFYUI_URL: ${COMFYUI_URL:-http://host.docker.internal:8188}
       SERVER_PORT: ${SERVER_PORT:-8080}
       DATA_DIR: /app/data
       DB_PATH: /app/data/db/comfyui.db
       STATIC_DIR: /app/static
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
       # 默认关闭。排查时显式设为 1，日志会包含完整提示词。
       DEBUG: ${DEBUG:-0}
       # 脚本运行台。默认关闭：关闭时相关接口不注册，等于这个能力不存在。
@@ -25,6 +27,8 @@ services:
     volumes:
       # 默认指向 NAS 上的既有数据目录；本机调试时在 .env 里写 DATA_HOST_DIR=./data
       - "${DATA_HOST_DIR:-/volume4/Docker存储/dy_xhs/comfyui}:/app/data"
+    extra_hosts:
+      host.docker.internal: host-gateway
     security_opt:
       - no-new-privileges:true
     restart: no

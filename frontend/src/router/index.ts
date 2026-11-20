@@ -1,5 +1,6 @@
-import { createRouter, createWebHistory } from 'vue-router'
+import { createRouter, createWebHistory, START_LOCATION } from 'vue-router'
 import DashboardView from '../views/DashboardView.vue'
+import { readGalleryScroll } from '../utils/galleryScroll'
 
 // SPA 异步渲染下浏览器自动恢复滚动不可靠，关闭后交给下面的 scrollBehavior 延迟恢复
 if ('scrollRestoration' in window.history) {
@@ -20,11 +21,43 @@ function restoreScroll(position: { left: number; top: number }) {
   })
 }
 
-export default createRouter({
+function restoreGalleryScroll(fullPath: string, position: { left: number; top: number }) {
+  return new Promise<typeof position | false>(resolve => {
+    const observer = new MutationObserver(check)
+    const unregister = router.afterEach((target, _from, failure) => {
+      if (!failure && target.fullPath !== fullPath) finish(false)
+    })
+
+    function finish(result: typeof position | false) {
+      observer.disconnect()
+      unregister()
+      resolve(result)
+    }
+
+    function check() {
+      if (router.currentRoute.value.fullPath !== fullPath) {
+        finish(false)
+      } else if (document.querySelector<HTMLElement>('[data-gallery-ready]')?.dataset.galleryReady === fullPath) {
+        finish(position)
+      }
+    }
+
+    observer.observe(document.body, { subtree: true, childList: true, attributeFilter: ['data-gallery-ready'] })
+    check()
+  })
+}
+
+const router = createRouter({
   history: createWebHistory(),
   scrollBehavior(_to, from, savedPosition) {
     // 浏览器前进/后退（含从详情页返回）：等列表渲染完成后恢复到离开时的位置
-    if (savedPosition) return restoreScroll(savedPosition)
+    const isGallery = _to.path === '/gallery'
+    const position = (isGallery && from === START_LOCATION ? readGalleryScroll(_to.fullPath) : undefined) ?? savedPosition
+    if (position) {
+      return isGallery && position.top > 0
+        ? restoreGalleryScroll(_to.fullPath, position)
+        : restoreScroll(position)
+    }
     // 同一路由内的 query 变化（翻页/筛选）：不动滚动
     if (_to.path === from.path) return false
     return { top: 0 }
@@ -58,3 +91,5 @@ export default createRouter({
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],
 })
+
+export default router

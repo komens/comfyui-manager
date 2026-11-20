@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ViewFeedback from '../components/ViewFeedback.vue'
 import { onMounted, ref } from 'vue'
 import PageHeader from '../components/PageHeader.vue'
 import { api } from '../api/client'
@@ -181,25 +182,22 @@ async function test() {
     <div class="card-body">
       <div class="form-group">
         <label for="url">服务地址</label>
-        <input id="url" v-model="url" type="url" placeholder="http://192.168.1.20:8188" />
+        <el-input id="url" v-model="url" type="url" placeholder="http://192.168.1.20:8188" />
         <p class="form-hint">格式：http://IP:端口，内网 IP 变化后在此更新。</p>
       </div>
 
       <div class="btn-group">
-        <button class="btn btn-primary" :disabled="busy" @click="save">
+        <el-button type="primary" :disabled="busy" @click="save">
           <span v-if="busy" class="spinner"></span>
           {{ busy ? '保存中...' : '保存地址' }}
-        </button>
-        <button class="btn btn-secondary" :disabled="testBusy" @click="test">
+        </el-button>
+        <el-button :disabled="testBusy" @click="test">
           <span v-if="testBusy" class="spinner"></span>
           {{ testBusy ? '测试中...' : '测试连接' }}
-        </button>
+        </el-button>
       </div>
 
-      <div v-if="message" class="status-msg mt-4" :class="messageType">
-        {{ message }}
-        <span v-if="latency !== null"> &middot; 延迟 {{ latency }}ms</span>
-      </div>
+      <ViewFeedback :kind="messageType" :message="message && latency !== null ? `${message} · 延迟 ${latency} ms` : message" />
     </div>
   </div>
 
@@ -212,7 +210,7 @@ async function test() {
       <div class="data-section">
         <h3>数据库备份</h3>
         <p class="muted">整站账本快照：提示词、任务、工作流配置、设置全在这里，<strong>不含图片文件和工作流 JSON</strong>。用于整机回滚，需手动放回 <code>data/db/</code> 并重启服务。</p>
-        <button class="btn" @click="backupDB">&#8681; 备份数据库</button>
+        <el-button @click="backupDB">&#8681; 备份数据库</el-button>
       </div>
 
       <div class="data-divider"></div>
@@ -221,7 +219,7 @@ async function test() {
       <div class="data-section">
         <h3>导出数据</h3>
         <p class="muted">按条件导出提示词、图片和可选的<strong>工作流</strong>为 ZIP 包，可导入到新设备（不含任务历史与设置）。缺失或读取失败的文件会列在包内的 export-warnings.json。</p>
-        <button class="btn btn-primary" @click="openExportModal">&#8681; 导出数据</button>
+        <el-button type="primary" @click="openExportModal">&#8681; 导出数据</el-button>
       </div>
 
       <div class="data-divider"></div>
@@ -232,77 +230,64 @@ async function test() {
         <p class="muted">上传之前导出的 ZIP 包，自动合并去重。重复的提示词和图片会被跳过。</p>
         <div class="import-wrap">
           <input type="file" ref="fileInput" accept=".zip" style="display:none" @change="handleImport" />
-          <button class="btn" :disabled="importBusy" @click="triggerImport">
+          <el-button :disabled="importBusy" @click="triggerImport">
             <span v-if="importBusy" class="spinner"></span>
             {{ importBusy ? '导入中...' : '&#8682; 选择文件导入' }}
-          </button>
+          </el-button>
         </div>
-        <div v-if="importResult" class="status-msg mt-4" :class="importResult.includes('成功') ? 'success' : 'info'" style="white-space: pre-line;">{{ importResult }}</div>
+        <ViewFeedback :kind="importResult.includes('成功') ? 'success' : importResult.includes('失败') ? 'error' : 'info'" :message="importResult" />
       </div>
     </div>
   </div>
-  <!-- 导出弹窗 -->
-  <Teleport to="body">
-    <div v-if="showExportModal" class="modal-overlay" @click.self="showExportModal = false">
-      <div class="modal">
-        <h3 style="margin-top:0;">导出数据</h3>
-        <p class="muted" style="margin:0 0 16px;">设置筛选条件，不设置则导出全部数据。</p>
+  <el-dialog v-model="showExportModal" title="导出数据" class="app-dialog" width="min(500px, calc(100% - 24px))" top="6vh" append-to-body>
+    <p class="muted" style="margin:0 0 16px;">设置筛选条件，不设置则导出全部数据。</p>
 
-        <div class="form-group">
-          <label>关键词搜索</label>
-          <input v-model="exportSearch" type="text" placeholder="搜索标题、提示词内容..." />
-        </div>
+    <div class="form-group">
+      <label for="export-search">关键词搜索</label>
+      <el-input id="export-search" v-model="exportSearch" type="text" placeholder="搜索标题、提示词内容..." />
+    </div>
 
-        <div class="form-row">
-          <div class="form-group" style="flex:1">
-            <label>分组</label>
-            <select v-model="exportGroup" class="input">
-              <option value="">全部分组</option>
-              <option v-for="g in groups" :key="g.group_name" :value="g.group_name">{{ g.group_name }} ({{ g.count }})</option>
-            </select>
-          </div>
-          <div class="form-group" style="flex:1">
-            <label>来源</label>
-            <select v-model="exportPlatform" class="input">
-              <option value="">全部来源</option>
-              <option value="local">本平台</option>
-              <option v-for="p in platformOptions" :key="p.id" :value="p.id">{{ p.label }}</option>
-            </select>
-          </div>
-        </div>
-
-        <div class="form-group">
-          <label>状态</label>
-          <select v-model="exportStatus" class="input">
-            <option value="">全部状态</option>
-            <option value="pending">待生成</option>
-            <option value="running">生成中</option>
-            <option value="completed">已完成</option>
-            <option value="failed">失败</option>
-          </select>
-        </div>
-
-        <label class="checkbox-label" style="margin-bottom:10px;">
-          <input type="checkbox" v-model="exportFavorite" />
-          仅导出收藏
-        </label>
-
-        <label class="checkbox-label" style="margin-bottom:20px;">
-          <input type="checkbox" v-model="exportWorkflows" />
-          包含工作流
-          <span class="text-xs muted">（导出后可在新设备直接出图，不需重建）</span>
-        </label>
-
-        <div style="display:flex; gap:8px; justify-content:flex-end;">
-          <button class="btn btn-ghost" @click="showExportModal = false">取消</button>
-          <button class="btn btn-primary" :disabled="exportBusy" @click="exportData">
-            <span v-if="exportBusy" class="spinner"></span>
-            {{ exportBusy ? '导出中...' : '开始导出' }}
-          </button>
-        </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label for="export-group">分组</label>
+        <el-select id="export-group" v-model="exportGroup" :empty-values="[]">
+          <el-option value="" label="全部分组" />
+          <el-option v-for="g in groups" :key="g.group_name" :value="g.group_name" :label="`${g.group_name} (${g.count})`" />
+        </el-select>
+      </div>
+      <div class="form-group">
+        <label for="export-platform">来源</label>
+        <el-select id="export-platform" v-model="exportPlatform" :empty-values="[]">
+          <el-option value="" label="全部来源" />
+          <el-option value="local" label="本平台" />
+          <el-option v-for="p in platformOptions" :key="p.id" :value="p.id" :label="p.label" />
+        </el-select>
       </div>
     </div>
-  </Teleport>
+
+    <div class="form-group">
+      <label for="export-status">状态</label>
+      <el-select id="export-status" v-model="exportStatus" :empty-values="[]">
+        <el-option value="" label="全部状态" />
+        <el-option value="pending" label="待生成" />
+        <el-option value="running" label="生成中" />
+        <el-option value="completed" label="已完成" />
+        <el-option value="failed" label="失败" />
+      </el-select>
+    </div>
+
+
+    <div class="export-options">
+      <el-checkbox v-model="exportFavorite">仅导出收藏</el-checkbox>
+      <el-checkbox v-model="exportWorkflows">包含工作流</el-checkbox>
+      <p class="text-xs muted">包含工作流时，可在新设备上直接出图。</p>
+    </div>
+
+    <template #footer>
+      <el-button @click="showExportModal = false">取消</el-button>
+      <el-button type="primary" :loading="exportBusy" @click="exportData">开始导出</el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <style scoped>
@@ -322,40 +307,12 @@ async function test() {
 .export-options {
   margin-bottom: 12px;
 }
-.checkbox-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 14px;
-  cursor: pointer;
-}
-.checkbox-label input[type="checkbox"] {
-  accent-color: var(--c-primary);
-}
 .import-wrap {
   display: flex;
   gap: 8px;
 }
-.modal-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0,0,0,0.5);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 100;
-  padding: 20px;
-}
-.modal {
-  background: var(--c-card);
-  border-radius: 12px;
-  padding: 24px;
-  width: 100%;
-  max-width: 500px;
-  box-shadow: var(--shadow-lg);
-}
-.form-row {
-  display: flex;
-  gap: 12px;
+.form-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 480px) {
+  .form-row { grid-template-columns: minmax(0, 1fr); gap: 0; }
 }
 </style>

@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -238,51 +239,52 @@ func truncateRunes(value string, limit int) string {
 	return string(runes[:limit]) + "…"
 }
 
-// submitter 提交阶段（每3秒扫描 pending items 提交到 ComfyUI）
-//
-// ComfyUI 地址一律取当前设置（settings.comfyui_url），不使用 task 上的「提交时快照」：
-// 地址会因 DHCP 续约或换机而变，若沿用快照，改完配置旧任务还会一直拿废弃地址重试。
+// submitter sends pending items using the configuration captured when they were queued.
 func (a *app) submitter() {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 	for range ticker.C {
-		comfyURL, err := a.setting(context.Background(), "comfyui_url")
-		if err != nil || comfyURL == "" {
-			a.log.Printf("submitter: read comfyui_url failed, skip this round: %v", err)
-			continue
+		a.submitPendingItems()
+	}
+}
+
+func (a *app) submitPendingItems() {
+	rows, err := a.db.Query(`SELECT i.id, i.task_id, i.positive_prompt, COALESCE(i.negative_prompt,''),
+		t.parameters_json, COALESCE(NULLIF(t.comfyui_url,''),(SELECT value FROM settings WHERE key='comfyui_url'),''), t.workflow_snapshot, COALESCE(w.workflow_path,''),
+		CASE WHEN t.workflow_snapshot!='' THEN t.workflow_mapping_snapshot ELSE COALESCE(w.mapping_json,'') END,
+		CASE WHEN t.workflow_snapshot!='' THEN t.workflow_negative_snapshot ELSE COALESCE(w.negative_prompt,'') END
+		FROM generation_items i
+		JOIN generation_tasks t ON t.id=i.task_id
+		LEFT JOIN workflows w ON w.id=t.workflow_id
+		WHERE i.status='pending' AND t.status IN ('pending','running')
+		ORDER BY i.id LIMIT 10`)
+	if err != nil {
+		a.log.Printf("submitter query error: %v", err)
+		return
+	}
+	type pendingItem struct {
+		ItemID           int64
+		TaskID           int64
+		Positive         string
+		ItemNegative     string
+		Parameters       string
+		BaseURL          string
+		WorkflowJSON     string
+		WorkflowPath     string
+		MappingJSON      string
+		WorkflowNegative string
+	}
+	var items []pendingItem
+	for rows.Next() {
+		var p pendingItem
+		if err := rows.Scan(&p.ItemID, &p.TaskID, &p.Positive, &p.ItemNegative, &p.Parameters, &p.BaseURL, &p.WorkflowJSON, &p.WorkflowPath, &p.MappingJSON, &p.WorkflowNegative); err == nil {
+			items = append(items, p)
 		}
-		rows, err := a.db.Query(`SELECT i.id, i.task_id, i.positive_prompt, COALESCE(i.negative_prompt,''), t.parameters_json, COALESCE(w.workflow_path,''), COALESCE(w.mapping_json,''), COALESCE(w.negative_prompt,'')
-			FROM generation_items i
-			JOIN generation_tasks t ON t.id=i.task_id
-			LEFT JOIN workflows w ON w.id=t.workflow_id
-			WHERE i.status='pending' AND t.status IN ('pending','running')
-			ORDER BY i.id LIMIT 10`)
-		if err != nil {
-			a.log.Printf("submitter query error: %v", err)
-			continue
-		}
-		type pendingItem struct {
-			ItemID           int64
-			TaskID           int64
-			Positive         string
-			ItemNegative     string
-			Parameters       string
-			WorkflowPath     string
-			MappingJSON      string
-			WorkflowNegative string
-		}
-		var items []pendingItem
-		for rows.Next() {
-			var p pendingItem
-			if err := rows.Scan(&p.ItemID, &p.TaskID, &p.Positive, &p.ItemNegative, &p.Parameters, &p.WorkflowPath, &p.MappingJSON, &p.WorkflowNegative); err == nil {
-				items = append(items, p)
-			}
-		}
-		rows.Close()
-		for _, p := range items {
-			negative := resolveEffectiveNegative(p.ItemNegative, p.WorkflowNegative)
-			a.submitItem(p.ItemID, p.TaskID, p.Positive, comfyURL, p.Parameters, p.WorkflowPath, p.MappingJSON, negative)
-		}
+	}
+	rows.Close()
+	for _, p := range items {
+		negative := resolveEffectiveNegative(p.ItemNegative, p.WorkflowNegative)
+		a.submitItem(p.ItemID, p.TaskID, p.Positive, p.BaseURL, p.Parameters, p.WorkflowJSON, p.WorkflowPath, p.MappingJSON, negative)
 	}
 }
 
@@ -322,7 +324,7 @@ func (a *app) claimPendingItem(ctx context.Context, itemID, taskID int64) (bool,
 }
 
 // submitItem 提交单个 item 到 ComfyUI
-func (a *app) submitItem(itemID, taskID int64, positive, baseURL, parameters, workflowPath, mappingJSON, negativePrompt string) {
+func (a *app) submitItem(itemID, taskID int64, positive, baseURL, parameters, workflowJSON, workflowPath, mappingJSON, negativePrompt string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -335,20 +337,19 @@ func (a *app) submitItem(itemID, taskID int64, positive, baseURL, parameters, wo
 	}
 	a.publish(taskID, map[string]any{"task_id": taskID, "item_id": itemID, "status": "running"})
 
-	if workflowPath == "" {
-		a.failItem(itemID, taskID, "找不到该任务的工作流，请选择现有工作流重新提交")
-		return
-	}
-	// workflow_path 在库里可能是纯文件名（新）或绑定旧 cwd 的相对路径，统一按当前 dataDir 解析
-	resolvedPath := a.workflowFilePath(workflowPath)
-	workflowBytes, err := readWorkflowFile(resolvedPath)
-	if err != nil {
-		a.failItem(itemID, taskID, fmt.Sprintf("read workflow failed: %v (resolved path: %s)", err, resolvedPath))
-		return
+	workflowBytes := []byte(workflowJSON)
+	if workflowJSON == "" {
+		// Historical tasks predate workflow snapshots.
+		var err error
+		workflowBytes, err = readWorkflowFile(a.workflowFilePath(workflowPath))
+		if err != nil {
+			a.failItem(itemID, taskID, "找不到该任务的工作流，请选择现有工作流重新提交")
+			return
+		}
 	}
 	var workflow map[string]any
-	if err := json.Unmarshal(workflowBytes, &workflow); err != nil {
-		a.failItem(itemID, taskID, fmt.Sprintf("parse workflow failed: %v", err))
+	if err := json.Unmarshal(workflowBytes, &workflow); err != nil || workflow == nil {
+		a.failItem(itemID, taskID, "提交时的工作流 JSON 缺失或不可读，请修复工作流后重试")
 		return
 	}
 	if _, hasNodes := workflow["nodes"]; hasNodes {
@@ -371,7 +372,8 @@ func (a *app) submitItem(itemID, taskID int64, positive, baseURL, parameters, wo
 	// 和「实际提交的正向」靠巧合保持一致；负面本来就走 item 列，两列同源才不会各说各话。
 	input["positive_prompt"] = positive
 	input["negative_prompt"] = negativePrompt
-	if err := injectDirectPrompt(workflow, mappingJSON, input); err != nil {
+	actualNegative, err := injectPromptAndSeed(workflow, mappingJSON, input)
+	if err != nil {
 		a.failItem(itemID, taskID, fmt.Sprintf("inject prompt failed: %v", err))
 		return
 	}
@@ -385,7 +387,7 @@ func (a *app) submitItem(itemID, taskID int64, positive, baseURL, parameters, wo
 		note = "提交时自动纠正了导出串位的控件值——" + strings.Join(notes, "；")
 		a.log.Printf("item %d %s", itemID, note)
 	}
-	if !a.recordComfySubmission(itemID, taskID, baseURL, comfyPromptID, note) {
+	if !a.recordComfySubmission(itemID, taskID, baseURL, comfyPromptID, note, actualNegative) {
 		return
 	}
 	a.log.Printf("item %d submitted to ComfyUI (prompt_id=%s)", itemID, comfyPromptID)
@@ -398,17 +400,17 @@ func (a *app) submitItem(itemID, taskID int64, positive, baseURL, parameters, wo
 }
 
 // recordComfySubmission handles cancellation that wins while ComfyUI is answering /prompt.
-func (a *app) recordComfySubmission(itemID, taskID int64, baseURL, promptID, note string) bool {
-	result, err := a.db.Exec(`UPDATE generation_items SET status='submitted', comfy_prompt_id=?, submitted_comfyui_url=?, notes=?, remote_missing_since=0
+func (a *app) recordComfySubmission(itemID, taskID int64, baseURL, promptID, note, negative string) bool {
+	result, err := a.db.Exec(`UPDATE generation_items SET status='submitted', comfy_prompt_id=?, submitted_comfyui_url=?, notes=?, effective_negative_prompt=?, remote_missing_since=0, remote_failure_since=0
 		WHERE id=? AND task_id=? AND status='running'
-		AND EXISTS (SELECT 1 FROM generation_tasks WHERE id=? AND status='running')`, promptID, baseURL, note, itemID, taskID, taskID)
+		AND EXISTS (SELECT 1 FROM generation_tasks WHERE id=? AND status='running')`, promptID, baseURL, note, negative, itemID, taskID, taskID)
 	if err != nil {
 		a.failItem(itemID, taskID, "ComfyUI 已接收任务，但保存提交记录失败："+err.Error())
-		go a.deleteComfyQueueItem(baseURL, promptID)
+		go a.cancelUnrecordedComfyJob(itemID, baseURL, promptID)
 		return false
 	}
 	if n, _ := result.RowsAffected(); n == 0 {
-		go a.deleteComfyQueueItem(baseURL, promptID)
+		go a.cancelUnrecordedComfyJob(itemID, baseURL, promptID)
 		return false
 	}
 	a.publish(taskID, map[string]any{"task_id": taskID, "item_id": itemID, "status": "submitted"})
@@ -447,7 +449,7 @@ func (a *app) persistItemOutcome(itemID, taskID int64, status, message string) (
 		return false, err
 	}
 	defer tx.Rollback()
-	result, err := tx.Exec("UPDATE generation_items SET status=?, error_message=? WHERE id=? AND status IN ('running','submitted') AND EXISTS (SELECT 1 FROM generation_tasks WHERE id=? AND status!='cancelled')",
+	result, err := tx.Exec("UPDATE generation_items SET status=?, error_message=?, remote_failure_since=0 WHERE id=? AND status IN ('running','submitted') AND EXISTS (SELECT 1 FROM generation_tasks WHERE id=? AND status!='cancelled')",
 		status, message, itemID, taskID)
 	if err != nil {
 		return false, err
@@ -522,7 +524,7 @@ func (a *app) downloader() {
 	for range ticker.C {
 		// 旧记录未保存实际提交地址，沿用旧版按当前配置查询的行为。
 		rows, err := a.db.Query(`SELECT i.id, i.task_id, i.comfy_prompt_id,
-			COALESCE(NULLIF(i.submitted_comfyui_url,''),(SELECT value FROM settings WHERE key='comfyui_url'),'')
+			COALESCE(NULLIF(i.submitted_comfyui_url,''), NULLIF(t.comfyui_url,''),(SELECT value FROM settings WHERE key='comfyui_url'),'')
 			FROM generation_items i JOIN generation_tasks t ON t.id=i.task_id
 			WHERE i.id>? AND i.status='submitted' AND i.comfy_prompt_id!='' AND t.status!='cancelled'
 			ORDER BY i.id LIMIT ?`, afterID, downloadBatchSize)
@@ -551,10 +553,23 @@ func (a *app) downloader() {
 		if len(items) == downloadBatchSize {
 			afterID = items[len(items)-1].itemID
 		}
-		queues := make(map[string]comfyQueueSnapshot)
+		var queues comfyQueueCache
+		var work sync.WaitGroup
+		jobs := make(chan submission, len(items))
 		for _, item := range items {
-			a.checkAndDownload(item.itemID, item.taskID, item.promptID, item.baseURL, queues)
+			jobs <- item
 		}
+		close(jobs)
+		for range min(len(items), 4) {
+			work.Add(1)
+			go func() {
+				defer work.Done()
+				for item := range jobs {
+					a.checkAndDownload(item.itemID, item.taskID, item.promptID, item.baseURL, &queues)
+				}
+			}()
+		}
+		work.Wait()
 	}
 }
 
@@ -705,7 +720,7 @@ func (a *app) saveComfyOutput(ctx context.Context, itemID int64, promptID, baseU
 	return nil
 }
 
-func (a *app) checkAndDownload(itemID, taskID int64, comfyPromptID, baseURL string, queues map[string]comfyQueueSnapshot) {
+func (a *app) checkAndDownload(itemID, taskID int64, comfyPromptID, baseURL string, queues *comfyQueueCache) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -722,19 +737,23 @@ func (a *app) checkAndDownload(itemID, taskID int64, comfyPromptID, baseURL stri
 	if err != nil {
 		a.noteWaiting(itemID, err.Error())
 		if errors.Is(err, errComfyHistoryMissing) {
-			queue, known := queues[baseURL]
-			if !known {
-				queue = fetchComfyQueue(ctx, baseURL)
-				queues[baseURL] = queue
+			queue := queues.get(ctx, baseURL)
+			if queue.available {
+				a.setRemotePollError(itemID, taskID, comfyPromptID, "")
+				if !queue.promptIDs[comfyPromptID] {
+					a.checkMissingRemote(ctx, itemID, taskID, comfyPromptID, baseURL)
+					return
+				}
+			} else {
+				a.setRemotePollError(itemID, taskID, comfyPromptID, "无法读取 ComfyUI 队列")
 			}
-			if queue.available && !queue.promptIDs[comfyPromptID] {
-				a.checkMissingRemote(ctx, itemID, taskID, comfyPromptID, baseURL)
-				return
-			}
+		} else {
+			a.setRemotePollError(itemID, taskID, comfyPromptID, err.Error())
 		}
 		a.clearRemoteMissing(itemID, comfyPromptID)
 		return
 	}
+	a.setRemotePollError(itemID, taskID, comfyPromptID, "")
 	a.clearRemoteMissing(itemID, comfyPromptID)
 	a.clearWaiting(itemID)
 
@@ -817,9 +836,51 @@ const remoteMissingGrace = time.Minute
 
 var errComfyHistoryMissing = errors.New("prompt not found in history")
 
+func (a *app) setRemotePollError(itemID, taskID int64, promptID, message string) {
+	var since int64
+	if message != "" {
+		since = time.Now().Unix()
+		message = "ComfyUI 连接或响应异常，正在等待恢复：" + message
+	}
+	result, err := a.db.Exec(`UPDATE generation_items
+		SET remote_failure_since=CASE WHEN ?=0 THEN 0 WHEN remote_failure_since=0 THEN ? ELSE remote_failure_since END,
+			error_message=?
+		WHERE id=? AND status='submitted' AND comfy_prompt_id=? AND error_message!=?`,
+		since, since, message, itemID, promptID, message)
+	if err != nil {
+		a.log.Printf("record remote polling state for item %d: %v", itemID, err)
+		return
+	}
+	if changed, _ := result.RowsAffected(); changed > 0 {
+		a.publish(taskID, map[string]any{"task_id": taskID, "item_id": itemID, "status": "submitted", "error": message})
+	}
+}
+
+type comfyQueueCache struct {
+	entries sync.Map
+}
+
+type comfyQueueCacheEntry struct {
+	once  sync.Once
+	queue comfyQueueSnapshot
+}
+
+func (c *comfyQueueCache) get(ctx context.Context, baseURL string) comfyQueueSnapshot {
+	value, _ := c.entries.LoadOrStore(baseURL, &comfyQueueCacheEntry{})
+	entry := value.(*comfyQueueCacheEntry)
+	entry.once.Do(func() {
+		// Keep capacity for the history recheck even if the queue endpoint is slow.
+		ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+		defer cancel()
+		entry.queue = fetchComfyQueue(ctx, baseURL)
+	})
+	return entry.queue
+}
+
 type comfyQueueSnapshot struct {
 	available bool
 	promptIDs map[string]bool
+	running   map[string]bool
 }
 
 func fetchComfyQueue(ctx context.Context, baseURL string) comfyQueueSnapshot {
@@ -842,14 +903,17 @@ func fetchComfyQueue(ctx context.Context, baseURL string) comfyQueueSnapshot {
 	if err := json.NewDecoder(resp.Body).Decode(&queue); err != nil || queue.Running == nil || queue.Pending == nil {
 		return comfyQueueSnapshot{}
 	}
-	result := comfyQueueSnapshot{available: true, promptIDs: make(map[string]bool)}
-	for _, entries := range [][][]json.RawMessage{queue.Running, queue.Pending} {
+	result := comfyQueueSnapshot{available: true, promptIDs: make(map[string]bool), running: make(map[string]bool)}
+	for index, entries := range [][][]json.RawMessage{queue.Running, queue.Pending} {
 		for _, entry := range entries {
 			var promptID string
 			if len(entry) < 2 || json.Unmarshal(entry[1], &promptID) != nil || promptID == "" {
 				return comfyQueueSnapshot{}
 			}
 			result.promptIDs[promptID] = true
+			if index == 0 {
+				result.running[promptID] = true
+			}
 		}
 	}
 	return result
@@ -1014,10 +1078,15 @@ func resolveTarget(workflow map[string]any, pinned promptTarget, auto *promptTar
 // （见 promptnodes.go）。正向写不进去时**直接报错**而不是静默跳过——
 // 静默跳过会让人以为提示词生效了，出来的却是工作流自带的旧内容。
 func injectDirectPrompt(workflow map[string]any, mappingJSON string, input map[string]any) error {
+	_, err := injectPromptAndSeed(workflow, mappingJSON, input)
+	return err
+}
+
+func injectPromptAndSeed(workflow map[string]any, mappingJSON string, input map[string]any) (string, error) {
 	var mapping promptMapping
 	if trimmed := strings.TrimSpace(mappingJSON); trimmed != "" {
 		if err := json.Unmarshal([]byte(trimmed), &mapping); err != nil {
-			return fmt.Errorf("解析节点映射失败：%v", err)
+			return "", fmt.Errorf("解析节点映射失败：%v", err)
 		}
 	}
 
@@ -1037,17 +1106,17 @@ func injectDirectPrompt(workflow map[string]any, mappingJSON string, input map[s
 	}
 
 	if positive != "" && positiveTarget == nil {
-		return fmt.Errorf("未能确定正向提示词落点：这份工作流里找不到正向提示词节点，请到「工作流」页选中节点后再提交")
+		return "", fmt.Errorf("未能确定正向提示词落点：这份工作流里找不到正向提示词节点，请到「工作流」页选中节点后再提交")
 	}
 	if positiveTarget != nil && positive != "" {
 		if err := writeTargetField(workflow, positiveTarget, positive); err != nil {
-			return err
+			return "", err
 		}
 	}
 	// negative 为空表示「保留工作流自带的负向」，这是既有约定，不要改成清空。
 	if negativeTarget != nil && negative != "" {
 		if err := writeTargetField(workflow, negativeTarget, negative); err != nil {
-			return err
+			return "", err
 		}
 	}
 
@@ -1058,7 +1127,13 @@ func injectDirectPrompt(workflow map[string]any, mappingJSON string, input map[s
 		seedValue = rand.Int63n(999999999999999)
 	}
 	autoInjectSeed(workflow, seedValue)
-	return nil
+	if negativeTarget == nil {
+		return "", nil
+	}
+	node, _ := workflow[negativeTarget.NodeID].(map[string]any)
+	fields, _ := node["inputs"].(map[string]any)
+	actualNegative, _ := stringFieldValue(fields, negativeTarget.Field)
+	return actualNegative, nil
 }
 
 // writeTargetField 把值写进落点。落点字段为空（老格式离线解析的结果）算失败。
@@ -1141,7 +1216,7 @@ const (
 	maxLinkHops = 32
 )
 
-// errUnsupportedWorkflowFeature 表示工作流里用了本系统还不能还原的前端结构（目前是子图）。
+// errUnsupportedWorkflowFeature 表示无法还原导出文件中的前端结构。
 // 这类工作流在 ComfyUI 界面里能跑通，但本系统必须明确报错——照原样发出去只会换来
 // 一句含糊的 400，静默丢弃又会跑出一张错图。校验接口据此把它和「工作流本身写错」区分开。
 var errUnsupportedWorkflowFeature = errors.New("工作流包含本系统尚不支持的结构")
@@ -1221,8 +1296,8 @@ func uiToAPIFormatWithOrder(ui map[string]any, order widgetOrderLookup) (map[str
 	if !ok {
 		return nil, fmt.Errorf("workflow missing nodes array")
 	}
-	if err := checkSubgraphSupport(ui); err != nil {
-		return nil, err
+	if definitions := workflowSubgraphs(ui); len(definitions) > 0 {
+		return subgraphsToAPI(ui, definitions, order)
 	}
 
 	// 先给全部节点建索引（含会被剔除的），连线穿透需要按 id 回溯上游。
@@ -1283,48 +1358,7 @@ func uiToAPIFormatWithOrder(ui map[string]any, order widgetOrderLookup) (map[str
 			apiInputs[name] = []any{strconv.Itoa(originID), originSlot}
 		}
 
-		// ② widget 值。widgets_values_named 是两代导出格式共同的权威来源：
-		// 新前端（frontendVersion 1.52.x）的 inputs 里只剩连线输入，widget 条目整体
-		// 消失，只保留 widgets_values_named。若仍按 widget 标记筛选，所有 widget
-		// （unet_name / text / seed / steps / width ...）都会被漏掉，载荷缺必填输入，
-		// ComfyUI 直接 400 prompt_outputs_failed_validation。
-		namedValues, _ := node["widgets_values_named"].(map[string]any)
-		if len(namedValues) > 0 {
-			for name, value := range namedValues {
-				// control_after_generate / upload 是前端控件，不是节点输入
-				// （见 frontendOnlyWidgetNames）。其余键一律原样带上：像
-				// SaveImageAdvanced 的 format.bit_depth、TextEncodeQwenImage21 的
-				// images.image_1 这类带点的名字是节点自己的输入名，做任何规整或
-				// 白名单过滤都会把它们误删。
-				if frontendOnlyWidgetNames[name] {
-					continue
-				}
-				// 该输入已被连线占用时以连线为准，widget 里的旧值不再生效。
-				if _, occupied := apiInputs[name]; occupied {
-					continue
-				}
-				apiInputs[name] = expandDateTemplate(value)
-			}
-		} else {
-			// 没有 widgets_values_named。剩下两代老格式，区别在于文件里有没有
-			// 留下控件顺序的线索：
-			//   ① inputs 里挂着 widget 标记 —— 标记顺序就是位置数组的顺序，自带线索；
-			//   ② 连标记都没有（早期导出/工具生成）—— 文件本身无从还原，只能拿
-			//      目标 ComfyUI 的节点定义（order）去对号入座。
-			// 过去只做了 ①，② 会一个控件值都读不出来，整份工作流被误判成
-			// 「所有必填输入都缺失」——而它在 ComfyUI 里明明跑得通。
-			widgetValues, _ := node["widgets_values"].([]any)
-			switch {
-			case len(widgetValues) == 0:
-				// 没有位置值，无事可做
-			case hasWidgetMarkers(node):
-				applyMarkedWidgets(apiInputs, node, widgetValues)
-			case order != nil:
-				if slots, ok := order(classType); ok {
-					applyPositionalWidgets(apiInputs, slots, widgetValues)
-				}
-			}
-		}
+		applyUIWidgetValues(apiInputs, node, classType, order)
 
 		result[strconv.Itoa(id)] = map[string]any{
 			"class_type": classType,
@@ -1336,22 +1370,60 @@ func uiToAPIFormatWithOrder(ui map[string]any, order widgetOrderLookup) (map[str
 	return result, nil
 }
 
+func applyUIWidgetValues(apiInputs, node map[string]any, classType string, order widgetOrderLookup) {
+	// 优先读取带名称的控件值。widgets_values_named 是两代导出格式共同的权威来源：
+	// 新前端（frontendVersion 1.52.x）的 inputs 里只剩连线输入，widget 条目整体
+	// 消失，只保留 widgets_values_named。若仍按 widget 标记筛选，所有 widget
+	// （unet_name / text / seed / steps / width ...）都会被漏掉，载荷缺必填输入，
+	// ComfyUI 直接 400 prompt_outputs_failed_validation。
+	namedValues, _ := node["widgets_values_named"].(map[string]any)
+	if len(namedValues) > 0 {
+		for name, value := range namedValues {
+			// control_after_generate / upload 是前端控件，不是节点输入
+			// （见 frontendOnlyWidgetNames）。其余键一律原样带上：像
+			// SaveImageAdvanced 的 format.bit_depth、TextEncodeQwenImage21 的
+			// images.image_1 这类带点的名字是节点自己的输入名，做任何规整或
+			// 白名单过滤都会把它们误删。
+			if frontendOnlyWidgetNames[name] {
+				continue
+			}
+			// 该输入已被连线占用时以连线为准，widget 里的旧值不再生效。
+			if _, occupied := apiInputs[name]; occupied {
+				continue
+			}
+			apiInputs[name] = expandDateTemplate(value)
+		}
+	} else {
+		// 没有 widgets_values_named。剩下两代老格式，区别在于文件里有没有
+		// 留下控件顺序的线索：
+		//   ① inputs 里挂着 widget 标记 —— 标记顺序就是位置数组的顺序，自带线索；
+		//   ② 连标记都没有（早期导出/工具生成）—— 文件本身无从还原，只能拿
+		//      目标 ComfyUI 的节点定义（order）去对号入座。
+		// 过去只做了 ①，② 会一个控件值都读不出来，整份工作流被误判成
+		// 「所有必填输入都缺失」——而它在 ComfyUI 里明明跑得通。
+		widgetValues, _ := node["widgets_values"].([]any)
+		switch {
+		case len(widgetValues) == 0:
+			// 没有位置值，无事可做
+		case hasWidgetMarkers(node):
+			applyMarkedWidgets(apiInputs, node, widgetValues)
+		case order != nil:
+			if slots, ok := order(classType); ok {
+				applyPositionalWidgets(apiInputs, slots, widgetValues)
+			}
+		}
+	}
+}
+
 // buildLinkTable 把 UI 格式的 links 数组转成 link_id → 上游端点。
 func buildLinkTable(ui map[string]any) map[int]linkEndpoint {
 	rawLinks, _ := ui["links"].([]any)
 	table := make(map[int]linkEndpoint, len(rawLinks))
 	for _, raw := range rawLinks {
-		arr, ok := raw.([]any)
-		if !ok || len(arr) < 3 {
-			continue
+		id, origin, slot, _, _, ok := parseUIEdge(raw)
+		if ok {
+			table[id] = linkEndpoint{originID: origin, originSlot: slot}
 		}
-		id, okID := numericValue(arr[0])
-		origin, okOrigin := numericValue(arr[1])
-		slot, okSlot := numericValue(arr[2])
-		if !okID || !okOrigin || !okSlot {
-			continue
-		}
-		table[int(id)] = linkEndpoint{originID: int(origin), originSlot: int(slot)}
 	}
 	return table
 }
@@ -1429,47 +1501,6 @@ func dropDanglingLinks(payload map[string]any) {
 	}
 }
 
-// checkSubgraphSupport 在发现子图节点时明确报错。
-// 子图（SubgraphNode）同样是前端虚拟节点，提交前必须展开成内部节点；本系统还不能
-// 展开，所以既不能照原样发出去（只会换来一句含糊的 400），也不能静默丢弃
-// （那会跑出一张缺节点的图，错得没有任何提示）。
-func checkSubgraphSupport(ui map[string]any) error {
-	definitions, _ := ui["definitions"].(map[string]any)
-	subgraphDefs, _ := definitions["subgraphs"].([]any)
-	if len(subgraphDefs) == 0 {
-		return nil
-	}
-	known := map[string]bool{}
-	for _, raw := range subgraphDefs {
-		def, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		for _, key := range []string{"id", "name"} {
-			if text, ok := def[key].(string); ok && text != "" {
-				known[text] = true
-			}
-		}
-	}
-	uses := make([]string, 0, len(subgraphDefs))
-	for _, raw := range asSlice(ui["nodes"]) {
-		node, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		classType, _ := node["type"].(string)
-		if known[classType] || node["subgraphId"] != nil || node["subgraph"] != nil {
-			uses = append(uses, classType)
-		}
-	}
-	if len(uses) == 0 {
-		return nil
-	}
-	sort.Strings(uses)
-	return fmt.Errorf("%w：工作流用了 %d 个子图（%s），请先在 ComfyUI 里导出「展平」后的工作流",
-		errUnsupportedWorkflowFeature, len(uses), strings.Join(uses, ", "))
-}
-
 // asSlice 把 JSON 数组统一取成 []any；取不到返回 nil。
 func asSlice(value any) []any {
 	arr, _ := value.([]any)
@@ -1507,21 +1538,96 @@ func expandDateTemplate(value any) any {
 	return value
 }
 
-// deleteComfyQueueItem 通知 ComfyUI 从队列中删除指定 prompt
-func (a *app) deleteComfyQueueItem(baseURL, promptID string) {
-	payload, _ := json.Marshal(map[string]any{
-		"delete": []string{promptID},
-	})
-	req, err := http.NewRequest("POST", baseURL+"/queue", bytes.NewReader(payload))
+// cancelComfyJob prefers ComfyUI's job-scoped API. Older versions can remove
+// pending jobs; interrupt a running job only when that version supports a prompt ID.
+func cancelComfyJob(ctx context.Context, baseURL, promptID string) error {
+	status, err := postComfyCancellation(ctx, baseURL+"/api/jobs/"+url.PathEscape(promptID)+"/cancel", nil)
+	if err == nil {
+		return nil
+	}
+	if status != http.StatusNotFound && status != http.StatusMethodNotAllowed {
+		return err
+	}
+	if _, err := postComfyCancellation(ctx, baseURL+"/queue", map[string]any{"delete": []string{promptID}}); err != nil {
+		return err
+	}
+	queue := fetchComfyQueue(ctx, baseURL)
+	if !queue.available {
+		return errors.New("无法确认 ComfyUI 已移除该任务")
+	}
+	if !queue.running[promptID] {
+		if queue.promptIDs[promptID] {
+			return errors.New("ComfyUI 队列里仍有该任务")
+		}
+		return nil
+	}
+	if !supportsScopedInterrupt(ctx, baseURL) {
+		return errors.New("当前 ComfyUI 版本无法确认支持按任务中断，远端任务可能继续运行")
+	}
+	_, err = postComfyCancellation(ctx, baseURL+"/interrupt", map[string]any{"prompt_id": promptID})
+	return err
+}
+
+func postComfyCancellation(ctx context.Context, endpoint string, body map[string]any) (int, error) {
+	var payload []byte
+	if body != nil {
+		payload, _ = json.Marshal(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
-		return
+		return 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, trace, err := tracedDo(&http.Client{Timeout: 5 * time.Second}, req, "queue", 2048)
+	resp, _, err := tracedDo(http.DefaultClient, req, "cancel", 2048)
 	if err != nil {
-		a.log.Printf("deleteComfyQueueItem failed: %v", err)
-		return
+		return 0, err
 	}
-	resp.Body.Close()
-	trace.emit("queue delete requested", map[string]any{"prompt_id": promptID})
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return resp.StatusCode, fmt.Errorf("ComfyUI 取消请求返回 HTTP %d", resp.StatusCode)
+	}
+	return resp.StatusCode, nil
+}
+
+func supportsScopedInterrupt(ctx context.Context, baseURL string) bool {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/system_stats", nil)
+	if err != nil {
+		return false
+	}
+	resp, _, err := tracedDo(http.DefaultClient, req, "system_stats", 2048)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	var stats struct {
+		System struct {
+			Version string `json:"comfyui_version"`
+		} `json:"system"`
+	}
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&stats) != nil {
+		return false
+	}
+	version, _, _ := strings.Cut(strings.TrimPrefix(stats.System.Version, "v"), "+")
+	parts := strings.Split(version, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	var numbers [3]uint64
+	for index, part := range parts {
+		number, err := strconv.ParseUint(part, 10, 32)
+		if err != nil {
+			return false
+		}
+		numbers[index] = number
+	}
+	major, minor, patch := numbers[0], numbers[1], numbers[2]
+	return major > 0 || minor > 3 || minor == 3 && patch >= 60
+}
+
+func (a *app) cancelUnrecordedComfyJob(itemID int64, baseURL, promptID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := cancelComfyJob(ctx, baseURL, promptID); err != nil {
+		a.recordRemoteCancellationError(itemID, err)
+	}
 }

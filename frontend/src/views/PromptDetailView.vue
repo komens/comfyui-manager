@@ -1,11 +1,12 @@
 <script setup lang="ts">
+import ViewFeedback from '../components/ViewFeedback.vue'
 import { onMounted, onUnmounted, ref, computed, watch } from 'vue'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import PlatformBadge from '../components/PlatformBadge.vue'
 import { api, type Workflow } from '../api/client'
 import { thumbUrl } from '../utils/imageUrls'
-import { pickWorkflowId, rememberWorkflowId } from '../utils/workflowParams'
+import { fetchWorkflows, pickWorkflowId, rememberWorkflowId } from '../utils/workflowParams'
 import { openImageViewer } from '../utils/imageViewer'
 import { backToListOr } from '../utils/nav'
 import { ensurePlatforms } from '../utils/platforms'
@@ -90,8 +91,7 @@ function setPolling(on: boolean) {
 
 watch(busy, v => setPolling(v), { immediate: true })
 async function loadWorkflows() {
-  const result = await api<{ items: Workflow[] }>('/api/workflows?page_size=200')
-  workflows.value = result.items
+  workflows.value = await fetchWorkflows()
 }
 
 function openRunModal() {
@@ -148,8 +148,13 @@ async function toggleFavorite() {
 
 // 返回时优先走历史（保留列表页的分页/筛选 query），直链进入则回列表第一页
 function backToList() {
-  backToListOr(router, '/prompts')
+  backToListOr(router, returnList.value)
 }
+
+const returnList = computed(() => {
+  const previous = window.history.state?.back as string | undefined
+  return previous?.split('?')[0] === '/gallery' ? '/gallery' : '/prompts'
+})
 
 function openRunImages(run: Run, index: number) {
   openImageViewer(run.images.map(i => ({ id: i.id, width: i.width, height: i.height })), index, {
@@ -176,21 +181,14 @@ onUnmounted(() => setPolling(false))
 <template>
   <PageHeader title="提示词详情" description="查看提示词内容和历史生成结果。" />
 
-  <div v-if="loading" class="card">
-    <div class="card-body flex items-center gap-3">
-      <span class="spinner"></span>
-      <span class="muted">加载中...</span>
-    </div>
-  </div>
-
-  <div v-else-if="loadingError" class="empty-state">
-    <div class="empty-icon">&#9888;</div>
-    <div>{{ loadingError }}</div>
-    <button class="btn" style="margin-top: 12px" @click="load">重试</button>
-  </div>
+  <ViewFeedback :kind="messageType" :message="message" />
+  <ViewFeedback v-if="loading" kind="loading" />
+  <ViewFeedback v-else-if="loadingError" kind="error" :message="loadingError">
+    <el-button text size="small" @click="load()">重试</el-button>
+  </ViewFeedback>
 
   <div v-else-if="prompt">
-    <button class="btn btn-ghost btn-sm" style="margin-bottom:12px;" @click="backToList">&larr; 返回列表</button>
+    <el-button text size="small" style="margin-bottom:12px;" @click="backToList">&larr; {{ returnList === '/gallery' ? '返回图库' : '返回列表' }}</el-button>
 
     <div class="card detail-card">
       <div class="card-body">
@@ -204,12 +202,12 @@ onUnmounted(() => setPolling(false))
             </div>
           </div>
           <div class="detail-actions">
-            <button class="btn btn-ghost" :class="{ 'fav-active': prompt.is_favorite }" @click="toggleFavorite">
+            <el-button text :class="{ 'fav-active': prompt.is_favorite }" @click="toggleFavorite">
               {{ prompt.is_favorite ? '★ 已收藏' : '☆ 收藏' }}
-            </button>
-            <button class="btn btn-primary" @click="openRunModal">&#9654; 重跑</button>
+            </el-button>
+            <el-button type="primary" @click="openRunModal">&#9654; 重跑</el-button>
             <RouterLink :to="`/prompts/${prompt.id}/edit`" class="btn btn-secondary">编辑</RouterLink>
-            <button class="btn btn-ghost btn-danger" @click="deletePrompt">删除</button>
+            <el-button type="danger" text @click="deletePrompt">删除</el-button>
           </div>
         </div>
         <div v-if="prompt.description" class="text-sm muted detail-desc">{{ prompt.description }}</div>
@@ -242,10 +240,8 @@ onUnmounted(() => setPolling(false))
     </div>
 
     <h3 style="margin:20px 0 12px;">生成历史（{{ prompt.runs.length }}）</h3>
-    <div v-if="!prompt.runs.length" class="card empty-state">
-      <div class="empty-icon">&#128247;</div>
-      <p>{{ prompt.source_platform ? '还没有本平台生成记录，点击「重跑」可用本平台工作流生成。' : '还没有生成记录，点击「重跑」开始生成。' }}</p>
-    </div>
+    <ViewFeedback v-if="!prompt.runs.length" kind="empty"
+      :message="prompt.source_platform ? '暂无本平台生成记录' : '暂无生成记录，可点击重跑开始生成'" />
     <div v-else class="run-list">
       <div v-for="run in prompt.runs" :key="run.item_id" class="card run-item">
         <div class="run-head">
@@ -270,28 +266,18 @@ onUnmounted(() => setPolling(false))
     </div>
   </div>
 
-  <!-- 重跑弹窗 -->
-  <div v-if="showRunModal" class="modal-overlay" @click.self="showRunModal = false">
-    <div class="modal">
-      <h3 style="margin-top:0;">重跑提示词</h3>
-      <label class="form-label">选择工作流</label>
-      <select v-model.number="selectedWorkflow" class="input" @change="onWorkflowChange">
-        <option :value="0" disabled>请选择工作流</option>
-        <option v-for="w in workflows.filter(x => x.enabled)" :key="w.id" :value="w.id">{{ w.name }}</option>
-      </select>
-      <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:16px;">
-        <button class="btn btn-ghost" @click="showRunModal = false">取消</button>
-        <button class="btn btn-primary" :disabled="running" @click="confirmRun">
-          {{ running ? '提交中...' : '开始生成' }}
-        </button>
-      </div>
-    </div>
-  </div>
+  <el-dialog v-model="showRunModal" title="重跑提示词" class="app-dialog" width="min(520px, calc(100% - 24px))" top="6vh" append-to-body>
+    <label class="form-label" for="rerun-workflow">选择工作流</label>
+    <el-select id="rerun-workflow" v-model="selectedWorkflow" @change="onWorkflowChange" filterable popper-class="bounded-select-options">
+      <el-option :value="0" disabled label="请选择工作流" />
+      <el-option v-for="w in workflows.filter(x => x.enabled)" :key="w.id" :value="w.id" :label="w.name" />
+    </el-select>
+    <template #footer>
+      <el-button @click="showRunModal = false">取消</el-button>
+      <el-button type="primary" :loading="running" :disabled="!selectedWorkflow" @click="confirmRun">开始生成</el-button>
+    </template>
+  </el-dialog>
 
-  <!-- Toast 消息 -->
-  <Teleport to="body">
-    <div v-if="message" class="toast-msg" :class="messageType">{{ message }}</div>
-  </Teleport>
 </template>
 
 <style scoped>
@@ -302,39 +288,22 @@ onUnmounted(() => setPolling(false))
 .detail-title { margin: 0 0 8px; font-size: 22px; line-height: 1.3; word-break: break-word; }
 .detail-badges { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .detail-actions { display: flex; gap: 8px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
+.detail-actions .el-button + .el-button { margin-left: 0; }
 .detail-desc { margin-bottom: 12px; }
 .prompt-box { background: var(--c-bg-subtle); border: 1px solid var(--c-border); border-radius: 8px; padding: 14px; font-size: 14px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; }
 .prompt-sub-label { margin: 14px 0 6px; font-size: 12px; font-weight: 600; color: var(--c-text-muted, #888); letter-spacing: .04em; }
 .prompt-box-neg { color: var(--c-text-muted, #666); }
-.btn-danger { color: var(--c-danger); }
 .run-item { padding: 14px; margin-bottom: 12px; }
 .run-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .run-images { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
 .run-thumb { width: 140px; height: 140px; object-fit: cover; border-radius: 8px; border: 1px solid var(--c-border); cursor: zoom-in; transition: transform 0.15s; }
 .run-thumb:hover { transform: scale(1.03); }
 .badge-muted { background: var(--c-bg-subtle); color: var(--c-muted); }
-.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 100; padding: 20px; }
-.modal { background: var(--c-card); border-radius: 12px; padding: 24px; width: 100%; max-width: 520px; max-height: 85vh; overflow-y: auto; box-shadow: var(--shadow-lg); }
-.modal .collapse-panel { margin-top: 16px; }
 @media (max-width: 640px) {
   .detail-head { flex-direction: column; gap: 12px; }
   .detail-actions { width: 100%; justify-content: stretch; }
-  .detail-actions .btn { flex: 1; text-align: center; }
+  .detail-actions .el-button { flex: 1; text-align: center; }
   .detail-title { font-size: 19px; }
 }
-.toast-msg {
-  position: fixed;
-  top: 20px;
-  right: 20px;
-  z-index: 300;
-  padding: 10px 18px;
-  border-radius: var(--radius-sm);
-  font-size: 14px;
-  font-weight: 500;
-  box-shadow: var(--shadow-lg);
-  animation: fadeIn .2s ease;
-}
-.toast-msg.success { background: var(--c-success-light); color: var(--c-success); border: 1px solid var(--c-success-border); }
-.toast-msg.error { background: var(--c-danger-light); color: var(--c-danger); border: 1px solid var(--c-danger-border); }
 @keyframes fadeIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
 </style>

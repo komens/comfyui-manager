@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ViewFeedback from '../components/ViewFeedback.vue'
 import { onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
@@ -11,6 +12,8 @@ type Stats = { total_tasks: number; total_images: number; pending_entries: numbe
 const router = useRouter()
 const tasks = ref<Task[]>([])
 const stats = ref<Stats | null>(null)
+const loading = ref(true)
+const loadError = ref('')
 const comfyUrl = ref('')
 const comfyStatus = ref<'checking' | 'online' | 'offline'>('checking')
 let timer: ReturnType<typeof setInterval> | null = null
@@ -23,8 +26,11 @@ async function load() {
     ])
     tasks.value = taskResult.items
     stats.value = statsData
-  } catch {
-    tasks.value = []
+    loadError.value = ''
+  } catch (e) {
+    loadError.value = e instanceof Error ? e.message : '无法加载最近任务'
+  } finally {
+    loading.value = false
   }
 }
 
@@ -122,10 +128,11 @@ function formatTime(t: string) {
       <h2>最近任务</h2>
       <RouterLink to="/submit" class="btn btn-primary btn-sm">新建任务</RouterLink>
     </div>
-    <div v-if="!tasks.length" class="empty-state">
-      <div class="empty-icon">&#128221;</div>
-      <p>暂无任务记录，点击上方按钮新建任务。</p>
-    </div>
+    <ViewFeedback v-if="loading" kind="loading" />
+    <ViewFeedback v-else-if="loadError && !tasks.length" kind="error" :message="loadError">
+      <el-button text size="small" @click="load">重试</el-button>
+    </ViewFeedback>
+    <ViewFeedback v-else-if="!tasks.length" kind="empty" message="暂无任务记录" />
     <div v-else>
       <RouterLink
         v-for="task in tasks.slice(0, 10)"

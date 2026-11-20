@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -90,8 +91,8 @@ type cleanupStats struct {
 	FilesFound int `json:"files_found"`
 }
 
-// cleanupSample 是预览里给人眼确认用的少量样本。
-type cleanupSample struct {
+// cleanupPreviewImage 是清理预览的一条图片记录。
+type cleanupPreviewImage struct {
 	ID        int64  `json:"id"`
 	Title     string `json:"title"`
 	Filename  string `json:"filename"`
@@ -264,7 +265,6 @@ type cleanupPlan struct {
 	ProtectedRunning int
 	Bytes            int64
 	FilesFound       int
-	Samples          []cleanupSample
 }
 
 // plan.Protected 存的是「同条件但不看收藏」的命中总数，真正被收藏拦下的数量由
@@ -320,8 +320,7 @@ func (a *app) planImages(ctx context.Context, f *cleanupFilter) (*cleanupPlan, e
 	plan := &cleanupPlan{Target: "images", ImageFiles: map[int64]string{}}
 
 	rows, err := a.db.QueryContext(ctx,
-		`SELECT i.id, i.storage_path, i.filename, i.created_at, COALESCE(gi.id,0), COALESCE(gi.task_id,0),
-		        COALESCE(p.title,''), COALESCE(p.group_name,'')`+maintenanceImageJoins+where+` ORDER BY i.id`, args...)
+		`SELECT i.id, i.storage_path, COALESCE(gi.id,0), COALESCE(gi.task_id,0)`+maintenanceImageJoins+where+` ORDER BY i.id`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query images failed: %w", err)
 	}
@@ -329,8 +328,8 @@ func (a *app) planImages(ctx context.Context, f *cleanupFilter) (*cleanupPlan, e
 	tasks := map[int64]bool{}
 	for rows.Next() {
 		var id, itemID, taskID int64
-		var storage, filename, created, title, group string
-		if err := rows.Scan(&id, &storage, &filename, &created, &itemID, &taskID, &title, &group); err != nil {
+		var storage string
+		if err := rows.Scan(&id, &storage, &itemID, &taskID); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -341,9 +340,6 @@ func (a *app) planImages(ctx context.Context, f *cleanupFilter) (*cleanupPlan, e
 		}
 		if taskID > 0 {
 			tasks[taskID] = true
-		}
-		if len(plan.Samples) < 8 {
-			plan.Samples = append(plan.Samples, cleanupSample{ID: id, Title: title, Filename: filename, Group: group, CreatedAt: created})
 		}
 	}
 	rows.Close()
@@ -427,26 +423,20 @@ func (a *app) planTasks(ctx context.Context, f *cleanupFilter) (*cleanupPlan, er
 		iargs[i] = id
 	}
 	imgRows, err := a.db.QueryContext(ctx,
-		`SELECT i.id, i.storage_path, i.filename, i.created_at, COALESCE(p.title,''), COALESCE(p.group_name,'')
-		 FROM images i
-		 LEFT JOIN generation_items gi ON gi.id = i.generation_item_id
-		 LEFT JOIN prompts p ON p.id = gi.prompt_id
+		`SELECT i.id, i.storage_path FROM images i
 		 WHERE i.generation_item_id IN (`+iin+`) ORDER BY i.id`, iargs...)
 	if err != nil {
 		return nil, fmt.Errorf("query task images failed: %w", err)
 	}
 	for imgRows.Next() {
 		var id int64
-		var storage, filename, created, title, group string
-		if err := imgRows.Scan(&id, &storage, &filename, &created, &title, &group); err != nil {
+		var storage string
+		if err := imgRows.Scan(&id, &storage); err != nil {
 			imgRows.Close()
 			return nil, err
 		}
 		plan.ImageIDs = append(plan.ImageIDs, id)
 		plan.ImageFiles[id] = storage
-		if len(plan.Samples) < 8 {
-			plan.Samples = append(plan.Samples, cleanupSample{ID: id, Title: title, Filename: filename, Group: group, CreatedAt: created})
-		}
 	}
 	imgRows.Close()
 	if err := imgRows.Err(); err != nil {
@@ -489,6 +479,17 @@ func (a *app) planPrompts(ctx context.Context, f *cleanupFilter) (*cleanupPlan, 
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	if f.onlyUnfavorite() {
+		relaxed := *f
+		no := false
+		relaxed.OnlyUnfavorite = &no
+		rwhere, rargs, err := relaxed.promptFilterWhere()
+		if err == nil {
+			if err := a.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM prompts p`+rwhere, rargs...).Scan(&plan.Protected); err != nil {
+				return nil, fmt.Errorf("count protected prompts failed: %w", err)
+			}
+		}
+	}
 	if len(plan.PromptIDs) == 0 {
 		return plan, nil
 	}
@@ -496,15 +497,6 @@ func (a *app) planPrompts(ctx context.Context, f *cleanupFilter) (*cleanupPlan, 
 	pargs := make([]any, len(plan.PromptIDs))
 	for i, id := range plan.PromptIDs {
 		pargs[i] = id
-	}
-	if f.onlyUnfavorite() {
-		relaxed := *f
-		no := false
-		relaxed.OnlyUnfavorite = &no
-		rwhere, rargs, err := relaxed.promptFilterWhere()
-		if err == nil {
-			_ = a.db.QueryRowContext(ctx, `SELECT COUNT(*)`+rwhere, rargs...).Scan(&plan.Protected)
-		}
 	}
 
 	// 这些提示词名下的 item：解绑模式下要置 prompt_id=NULL，级联模式下连item 带图一起删。
@@ -536,7 +528,7 @@ func (a *app) planPrompts(ctx context.Context, f *cleanupFilter) (*cleanupPlan, 
 		iargs[i] = id
 	}
 	imgRows, err := a.db.QueryContext(ctx,
-		`SELECT i.id, i.storage_path, i.filename, i.created_at, p.title, p.group_name
+		`SELECT i.id, i.storage_path
 		 FROM images i
 		 JOIN generation_items gi ON gi.id = i.generation_item_id
 		 JOIN prompts p ON p.id = gi.prompt_id
@@ -546,16 +538,13 @@ func (a *app) planPrompts(ctx context.Context, f *cleanupFilter) (*cleanupPlan, 
 	}
 	for imgRows.Next() {
 		var id int64
-		var storage, filename, created, title, group string
-		if err := imgRows.Scan(&id, &storage, &filename, &created, &title, &group); err != nil {
+		var storage string
+		if err := imgRows.Scan(&id, &storage); err != nil {
 			imgRows.Close()
 			return nil, err
 		}
 		plan.ImageIDs = append(plan.ImageIDs, id)
 		plan.ImageFiles[id] = storage
-		if len(plan.Samples) < 8 {
-			plan.Samples = append(plan.Samples, cleanupSample{ID: id, Title: title, Filename: filename, Group: group, CreatedAt: created})
-		}
 	}
 	imgRows.Close()
 	if err := imgRows.Err(); err != nil {
@@ -587,11 +576,10 @@ func (f *cleanupFilter) taskFilterWhere() (string, []any, error) {
 		where += " AND t.created_at<?"
 		args = append(args, to)
 	}
+	where += " AND t.status!='running'"
 	if s := strings.TrimSpace(f.Status); s != "" {
 		where += " AND t.status=?"
 		args = append(args, s)
-	} else {
-		where += " AND t.status!='running'"
 	}
 	if len(f.WorkflowIDs) > 0 {
 		where += " AND t.workflow_id IN (" + placeholders(len(f.WorkflowIDs)) + ")"
@@ -647,6 +635,16 @@ func (f *cleanupFilter) promptFilterWhere() (string, []any, error) {
 	}
 	if f.onlyUnfavorite() {
 		where += " AND p.is_favorite=0"
+		if f.CascadeImages {
+			where += ` AND NOT EXISTS (SELECT 1 FROM generation_items gi
+				JOIN images i ON i.generation_item_id=gi.id WHERE gi.prompt_id=p.id AND i.is_favorite=1)`
+		}
+	}
+	if f.CascadeImages {
+		where += ` AND NOT EXISTS (SELECT 1 FROM generation_items gi
+			JOIN generation_tasks t ON t.id=gi.task_id
+			WHERE gi.prompt_id=p.id AND t.status IN ('pending','running')
+			AND gi.status IN ('pending','running','submitted'))`
 	}
 	for _, term := range f.keywordTerms() {
 		where += " AND (p.title LIKE ? OR p.positive_prompt LIKE ? OR p.description LIKE ?)"
@@ -775,10 +773,6 @@ func parseInt64List(raw string) []int64 {
 var errNoSuchBatch = errors.New("cleanup batch not found")
 
 // ─────────────────────────── 回收站 ───────────────────────────
-//
-// 批量删几千条不可能不误删，所以删除走「软删」：DB 行打上 deleted_at + 批次号，
-// 图片文件移到 data/trash/<批次号>/ 原地不动。清空回收站时才真正物理删除。
-// 还原就是反过来：行恢复 deleted_at=NULL，文件移回 images/。
 
 // nowStamp 是本模块统一的时间戳格式。
 // 刻意用 RFC3339 而不是 Go 默认的 time.Time.String()：后者带 `m=+123.456`
@@ -791,6 +785,7 @@ func nowStamp() string {
 // 没初始化过时所有维护接口返回 503（而不是 panic）。
 type cleanupStore struct {
 	dir string // data/trash
+	mu  sync.Mutex
 }
 
 // cleanupBatchRows 是回收站列表的一行。
@@ -828,6 +823,10 @@ func (a *app) initCleanup() error {
 			storage_path TEXT NOT NULL,
 			bytes INTEGER NOT NULL DEFAULT 0,
 			created_at DATETIME NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS trash_image_metadata (
+			trash_id INTEGER PRIMARY KEY,
+			snapshot TEXT NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_trash_images_batch ON trash_images(batch_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_trash_images_image ON trash_images(image_id)`,
@@ -875,56 +874,91 @@ func (a *app) newBatch(ctx context.Context, reason string) (int64, error) {
 // moveToTrash 把图片文件移入回收站。返回移走的字节数与是否真的移了。
 // 源文件不存在时不算错误（库里可能有记录但文件早被手工删了）。
 func (a *app) moveToTrash(ctx context.Context, batchID int64, imageID int64, storage string) (int64, bool, error) {
+	ctx = context.WithoutCancel(ctx)
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, false, err
+	}
+	defer tx.Rollback()
+	var snapshot string
+	err = tx.QueryRowContext(ctx, `SELECT json_object(
+		'item_id', i.generation_item_id, 'prompt_id', COALESCE(NULLIF(i.prompt_id,0), gi.prompt_id,0),
+		'platform', i.source_platform, 'hash', i.image_hash, 'filename', i.filename,
+		'favorite', i.is_favorite, 'width', i.width, 'height', i.height, 'created_at', i.created_at,
+		'output_key', i.comfy_output_key, 'negative', i.effective_negative_prompt)
+		FROM images i LEFT JOIN generation_items gi ON gi.id=i.generation_item_id WHERE i.id=?`, imageID).Scan(&snapshot)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+
 	stored := a.imageFilePath(storage)
 	if stored == "" {
 		return 0, false, nil
+	}
+	info, err := os.Stat(stored)
+	if err != nil {
+		return 0, false, err
 	}
 	dir := a.cleanup.batchDir(batchID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return 0, false, err
 	}
-	var size int64
-	if info, err := os.Stat(stored); err == nil {
-		size = info.Size()
-	}
-	// 目标名带上 image_id：同一批次里 storage_path 理论上唯一，但历史数据
-	// 里出现过同名文件，直接用 basename 会互相覆盖。
 	target := filepath.Join(dir, fmt.Sprintf("%d_%s", imageID, filepath.Base(stored)))
+	result, err := tx.ExecContext(ctx,
+		`INSERT INTO trash_images(batch_id, image_id, filename, storage_path, bytes, created_at)
+		 VALUES(?,?,?,?,?,?)`, batchID, imageID, filepath.Base(stored), target, info.Size(), nowStamp())
+	if err != nil {
+		return 0, false, err
+	}
+	trashID, err := result.LastInsertId()
+	if err != nil {
+		return 0, false, err
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO trash_image_metadata(trash_id,snapshot) VALUES(?,?)", trashID, snapshot); err != nil {
+		return 0, false, err
+	}
 	if err := os.Rename(stored, target); err != nil {
-		// 跨设备（trash 与 images 不在同一分区）时 rename 会失败，退化成复制+删除
-		if !copyFileThenRemove(stored, target) {
-			return 0, false, nil
+		if err := copyImageFile(stored, target); err != nil {
+			return 0, false, err
+		}
+		if err := os.Remove(stored); err != nil {
+			_ = os.Remove(target)
+			return 0, false, err
 		}
 	}
-	if _, err := a.db.ExecContext(ctx,
-		`INSERT INTO trash_images(batch_id, image_id, filename, storage_path, bytes, created_at)
-		 VALUES(?,?,?,?,?,?)`,
-		batchID, imageID, filepath.Base(stored), target, size, nowStamp()); err != nil {
-		return size, true, err
+	if err := tx.Commit(); err != nil {
+		if moveErr := os.Rename(target, stored); moveErr != nil {
+			if copyErr := copyImageFile(target, stored); copyErr == nil {
+				_ = os.Remove(target)
+			} else {
+				return 0, false, errors.Join(err, copyErr)
+			}
+		}
+		return 0, false, err
 	}
-	return size, true, nil
+	return info.Size(), true, nil
 }
 
-// copyFileThenRemove 跨设备时的降级方案。
-func copyFileThenRemove(src, dst string) bool {
+// copyImageFile creates a new destination and keeps the source available for rollback.
+func copyImageFile(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
-		return false
+		return err
 	}
 	defer in.Close()
-	out, err := os.Create(dst)
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		return false
+		return err
 	}
-	defer out.Close()
-	if _, err := io.Copy(out, in); err != nil {
-		return false
+	_, copyErr := io.Copy(out, in)
+	err = errors.Join(copyErr, out.Close())
+	if err != nil {
+		_ = os.Remove(dst)
 	}
-	if err := out.Sync(); err != nil {
-		return false
-	}
-	_ = os.Remove(src)
-	return true
+	return err
 }
 
 // ─────────────────────────── 执行清理 ───────────────────────────
@@ -953,8 +987,7 @@ type cleanupResult struct {
 
 // applyPlan 真正执行删除。
 //
-// 删除顺序：文件先移入回收站 → 再在一个事务里删库行。
-// 反过来的话，删库成功但移文件失败就会留下永远无法从界面清理的孤儿文件。
+// 先保存图片及其恢复信息，再按清理目标删除相应记录。
 func (a *app) applyPlan(ctx context.Context, plan *cleanupPlan, f *cleanupFilter) (*cleanupResult, error) {
 	start := time.Now()
 	res := &cleanupResult{}
@@ -965,7 +998,7 @@ func (a *app) applyPlan(ctx context.Context, plan *cleanupPlan, f *cleanupFilter
 	}
 	res.BatchID = batchID
 
-	// 第一步：文件移入回收站。放在事务外——文件操作慢，绝不能占着写锁做。
+	// 每张图片单独记录恢复信息，失败时已归档的文件仍可从回收站恢复。
 	for _, imageID := range plan.ImageIDs {
 		storage := plan.ImageFiles[imageID]
 		if storage == "" {
@@ -981,36 +1014,32 @@ func (a *app) applyPlan(ctx context.Context, plan *cleanupPlan, f *cleanupFilter
 		}
 	}
 
-	// 第二步：删库行。分批提交，每批一个短事务。
-	// prompts 且非级联时，item 只解绑不删（图还在，得留 item 记录）。
-	unbindOnly := f.Target == "prompts" && !f.CascadeImages
-	if unbindOnly {
+	if f.Target == "prompts" && !f.CascadeImages {
 		if _, err := a.chunkedDelete(ctx, "UPDATE generation_items SET prompt_id=NULL WHERE prompt_id IN", plan.PromptIDs); err != nil {
 			return nil, err
 		}
-	} else {
-		if _, err := a.chunkedDelete(ctx, "DELETE FROM images WHERE id IN", plan.ImageIDs); err != nil {
-			return nil, err
-		}
-		if _, err := a.chunkedDelete(ctx, "DELETE FROM generation_items WHERE id IN", plan.ItemIDs); err != nil {
-			return nil, err
-		}
 	}
-	if _, err := a.chunkedDelete(ctx, "DELETE FROM generation_tasks WHERE id IN", plan.TaskIDs); err != nil {
+	if res.Images, err = a.chunkedDelete(ctx, "DELETE FROM images WHERE id IN", plan.ImageIDs); err != nil {
 		return nil, err
 	}
-	if _, err := a.chunkedDelete(ctx, "DELETE FROM prompts WHERE id IN", plan.PromptIDs); err != nil {
-		return nil, err
+	// Image-only plans also report related tasks for preview. Keep those records.
+	if f.Target == "tasks" || f.Target == "prompts" && f.CascadeImages {
+		if res.Items, err = a.chunkedDelete(ctx, "DELETE FROM generation_items WHERE id IN", plan.ItemIDs); err != nil {
+			return nil, err
+		}
+		a.forgetItemsCleanup(plan.ItemIDs)
+	}
+	if f.Target == "tasks" {
+		if res.Tasks, err = a.chunkedDelete(ctx, "DELETE FROM generation_tasks WHERE id IN", plan.TaskIDs); err != nil {
+			return nil, err
+		}
+	}
+	if f.Target != "images" {
+		if res.Prompts, err = a.chunkedDelete(ctx, "DELETE FROM prompts WHERE id IN", plan.PromptIDs); err != nil {
+			return nil, err
+		}
 	}
 
-	// 任务被删后，saveFailures / waiting 里残留的计数要清掉，
-	// 否则这些 map 会随着一次次清理无界增长。
-	a.forgetItemsCleanup(plan.ItemIDs)
-
-	res.Images = len(plan.ImageIDs)
-	res.Items = len(plan.ItemIDs)
-	res.Tasks = len(plan.TaskIDs)
-	res.Prompts = len(plan.PromptIDs)
 	res.Protected = plan.Protected
 	res.Trashed = true
 	res.DurationMS = time.Since(start).Milliseconds()
@@ -1108,8 +1137,35 @@ func (a *app) requireCleanup(w http.ResponseWriter) bool {
 	return true
 }
 
-// previewCleanup 只查不删：返回命中数量、占用体积、样本、被保护数量。
-// expected 是「调用方以为会命中多少」——用来发现两次请求之间数据变了。
+const cleanupPreviewPageSize = 24
+
+func (a *app) cleanupPreviewImages(ctx context.Context, ids []int64) ([]cleanupPreviewImage, error) {
+	images := make([]cleanupPreviewImage, 0, len(ids))
+	if len(ids) == 0 {
+		return images, nil
+	}
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	rows, err := a.db.QueryContext(ctx,
+		`SELECT i.id, i.filename, i.created_at, COALESCE(p.title,''), COALESCE(p.group_name,'')`+
+			maintenanceImageJoins+` WHERE i.id IN (`+placeholders(len(ids))+`) ORDER BY i.id`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var image cleanupPreviewImage
+		if err := rows.Scan(&image.ID, &image.Filename, &image.CreatedAt, &image.Title, &image.Group); err != nil {
+			return nil, err
+		}
+		images = append(images, image)
+	}
+	return images, rows.Err()
+}
+
+// previewCleanup 只查不删：返回全量统计与当前页待删除图片。
 func (a *app) previewCleanup(w http.ResponseWriter, r *http.Request) {
 	if !a.requireCleanup(w) {
 		return
@@ -1133,11 +1189,22 @@ func (a *app) previewCleanup(w http.ResponseWriter, r *http.Request) {
 	case "prompts":
 		primary = len(plan.PromptIDs)
 	}
+	page, _ := strconv.Atoi(r.URL.Query().Get("image_page"))
+	imageCount := len(plan.ImageIDs)
+	lastPage := max(1, (imageCount+cleanupPreviewPageSize-1)/cleanupPreviewPageSize)
+	page = min(max(page, 1), lastPage)
+	start := (page - 1) * cleanupPreviewPageSize
+	images, err := a.cleanupPreviewImages(r.Context(), plan.ImageIDs[start:min(start+cleanupPreviewPageSize, imageCount)])
+	if err != nil {
+		writeError(w, 500, "query preview images failed: "+err.Error())
+		return
+	}
 	// 换算成「真正被收藏保护住的数量」后再对外给，否则统计里会显示一堆并不存在的收藏
 	plan.subtractProtected(primary)
 	resp := map[string]any{
 		"target": f.Target, "stats": plan.Stats(),
-		"primary_count": primary, "samples": plan.Samples,
+		"primary_count": primary, "samples": images,
+		"image_page": page, "image_page_size": cleanupPreviewPageSize,
 		"only_unfavorite": f.onlyUnfavorite(),
 		"warning":         cleanupWarning(&f, plan, primary),
 	}
@@ -1185,6 +1252,8 @@ func (a *app) runCleanup(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "confirm must be true to run cleanup")
 		return
 	}
+	a.cleanup.mu.Lock()
+	defer a.cleanup.mu.Unlock()
 	plan, err := a.resolveCleanup(r.Context(), &f)
 	if err != nil {
 		writeError(w, 400, err.Error())
@@ -1294,6 +1363,8 @@ func (a *app) purgeTrash(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid batch id")
 		return
 	}
+	a.cleanup.mu.Lock()
+	defer a.cleanup.mu.Unlock()
 	// 只按批次号拼路径：id 是整数，天然不可能穿越出 trash 目录。
 	dir := a.cleanup.batchDir(id)
 	if err := os.RemoveAll(dir); err != nil && !os.IsNotExist(err) {
@@ -1315,6 +1386,10 @@ func (a *app) purgeTrash(w http.ResponseWriter, r *http.Request) {
 			a.removeThumbs(imgID)
 		}
 	}
+	if _, err := a.db.ExecContext(r.Context(), "DELETE FROM trash_image_metadata WHERE trash_id IN (SELECT id FROM trash_images WHERE batch_id=?)", id); err != nil {
+		writeError(w, 500, "delete trash metadata failed")
+		return
+	}
 	if _, err := a.db.ExecContext(r.Context(), `DELETE FROM trash_images WHERE batch_id=?`, id); err != nil {
 		writeError(w, 500, "delete trash records failed")
 		return
@@ -1327,11 +1402,25 @@ func (a *app) purgeTrash(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"batch_id": id, "purged": true})
 }
 
-// restoreTrash 从回收站还原整个批次：文件移回 images/，DB 行插回去。
-//
-// 注意：这里只还原图片。任务 / 生成项 / 提示词的行在清理时已经从库里删掉，
-// 没有留存快照，所以无法自动重建 —— 这一点必须在界面上说清楚，
-// 否则用户会以为「还原」能把一切恢复如初。
+type trashImage struct {
+	id, imageID              int64
+	filename, path, snapshot string
+}
+
+type trashImageMetadata struct {
+	ItemID    int64   `json:"item_id"`
+	PromptID  int64   `json:"prompt_id"`
+	Platform  string  `json:"platform"`
+	Hash      string  `json:"hash"`
+	Filename  string  `json:"filename"`
+	Favorite  int     `json:"favorite"`
+	Width     int     `json:"width"`
+	Height    int     `json:"height"`
+	CreatedAt string  `json:"created_at"`
+	OutputKey string  `json:"output_key"`
+	Negative  *string `json:"negative"`
+}
+
 func (a *app) restoreTrash(w http.ResponseWriter, r *http.Request) {
 	if !a.requireCleanup(w) {
 		return
@@ -1341,59 +1430,103 @@ func (a *app) restoreTrash(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid batch id")
 		return
 	}
-	rows, err := a.db.QueryContext(r.Context(),
-		`SELECT image_id, filename, storage_path FROM trash_images WHERE batch_id=? ORDER BY id`, id)
+	a.cleanup.mu.Lock()
+	defer a.cleanup.mu.Unlock()
+
+	ctx := r.Context()
+	rows, err := a.db.QueryContext(ctx, `SELECT ti.id, ti.image_id, ti.filename, ti.storage_path, COALESCE(tm.snapshot,'')
+		FROM trash_images ti LEFT JOIN trash_image_metadata tm ON tm.trash_id=ti.id
+		WHERE ti.batch_id=? ORDER BY ti.id`, id)
 	if err != nil {
 		writeError(w, 500, "query trash images failed")
 		return
 	}
-	type rec struct {
-		imageID   int64
-		filename  string
-		trashPath string
-	}
-	var recs []rec
+	var records []trashImage
 	for rows.Next() {
-		var rec rec
-		if err := rows.Scan(&rec.imageID, &rec.filename, &rec.trashPath); err != nil {
+		var record trashImage
+		if err := rows.Scan(&record.id, &record.imageID, &record.filename, &record.path, &record.snapshot); err != nil {
 			rows.Close()
 			writeError(w, 500, "read trash image failed")
 			return
 		}
-		recs = append(recs, rec)
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		writeError(w, 500, "read trash images failed")
+		return
 	}
 	rows.Close()
 
 	restored, skipped := 0, 0
-	for _, rec := range recs {
-		if _, err := os.Stat(rec.trashPath); err != nil {
+	for _, record := range records {
+		if err := a.restoreTrashImage(ctx, record); err != nil {
+			a.log.Printf("restore trash image %d: %v", record.imageID, err)
 			skipped++
 			continue
 		}
-		// generation_item_id 已经不存在（item 被级联删了），所以只还原文件，
-		// 不重新插入 images 行——插进去会指向一个不存在的 item，
-		// 在 listImages 里表现为一条无标题的孤儿记录。
-		target := filepath.Join(a.dataDir, "images", filepath.Base(rec.filename))
-		if err := os.Rename(rec.trashPath, target); err != nil {
-			if !copyFileThenRemove(rec.trashPath, target) {
-				skipped++
-				continue
-			}
-		}
 		restored++
 	}
-	if _, err := a.db.ExecContext(r.Context(), `DELETE FROM trash_images WHERE batch_id=?`, id); err != nil {
-		writeError(w, 500, "delete trash records failed")
-		return
+	if skipped == 0 {
+		if _, err := a.db.ExecContext(ctx, "DELETE FROM cleanup_batches WHERE id=?", id); err != nil {
+			writeError(w, 500, "delete empty trash batch failed")
+			return
+		}
+		_ = os.Remove(a.cleanup.batchDir(id))
 	}
-	if _, err := a.db.ExecContext(r.Context(), `DELETE FROM cleanup_batches WHERE id=?`, id); err != nil {
-		writeError(w, 500, "delete batch failed")
-		return
+	writeJSON(w, 200, map[string]any{"batch_id": id, "files_restored": restored, "files_skipped": skipped})
+}
+
+func (a *app) restoreTrashImage(ctx context.Context, record trashImage) error {
+	meta := trashImageMetadata{Filename: record.filename, CreatedAt: nowStamp()}
+	if record.snapshot != "" {
+		if err := json.Unmarshal([]byte(record.snapshot), &meta); err != nil {
+			return err
+		}
+	} else {
+		meta.Width, meta.Height = imageSizeFromFile(record.path)
 	}
-	writeJSON(w, 200, map[string]any{
-		"batch_id": id, "files_restored": restored, "files_skipped": skipped,
-		"note": "图片文件已取回。由于生成项已被级联删除，图片库条目不会自动重建。",
-	})
+
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// A failed cleanup can leave the original image row in place. Reuse its ID.
+	target := filepath.Join(a.dataDir, "images", fmt.Sprintf("restored-%d-%s%s", record.id, randomHex(8), filepath.Ext(record.filename)))
+	if err := copyImageFile(record.path, target); err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.Remove(target)
+		}
+	}()
+	_, err = tx.ExecContext(ctx, `INSERT INTO images(id, generation_item_id, prompt_id, source_platform,
+		image_hash, filename, storage_path, is_favorite, width, height, created_at, comfy_output_key, effective_negative_prompt)
+		VALUES(?, COALESCE((SELECT id FROM generation_items WHERE id=?),0), COALESCE((SELECT id FROM prompts WHERE id=?),0),
+		?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET storage_path=excluded.storage_path`,
+		record.imageID, meta.ItemID, meta.PromptID, meta.Platform, meta.Hash, meta.Filename, target,
+		meta.Favorite, meta.Width, meta.Height, meta.CreatedAt, meta.OutputKey, meta.Negative)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM trash_image_metadata WHERE trash_id=?", record.id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM trash_images WHERE id=?", record.id); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	if err := os.Remove(record.path); err != nil {
+		a.log.Printf("remove restored trash file %s: %v", record.path, err)
+	}
+	a.queueThumbBuild(record.imageID, target)
+	return nil
 }
 
 // runVacuum 是手动触发整理的 HTTP 入口。
@@ -1467,22 +1600,35 @@ func (a *app) cleanupStatsHandler(w http.ResponseWriter, r *http.Request) {
 
 // scanImageDir 统计 images 目录：文件数、总字节、以及没有任何库记录引用的孤儿文件。
 // 孤儿文件来自历史的手工删除与历史 bug，清理它们能直接收回磁盘空间。
+type imageIndexReader interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
 func (a *app) scanImageDir(ctx context.Context) (files int, bytes int64, orphanNames []string) {
-	dir := filepath.Join(a.dataDir, "images")
-	entries, err := os.ReadDir(dir)
+	files, bytes, orphanNames, _ = a.scanImageIndex(ctx, a.db)
+	return
+}
+
+func (a *app) scanImageIndex(ctx context.Context, reader imageIndexReader) (files int, bytes int64, orphanNames []string, err error) {
+	entries, err := os.ReadDir(filepath.Join(a.dataDir, "images"))
 	if err != nil {
-		return 0, 0, nil
+		return 0, 0, nil, err
 	}
+	rows, err := reader.QueryContext(ctx, "SELECT storage_path FROM images")
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	defer rows.Close()
 	known := map[string]bool{}
-	rows, err := a.db.QueryContext(ctx, `SELECT storage_path FROM images`)
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var p string
-			if err := rows.Scan(&p); err == nil {
-				known[filepath.Base(p)] = true
-			}
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			return 0, 0, nil, err
 		}
+		known[filepath.Base(path)] = true
+	}
+	if err := rows.Err(); err != nil {
+		return 0, 0, nil, err
 	}
 	for _, e := range entries {
 		if e.IsDir() {
@@ -1500,23 +1646,30 @@ func (a *app) scanImageDir(ctx context.Context) (files int, bytes int64, orphanN
 	if len(orphanNames) > 200 {
 		orphanNames = orphanNames[:200]
 	}
-	return files, bytes, orphanNames
+	return files, bytes, orphanNames, nil
 }
 
 // purgeOrphans 删除没有任何库记录引用的图片文件（以及它们的缩略图）。
 func (a *app) purgeOrphans(w http.ResponseWriter, r *http.Request) {
-	_, _, orphans := a.scanImageDir(r.Context())
-	_, _, thumbOrphanIDs := a.scanThumbDir(r.Context())
-	if len(orphans) == 0 && len(thumbOrphanIDs) == 0 {
-		writeJSON(w, 200, map[string]any{"removed": 0})
-		return
-	}
+	ctx := r.Context()
 	var input struct {
 		Confirm bool `json:"confirm"`
 	}
-	_ = decodeJSON(r, &input)
-	if !input.Confirm {
-		writeError(w, 400, fmt.Sprintf("%d orphan files found, set confirm=true to remove", len(orphans)))
+	if err := decodeJSON(r, &input); err != nil || !input.Confirm {
+		writeError(w, 400, "set confirm=true to remove orphan files")
+		return
+	}
+	_, _, thumbOrphanIDs := a.scanThumbDir(ctx)
+	// Image writers publish the file while holding this same SQLite writer lock.
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		writeError(w, 500, "lock image index failed")
+		return
+	}
+	defer tx.Rollback()
+	_, _, orphans, err := a.scanImageIndex(ctx, tx)
+	if err != nil {
+		writeError(w, 500, "scan image index failed")
 		return
 	}
 	dir := filepath.Join(a.dataDir, "images")

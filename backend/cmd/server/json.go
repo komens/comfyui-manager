@@ -29,11 +29,12 @@ type jsonDocument struct {
 
 // importJSONStats 是 JSON 导入（文件或文本）的统一统计结果。
 type importJSONStats struct {
-	Filename  string `json:"filename"`
-	Total     int    `json:"total"`
-	Inserted  int    `json:"inserted"`
-	Skipped   int    `json:"skipped_duplicates"`
-	GroupName string `json:"group_name"`
+	Filename          string  `json:"filename"`
+	Total             int     `json:"total"`
+	Inserted          int     `json:"inserted"`
+	Skipped           int     `json:"skipped_duplicates"`
+	GroupName         string  `json:"group_name"`
+	InsertedPromptIDs []int64 `json:"inserted_prompt_ids"`
 }
 
 // uploadJSON 上传 JSON 文件，解析后入库到 prompts 表，并备份源文件
@@ -73,26 +74,44 @@ func (a *app) uploadJSON(w http.ResponseWriter, r *http.Request) {
 
 // importJSONEntries 是文件上传与文本粘贴导入共用的落库流程：备份源内容 → 记录 json_files → 按 (group_name, positive_prompt) 去重插入 prompts。
 func (a *app) importJSONEntries(ctx context.Context, content []byte, entries []jsonEntry, groupName string) (*importJSONStats, error) {
-	// 生成备份文件名（保留原始名 + 时间戳；名称已带时间戳时不重复追加）
-	timestamp := time.Now().Format("20060102_150405")
-	backupName := fmt.Sprintf("%s_%s.json", groupName, timestamp)
-	if regexp.MustCompile(`\d{8}_?\d{6}$`).MatchString(groupName) {
-		backupName = groupName + ".json"
-	}
-	backupPath := filepath.Join(a.dataDir, "json", backupName)
-	if err := writeAtomic(backupPath, content); err != nil {
-		return nil, fmt.Errorf("save JSON backup failed")
-	}
 	now := time.Now()
+	// 生成备份文件名（保留原始名 + 时间戳；名称已带时间戳时不重复追加）
+	baseName := groupName + "_" + now.Format("20060102_150405")
+	if regexp.MustCompile(`\d{8}_?\d{6}$`).MatchString(groupName) {
+		baseName = groupName
+	}
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("start JSON import failed: %w", err)
+	}
+	defer tx.Rollback()
+	backupName := baseName + ".json"
+	backupPath := filepath.Join(a.dataDir, "json", backupName)
+	for suffix := 2; ; suffix++ {
+		var registered bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM json_files WHERE filename=?)`, backupName).Scan(&registered); err != nil {
+			return nil, fmt.Errorf("check JSON backup name failed: %w", err)
+		}
+		_, statErr := os.Lstat(backupPath)
+		if !registered && os.IsNotExist(statErr) {
+			break
+		}
+		if statErr != nil && !os.IsNotExist(statErr) {
+			return nil, fmt.Errorf("check JSON backup path failed: %w", statErr)
+		}
+		backupName = fmt.Sprintf("%s_%d.json", baseName, suffix)
+		backupPath = filepath.Join(a.dataDir, "json", backupName)
+	}
 	// 记录文件（仅备份用途）
-	if _, err := a.db.ExecContext(ctx,
+	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO json_files(filename, storage_path, created_at) VALUES(?,?,?)`,
 		backupName, backupPath, now); err != nil {
 		return nil, fmt.Errorf("save JSON record failed")
 	}
 	// 去重：按 positive_prompt + group_name 检查
 	groupID := slugify(groupName)
-	inserted, skipped := 0, 0
+	insertedIDs := make([]int64, 0, len(entries))
+	skipped := 0
 	for _, entry := range entries {
 		title := entry.Title
 		if title == "" {
@@ -100,22 +119,36 @@ func (a *app) importJSONEntries(ctx context.Context, content []byte, entries []j
 		}
 		// 检查同组内是否已存在相同 positive_prompt
 		var exists int
-		_ = a.db.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM prompts WHERE group_name=? AND positive_prompt=?`, groupName, entry.Positive).Scan(&exists)
+		if err := tx.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM prompts WHERE group_name=? AND positive_prompt=?)`, groupName, entry.Positive).Scan(&exists); err != nil {
+			return nil, fmt.Errorf("check duplicate prompt failed: %w", err)
+		}
 		if exists > 0 {
 			skipped++
 			continue
 		}
-		if _, err := a.db.ExecContext(ctx,
+		result, err := tx.ExecContext(ctx,
 			`INSERT INTO prompts(title, description, positive_prompt, negative_prompt, group_name, group_id, status, created_at, updated_at) VALUES(?,?,?,?,?,?,'pending',?,?)`,
-			title, entry.Desc, entry.Positive, entry.Negative, groupName, groupID, now, now); err != nil {
-			continue
+			title, entry.Desc, entry.Positive, entry.Negative, groupName, groupID, now, now)
+		if err != nil {
+			return nil, fmt.Errorf("insert imported prompt failed: %w", err)
 		}
-		inserted++
+		id, err := result.LastInsertId()
+		if err != nil {
+			return nil, fmt.Errorf("read imported prompt ID failed: %w", err)
+		}
+		insertedIDs = append(insertedIDs, id)
+	}
+	if err := writeAtomic(backupPath, content); err != nil {
+		return nil, fmt.Errorf("save JSON backup failed: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		_ = os.Remove(backupPath)
+		return nil, fmt.Errorf("commit JSON import failed: %w", err)
 	}
 	return &importJSONStats{
 		Filename: backupName, Total: len(entries),
-		Inserted: inserted, Skipped: skipped, GroupName: groupName,
+		Inserted: len(insertedIDs), Skipped: skipped, GroupName: groupName, InsertedPromptIDs: insertedIDs,
 	}, nil
 }
 

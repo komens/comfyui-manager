@@ -129,7 +129,9 @@
 
 `GET /api/images/{id}/preview` 长边 1600 WebP（校验用）；`/api/images/{id}/file` 原图（交付用，单张数 MB）。直接返回图片字节。
 
-失败重试 `POST /api/tasks/{id}/retry`（仅 `failed`）；取消 `POST /api/tasks/{id}/cancel`（仅 `pending` / `running`）。
+重试使用 `POST /api/tasks/{id}/retry`，适用于有失败项的 `failed` 或 `completed` 任务。只补跑失败项，重试时采集当前工作流和 ComfyUI 地址。
+
+取消使用 `POST /api/tasks/{id}/cancel`，适用于 `pending` 或 `running` 任务。若远端取消未确认，响应的 `remote_warning` 会说明原因。
 
 ## 4. 轮询
 
@@ -140,12 +142,13 @@
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/workflows` | 列表 |
+| GET | `/api/workflows` | 列表。可传 `q` 按名称搜索，`status` 可为 `enabled`、`disabled`、`default` |
 | GET | `/api/workflows/{id}` | 详情，含完整 `workflow_json` |
 | POST | `/api/workflows` | 最小体 `{"name":"...","workflow_json":{...}}` |
 | PUT | `/api/workflows/{id}` | 字段均可选 |
 | DELETE | `/api/workflows/{id}` | 有 pending/running 任务时 409 |
-| PUT | `/api/workflows/{id}/default` | `{"is_default":true}`，全局唯一 |
+| PUT | `/api/workflows/{id}/default` | `{"is_default":true}`，限已启用工作流，全局唯一 |
+| PUT | `/api/workflows/{id}/enabled` | `{"enabled":false}` 禁用，`{"enabled":true}` 启用 |
 | GET | `/api/workflows/{id}/prompt-targets` | 正/负向落点 |
 | POST | `/api/workflows/{id}/validate` | 目标 ComfyUI 静态校验 |
 

@@ -17,6 +17,7 @@ node_modules/
 
 # 本机工作记录（会话记忆、临时笔记），不进版本库
 .workbuddy/
+.codegraph/
 
 # 个人调试脚本，不随项目分发
 submit.py

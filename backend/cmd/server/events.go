@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 )
 
 func (a *app) taskEvents(w http.ResponseWriter, r *http.Request) {
@@ -38,12 +39,20 @@ func (a *app) taskEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
 	_, _ = fmt.Fprint(w, ": connected\n\n")
 	flusher.Flush()
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
 	for {
 		select {
 		case data := <-channel:
 			_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+		case <-heartbeat.C:
+			if _, err := fmt.Fprint(w, ": heartbeat\n\n"); err != nil {
+				return
+			}
 			flusher.Flush()
 		case <-r.Context().Done():
 			return
@@ -80,7 +89,10 @@ func (a *app) cancelTask(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	writeJSON(w, 200, map[string]any{"id": id, "status": "cancelled"})
+	var warning string
+	_ = a.db.QueryRowContext(r.Context(), `SELECT error_message FROM generation_items
+		WHERE task_id=? AND status='cancelled' AND error_message!='' LIMIT 1`, id).Scan(&warning)
+	writeJSON(w, 200, map[string]any{"id": id, "status": "cancelled", "remote_warning": warning})
 }
 
 func (a *app) retryTask(w http.ResponseWriter, r *http.Request) {
@@ -94,7 +106,7 @@ func (a *app) retryTask(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, errTaskNotFound):
 			writeError(w, 404, "task not found")
 		case errors.Is(err, errTaskNotFailed):
-			writeError(w, 409, "only failed tasks can be retried")
+			writeError(w, 409, "task has no retryable failed items")
 		case errors.Is(err, errTaskWorkflowGone):
 			writeError(w, 409, "工作流已删除，无法重试该任务")
 		default:

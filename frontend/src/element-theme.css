@@ -101,3 +101,20 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+
+:is(.btn-group, .toolbar, .batch-bar, .task-actions, .pc-actions) > .el-button + .el-button {
+  margin-left: 0;
+}
+
+.bounded-select-options { max-width: calc(100vw - 24px); }
+.app-dialog .el-dialog__title { overflow-wrap: anywhere; }
+.task-submission-link { margin-inline-start: 8px; }
+
+@media (max-width: 768px) {
+  .el-input__inner,
+  .el-textarea__inner,
+  .el-select__input {
+    font-size: 16px;
+  }
+}

@@ -76,7 +76,14 @@ func TestImportImagesSkipsMissingAndKeepsDifferentSameNameImages(t *testing.T) {
 func TestTaskCreationChecksWorkflowForAllEntryPoints(t *testing.T) {
 	a := newTestApp(t)
 	mustExec(t, a, "INSERT INTO prompts(id, positive_prompt, group_name) VALUES(1,'test','review')")
-	mustExec(t, a, "INSERT INTO workflows(id, name, workflow_path, mapping_json, enabled, created_at, updated_at) VALUES(1,'Disabled','test.json','{}',0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)")
+	mustExec(t, a, "INSERT INTO workflows(id, name, workflow_path, mapping_json, enabled, created_at, updated_at) VALUES(1,'Workflow','test.json','{}',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)")
+	disableReq := httptest.NewRequest(http.MethodPut, "/", strings.NewReader(`{"enabled":false}`))
+	disableReq.SetPathValue("id", "1")
+	disableRec := httptest.NewRecorder()
+	a.setWorkflowEnabled(disableRec, disableReq)
+	if disableRec.Code != http.StatusOK {
+		t.Fatalf("disable workflow: %d %s", disableRec.Code, disableRec.Body)
+	}
 
 	for _, entry := range []struct {
 		name    string
@@ -105,7 +112,13 @@ func TestTaskCreationChecksWorkflowForAllEntryPoints(t *testing.T) {
 		t.Fatalf("unexpected tasks=%d error=%v", count, err)
 	}
 
-	mustExec(t, a, "UPDATE workflows SET enabled=1 WHERE id=1")
+	enableReq := httptest.NewRequest(http.MethodPut, "/", strings.NewReader(`{"enabled":true}`))
+	enableReq.SetPathValue("id", "1")
+	enableRec := httptest.NewRecorder()
+	a.setWorkflowEnabled(enableRec, enableReq)
+	if enableRec.Code != http.StatusOK {
+		t.Fatalf("enable workflow: %d %s", enableRec.Code, enableRec.Body)
+	}
 	req := httptest.NewRequest(http.MethodPost, "/api/prompts/group-run", strings.NewReader("{\"group_name\":\"review\",\"workflow_id\":1}"))
 	rec := httptest.NewRecorder()
 	a.groupRunPrompts(rec, req)
@@ -114,7 +127,7 @@ func TestTaskCreationChecksWorkflowForAllEntryPoints(t *testing.T) {
 		t.Fatalf("status=%d body=%s error=%v", rec.Code, rec.Body, err)
 	}
 	var name string
-	if err := a.db.QueryRow("SELECT workflow_name FROM generation_tasks").Scan(&name); err != nil || name != "Disabled" {
+	if err := a.db.QueryRow("SELECT workflow_name FROM generation_tasks").Scan(&name); err != nil || name != "Workflow" {
 		t.Fatalf("workflow_name=%q error=%v", name, err)
 	}
 }
@@ -152,7 +165,7 @@ func TestOutputSaveRetriesOnlyMissingImages(t *testing.T) {
 		status string
 		saved  int
 	}{{"submitted", 1}, {"success", 2}} {
-		a.checkAndDownload(1, 1, "mock-prompt", server.URL, make(map[string]comfyQueueSnapshot))
+		a.checkAndDownload(1, 1, "mock-prompt", server.URL, &comfyQueueCache{})
 		var status string
 		var saved, total, records int
 		if err := a.db.QueryRow("SELECT status, saved_output_count, output_count, (SELECT COUNT(*) FROM images) FROM generation_items WHERE id=1").Scan(&status, &saved, &total, &records); err != nil {
@@ -275,5 +288,303 @@ func TestDeleteTaskRemovesImageFilesKeepsFavorites(t *testing.T) {
 	a.db.QueryRow(`SELECT COUNT(*) FROM generation_tasks WHERE id=1`).Scan(&tasks)
 	if items != 0 || tasks != 0 {
 		t.Errorf("任务与生成项应被删除，实际 items=%d tasks=%d", items, tasks)
+	}
+}
+
+func TestQueueUsesCapturedWorkflowAndTarget(t *testing.T) {
+	a := newTestApp(t)
+	submissions := make(chan map[string]any, 1)
+	oldTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var submitted struct{ Prompt map[string]any }
+		if r.URL.Path != "/prompt" || json.NewDecoder(r.Body).Decode(&submitted) != nil {
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		submissions <- submitted.Prompt
+		_, _ = w.Write([]byte(`{"prompt_id":"queued-prompt"}`))
+	}))
+	defer oldTarget.Close()
+	mustExec(t, a, "UPDATE settings SET value=? WHERE key='comfyui_url'", oldTarget.URL)
+
+	original := `{"1":{"class_type":"CLIPTextEncode","inputs":{"text":"old-positive"}},
+		"2":{"class_type":"CLIPTextEncode","inputs":{"text":"old-negative"}},
+		"3":{"class_type":"KSampler","inputs":{"positive":["1",0],"negative":["2",0],"steps":20}}}`
+	if err := writeAtomic(a.workflowFilePath("workflow.json"), []byte(original)); err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, a, `INSERT INTO workflows(id,name,workflow_path,mapping_json,created_at,updated_at)
+		VALUES(1,'workflow','workflow.json','{}',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`)
+	rec := httptest.NewRecorder()
+	a.createDirectTask(rec, httptest.NewRequest("POST", "/", strings.NewReader(`{"workflow_id":1,"positive_prompt":"new-positive"}`)))
+	if rec.Code != 202 {
+		t.Fatalf("queue: %d %s", rec.Code, rec.Body)
+	}
+
+	mustExec(t, a, "UPDATE settings SET value='http://127.0.0.1:1' WHERE key='comfyui_url'")
+	updated := strings.ReplaceAll(original, "old-negative", "edited-negative")
+	req := httptest.NewRequest("PUT", "/", strings.NewReader(`{"negative_prompt":"edited-negative","workflow_json":`+updated+`}`))
+	req.SetPathValue("id", "1")
+	rec = httptest.NewRecorder()
+	a.updateWorkflow(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("update: %d %s", rec.Code, rec.Body)
+	}
+	a.submitPendingItems()
+	var storedURL, negative, status string
+	if err := a.db.QueryRow("SELECT submitted_comfyui_url,effective_negative_prompt,status FROM generation_items").
+		Scan(&storedURL, &negative, &status); err != nil {
+		t.Fatal(err)
+	}
+	if storedURL != oldTarget.URL || negative != "old-negative" || status != "submitted" {
+		t.Fatalf("unexpected submission: %q %q %q", storedURL, negative, status)
+	}
+	submitted := <-submissions
+	if got := inputsOf(t, submitted, "1")["text"]; got != "new-positive" {
+		t.Fatalf("positive prompt = %v", got)
+	}
+	if got := inputsOf(t, submitted, "2")["text"]; got != "old-negative" {
+		t.Fatalf("negative prompt = %v", got)
+	}
+}
+
+func TestWorkflowUpdateFailureKeepsCurrentRevision(t *testing.T) {
+	a := newTestApp(t)
+	original := []byte(`{"1":{"class_type":"Old","inputs":{}}}`)
+	path := a.workflowFilePath("test-1.json")
+	if err := writeAtomic(path, original); err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, a, `INSERT INTO workflows(id,name,workflow_path,mapping_json,created_at,updated_at)
+		VALUES(1,'test','test-1.json','{}',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`)
+	mustExec(t, a, `CREATE TRIGGER reject_workflow_update BEFORE UPDATE ON workflows
+		BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END`)
+	req := httptest.NewRequest("PUT", "/", strings.NewReader(`{"workflow_json":{"2":{"class_type":"New","inputs":{}}}}`))
+	req.SetPathValue("id", "1")
+	rec := httptest.NewRecorder()
+	a.updateWorkflow(rec, req)
+	content, err := os.ReadFile(path)
+	if err != nil || rec.Code != 500 || !bytes.Equal(content, original) {
+		t.Fatalf("status=%d, file=%s, error=%v", rec.Code, content, err)
+	}
+	files, err := os.ReadDir(filepath.Dir(path))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("unexpected revision files: %v, %v", files, err)
+	}
+}
+
+func TestRetryCompletedTaskOnlyResetsFailures(t *testing.T) {
+	a := newTestApp(t)
+	mustExec(t, a, `INSERT INTO workflows(id,name,workflow_path,mapping_json,created_at,updated_at)
+		VALUES(1,'test','test-1.json','{}',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`)
+	mustExec(t, a, `INSERT INTO generation_tasks(id,source_type,workflow_id,comfyui_url,parameters_json,status,total_count,created_at)
+		VALUES(1,'direct',1,'http://localhost:8188','{}','running',2,CURRENT_TIMESTAMP)`)
+	mustExec(t, a, `INSERT INTO generation_items(id,task_id,positive_prompt,status)
+		VALUES(1,1,'p','success'),(2,1,'p','running')`)
+	if changed, err := a.persistItemOutcome(2, 1, "failed", "test"); err != nil || !changed {
+		t.Fatalf("cannot record outcome: %v", err)
+	}
+	if err := a.retryTaskByID(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	var task, success, failure string
+	err := a.db.QueryRow(`SELECT t.status,s.status,f.status FROM generation_tasks t
+		JOIN generation_items s ON s.id=1 JOIN generation_items f ON f.id=2 WHERE t.id=1`).Scan(&task, &success, &failure)
+	if err != nil || task != "pending" || success != "success" || failure != "pending" {
+		t.Fatalf("task=%q, success=%q, failure=%q, err=%v", task, success, failure, err)
+	}
+}
+
+func TestDeletePendingTaskClearsPromptRunning(t *testing.T) {
+	a := newTestApp(t)
+	mustExec(t, a, `INSERT INTO workflows(id,name,workflow_path,mapping_json,created_at,updated_at)
+		VALUES(1,'workflow','test-1.json','{}',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`)
+	rec := httptest.NewRecorder()
+	a.createDirectTask(rec, httptest.NewRequest("POST", "/", strings.NewReader(`{"workflow_id":1,"positive_prompt":"test"}`)))
+	if rec.Code != 202 {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body)
+	}
+	if err := a.deleteTaskByID(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	if err := a.db.QueryRow("SELECT status FROM prompts WHERE id=1").Scan(&status); err != nil || status != "pending" {
+		t.Fatalf("status=%q err=%v", status, err)
+	}
+}
+
+func TestRemoteCancellationScopesJobAndHandlesLegacyVersions(t *testing.T) {
+	for _, test := range []struct {
+		name, version         string
+		scoped, wantInterrupt bool
+	}{
+		{name: "job endpoint", scoped: true},
+		{name: "targeted interrupt", version: "0.3.60", wantInterrupt: true},
+		{name: "older global interrupt", version: "0.3.50"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var interrupted atomic.Bool
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method + " " + r.URL.Path {
+				case "POST /api/jobs/target/cancel":
+					if !test.scoped {
+						http.NotFound(w, r)
+						return
+					}
+					_, _ = w.Write([]byte(`{"cancelled":true}`))
+				case "POST /queue":
+					var body struct{ Delete []string }
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Delete) != 1 || body.Delete[0] != "target" {
+						t.Errorf("unexpected queue mutation %+v, %v", body, err)
+					}
+				case "GET /queue":
+					_, _ = w.Write([]byte(`{"queue_running":[[1,"target"]],"queue_pending":[]}`))
+				case "GET /system_stats":
+					_ = json.NewEncoder(w).Encode(map[string]any{"system": map[string]string{"comfyui_version": test.version}})
+				case "POST /interrupt":
+					var body map[string]string
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["prompt_id"] != "target" {
+						t.Errorf("unexpected interrupt %+v, %v", body, err)
+					}
+					interrupted.Store(true)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			err := cancelComfyJob(context.Background(), server.URL, "target")
+			if (err == nil) != (test.scoped || test.wantInterrupt) || interrupted.Load() != test.wantInterrupt {
+				t.Fatalf("interrupt=%v, error=%v", interrupted.Load(), err)
+			}
+		})
+	}
+}
+
+func TestHistoryConnectionErrorClearsWhenQueueReturns(t *testing.T) {
+	a := newTestApp(t)
+	mustExec(t, a, `INSERT INTO generation_tasks(id,source_type,workflow_id,comfyui_url,parameters_json,status,created_at)
+		VALUES(1,'direct',1,'http://localhost:8188','{}','running',CURRENT_TIMESTAMP)`)
+	mustExec(t, a, `INSERT INTO generation_items(id,task_id,positive_prompt,comfy_prompt_id,status)
+		VALUES(1,1,'p','target','submitted')`)
+	var connected atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !connected.Load() {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		if r.URL.Path == "/history/target" {
+			_, _ = w.Write([]byte(`{}`))
+		} else {
+			_, _ = w.Write([]byte(`{"queue_running":[],"queue_pending":[[1,"target"]]}`))
+		}
+	}))
+	defer server.Close()
+	for _, isConnected := range []bool{false, true} {
+		connected.Store(isConnected)
+		a.checkAndDownload(1, 1, "target", server.URL, &comfyQueueCache{})
+		var since int64
+		var message, status string
+		err := a.db.QueryRow("SELECT remote_failure_since,error_message,status FROM generation_items WHERE id=1").Scan(&since, &message, &status)
+		if err != nil || status != "submitted" || (message == "") != isConnected || (since == 0) != isConnected {
+			t.Fatalf("connected=%v, since=%d, message=%q, status=%q, err=%v", isConnected, since, message, status, err)
+		}
+	}
+}
+
+func TestWorkflowEnableAndDefaultState(t *testing.T) {
+	a := newTestApp(t)
+	mustExec(t, a, `INSERT INTO workflows(id,name,workflow_path,mapping_json,enabled,is_default,created_at,updated_at)
+		VALUES(1,'original','one.json','{}',1,1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP),
+		      (2,'other','two.json','{}',1,0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`)
+	call := func(handler http.HandlerFunc, id, body string, expected int) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPut, "/", strings.NewReader(body))
+		req.SetPathValue("id", id)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != expected {
+			t.Fatalf("workflow %s, request %s: got %d, expected %d (%s)", id, body, rec.Code, expected, rec.Body)
+		}
+	}
+	check := func(id int, wantEnabled, wantDefault bool) {
+		t.Helper()
+		var enabled, isDefault bool
+		if err := a.db.QueryRow("SELECT enabled,is_default FROM workflows WHERE id=?", id).Scan(&enabled, &isDefault); err != nil || enabled != wantEnabled || isDefault != wantDefault {
+			t.Fatalf("workflow %d: enabled=%v default=%v error=%v", id, enabled, isDefault, err)
+		}
+	}
+
+	call(a.setWorkflowEnabled, "1", `{}`, 400)
+	call(a.setWorkflowEnabled, "99", `{"enabled":false}`, 404)
+	call(a.setDefaultWorkflow, "2", `{"is_default":false}`, 200)
+	check(1, true, true)
+	call(a.setWorkflowEnabled, "1", `{"enabled":false}`, 200)
+	check(1, false, false)
+	call(a.setDefaultWorkflow, "2", `{"is_default":true}`, 200)
+	call(a.setDefaultWorkflow, "1", `{"is_default":true}`, 409)
+	check(2, true, true)
+	call(a.setWorkflowEnabled, "1", `{"enabled":true}`, 200)
+	check(1, true, false)
+	check(2, true, true)
+}
+
+func TestWorkflowListFiltersBeforePagination(t *testing.T) {
+	a := newTestApp(t)
+	mustExec(t, a, `INSERT INTO workflows(id,name,workflow_path,mapping_json,enabled,is_default,created_at,updated_at)
+		VALUES(1,'Portrait A','one.json','{}',1,1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP),
+			(2,'Portrait B','two.json','{}',0,0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP),
+			(3,'Landscape 100%','three.json','{}',1,0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`)
+	for _, test := range []struct {
+		query     string
+		total, id int
+	}{
+		{"q=portrait&page_size=1", 2, 2},
+		{"q=portrait&status=enabled", 1, 1},
+		{"status=disabled", 1, 2},
+		{"status=default", 1, 1},
+		{"q=%25", 1, 3},
+	} {
+		rec := httptest.NewRecorder()
+		a.listWorkflows(rec, httptest.NewRequest("GET", "/api/workflows?"+test.query, nil))
+		var result struct {
+			Total int
+			Items []struct{ ID int }
+		}
+		err := json.Unmarshal(rec.Body.Bytes(), &result)
+		if rec.Code != 200 || err != nil || result.Total != test.total || len(result.Items) != 1 || result.Items[0].ID != test.id {
+			t.Errorf("%s: status=%d body=%s err=%v", test.query, rec.Code, rec.Body, err)
+		}
+	}
+}
+
+func TestTaskListIncludesRecentFailureAndConnectionReason(t *testing.T) {
+	a := newTestApp(t)
+	mustExec(t, a, `INSERT INTO generation_tasks(id,source_type,workflow_id,comfyui_url,parameters_json,status,created_at)
+		VALUES(1,'prompt',1,'http://localhost:8188','{}','completed',CURRENT_TIMESTAMP),
+			(2,'direct',1,'http://localhost:8188','{}','running',CURRENT_TIMESTAMP)`)
+	mustExec(t, a, `INSERT INTO generation_items(id,task_id,positive_prompt,status,error_message,remote_failure_since)
+		VALUES(1,1,'p','failed','missing model',0),
+			(2,2,'p','submitted','connection lost',1),
+			(3,2,'p','failed','older failure',0)`)
+	mustExec(t, a, `INSERT INTO images(id,generation_item_id,filename,storage_path,created_at)
+		VALUES(11,2,'cover.png','cover.png',CURRENT_TIMESTAMP),
+			(12,3,'second.png','second.png',CURRENT_TIMESTAMP)`)
+	rec := httptest.NewRecorder()
+	a.listTasks(rec, httptest.NewRequest("GET", "/api/tasks", nil))
+	var result struct {
+		Items []struct {
+			ID         int
+			Reason     string `json:"failure_reason"`
+			Connection bool   `json:"connection_issue"`
+			ImageID    int    `json:"image_id"`
+			ImageCount int    `json:"image_count"`
+		}
+	}
+	err := json.Unmarshal(rec.Body.Bytes(), &result)
+	if rec.Code != 200 || err != nil || len(result.Items) != 2 {
+		t.Fatalf("status=%d body=%s err=%v", rec.Code, rec.Body, err)
+	}
+	if result.Items[0].ID != 2 || !result.Items[0].Connection || result.Items[0].Reason != "connection lost" ||
+		result.Items[0].ImageID != 11 || result.Items[0].ImageCount != 2 || result.Items[1].ImageCount != 0 || result.Items[1].Reason != "missing model" {
+		t.Fatalf("unexpected task summaries: %+v", result.Items)
 	}
 }

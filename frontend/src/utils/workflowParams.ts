@@ -1,4 +1,4 @@
-import type { Workflow } from '../api/client'
+import { api, type Workflow } from '../api/client'
 
 /**
  * 选出下拉框应默认选中的工作流。
@@ -51,4 +51,17 @@ export function pickWorkflowId(
   const remembered = last ? usable.find(w => w.id === last) : undefined
   if (remembered) return remembered.id
   return pickDefaultWorkflow(usable)?.id ?? 0
+}
+
+
+export async function fetchWorkflows(): Promise<Workflow[]> {
+  const workflows = new Map<number, Workflow>()
+  const pageSize = 200
+  for (let page = 1; ; page++) {
+    const result = await api<{ items: Workflow[]; total: number }>(`/api/workflows?page=${page}&page_size=${pageSize}`)
+    for (const workflow of result.items) workflows.set(workflow.id, workflow)
+    if (result.items.length < pageSize || page * pageSize >= result.total) {
+      return Array.from(workflows.values())
+    }
+  }
 }

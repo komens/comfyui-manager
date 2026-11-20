@@ -1,7 +1,9 @@
 <script setup lang="ts">
+import ResponsiveRecords from '../components/ResponsiveRecords.vue'
+import ViewFeedback from '../components/ViewFeedback.vue'
 import { computed, onMounted, ref } from 'vue'
 import PageHeader from '../components/PageHeader.vue'
-import { api } from '../api/client'
+import { api, ApiError } from '../api/client'
 import type { DebugFile, DebugStatus } from '../api/client'
 
 /**
@@ -15,21 +17,23 @@ import type { DebugFile, DebugStatus } from '../api/client'
 const files = ref<DebugFile[]>([])
 const dir = ref('')
 const available = ref(true)
-const loading = ref(false)
+const loading = ref(true)
+const statusError = ref('')
 const error = ref('')
+const success = ref('')
 const busyName = ref('')
 
 async function load() {
   loading.value = true
-  error.value = ''
+  statusError.value = ''
   try {
     const data = await api<DebugStatus>('/api/debug/status')
     files.value = data.files
     dir.value = data.dir
     available.value = true
-  } catch {
-    // 接口不存在 = 后端没开 DEBUG，这是正常状态，不当成错误
-    available.value = false
+  } catch (e) {
+    available.value = !(e instanceof ApiError && e.status === 404)
+    if (available.value) statusError.value = e instanceof Error ? e.message : '无法加载调试日志'
     files.value = []
     dir.value = ''
   } finally {
@@ -61,8 +65,10 @@ async function clearOne(name: string) {
   if (!window.confirm(`清空 ${name}？此操作不可撤销。`)) return
   busyName.value = name
   error.value = ''
+  success.value = ''
   try {
     await api(`/api/debug/files/${encodeURIComponent(name)}`, { method: 'DELETE' })
+    success.value = `已清空 ${name}`
     await load()
   } catch (e) {
     error.value = e instanceof Error ? e.message : '清空失败'
@@ -76,12 +82,13 @@ async function clearAll() {
   if (!window.confirm(`清空全部 ${existing.value.length} 个调试文件？此操作不可撤销。`)) return
   busyName.value = '*'
   error.value = ''
+  success.value = ''
   try {
     for (const file of existing.value) {
       const base = file.name.replace(/\.1$/, '')
       await api(`/api/debug/files/${encodeURIComponent(base)}`, { method: 'DELETE' })
     }
-    await load()
+    success.value = '已清空调试日志'
   } catch (e) {
     error.value = e instanceof Error ? e.message : '清空失败'
   } finally {
@@ -118,7 +125,11 @@ function formatTime(value?: string) {
   />
 
   <!-- DEBUG 没开：给开启方法，而不是报错 -->
-  <div v-if="!available" class="card" style="max-width:720px;">
+  <ViewFeedback v-if="loading && !files.length" kind="loading" />
+  <ViewFeedback v-else-if="statusError" kind="error" :message="statusError">
+    <el-button text size="small" @click="load">重试</el-button>
+  </ViewFeedback>
+  <div v-else-if="!available" class="card" style="max-width:720px;">
     <div class="card-header">
       <h2>当前未开启 DEBUG</h2>
     </div>
@@ -144,19 +155,19 @@ function formatTime(value?: string) {
       <div class="card-header">
         <h2>落盘位置</h2>
         <div class="btn-group">
-          <button class="btn btn-secondary" :disabled="loading" @click="load">
+          <el-button :disabled="loading" @click="load">
             <span v-if="loading" class="spinner"></span>
             {{ loading ? '刷新中...' : '刷新' }}
-          </button>
-          <button class="btn btn-ghost" :disabled="!existing.length || busyName === '*'" @click="clearAll">
+          </el-button>
+          <el-button text :disabled="!existing.length || busyName === '*'" @click="clearAll">
             清空全部
-          </button>
+          </el-button>
         </div>
       </div>
       <div class="card-body">
         <div class="dir-row">
           <code class="dir-path">{{ dir }}</code>
-          <button class="btn btn-ghost btn-sm" @click="copyDir">复制</button>
+          <el-button text size="small" @click="copyDir">复制</el-button>
         </div>
         <p class="form-hint" style="margin-bottom:0;">
           单个文件超过 16MB 会滚成 <code>.1</code>（只保留一代），避免忘记关闭时把数据卷写满。
@@ -164,42 +175,53 @@ function formatTime(value?: string) {
       </div>
     </div>
 
-    <div v-if="error" class="status-msg error" style="max-width:900px;">{{ error }}</div>
+    <ViewFeedback :kind="error ? 'error' : 'success'" :message="error || success" />
 
     <div class="card" style="margin-top:20px; max-width:900px;">
       <div class="card-header">
         <h2>文件</h2>
       </div>
       <div class="card-body no-pad">
-        <table class="debug-table">
-          <thead>
-            <tr>
-              <th>文件</th>
-              <th class="num">大小</th>
-              <th>最近写入</th>
-              <th class="actions">操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="file in files" :key="file.name" :class="{ empty: !file.exists }">
-              <td>
+        <ResponsiveRecords :items="files" :record-key="file => file.name" empty-message="暂无日志文件">
+          <template #title="{ item: file }">
+            <code>{{ file.name }}</code>
+            <div><el-tag :type="file.truncated ? 'warning' : file.exists ? 'success' : 'info'" size="small">
+              {{ file.truncated ? '已达上限' : file.exists ? '有记录' : '暂无记录' }}
+            </el-tag></div>
+          </template>
+          <template #actions="{ item: file }">
+            <el-button text size="small" :disabled="!file.exists" @click="download(file.name)">下载</el-button>
+            <el-button text size="small" :disabled="!file.exists || busyName === file.name" @click="clearOne(file.name)">清空</el-button>
+          </template>
+          <template #details="{ item: file }">
+            <p v-if="describe(file.name)">{{ describe(file.name) }}</p>
+            <div>大小 {{ formatBytes(file.bytes) }}</div>
+            <div>最近写入 {{ file.exists ? formatTime(file.modified) : '—' }}</div>
+          </template>
+          <el-table :data="files" row-key="name" class="debug-table" size="small">
+            <el-table-column label="文件" min-width="175">
+              <template #default="{ row: file }">
                 <code>{{ file.name }}</code>
-                <span v-if="file.truncated" class="tag-warn">已达上限</span>
+                <el-tag v-if="file.truncated" type="warning" size="small">已达上限</el-tag>
                 <div class="file-desc">{{ describe(file.name) }}</div>
-              </td>
-              <td class="num">{{ formatBytes(file.bytes) }}</td>
-              <td class="muted">{{ file.exists ? formatTime(file.modified) : '—' }}</td>
-              <td class="actions">
-                <button class="btn btn-ghost btn-sm" :disabled="!file.exists" @click="download(file.name)">下载</button>
-                <button
-                  class="btn btn-ghost btn-sm"
-                  :disabled="!file.exists || busyName === file.name"
-                  @click="clearOne(file.name)"
-                >清空</button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+              </template>
+            </el-table-column>
+            <el-table-column label="大小" width="90" align="right">
+              <template #default="{ row: file }">{{ formatBytes(file.bytes) }}</template>
+            </el-table-column>
+            <el-table-column label="最近写入" min-width="124">
+              <template #default="{ row: file }">{{ file.exists ? formatTime(file.modified) : '—' }}</template>
+            </el-table-column>
+            <el-table-column label="操作" width="120" align="right">
+              <template #default="{ row: file }">
+                <div class="log-actions">
+                  <el-button text size="small" :disabled="!file.exists" @click="download(file.name)">下载</el-button>
+                  <el-button text size="small" :disabled="!file.exists || busyName === file.name" @click="clearOne(file.name)">清空</el-button>
+                </div>
+              </template>
+            </el-table-column>
+          </el-table>
+        </ResponsiveRecords>
       </div>
     </div>
 
@@ -239,56 +261,13 @@ function formatTime(value?: string) {
 .card-body.no-pad {
   padding: 0;
 }
-.debug-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 14px;
-}
-.debug-table th,
-.debug-table td {
-  text-align: left;
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--c-border-light);
-  vertical-align: top;
-}
-.debug-table th {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--c-text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-.debug-table tr:last-child td {
-  border-bottom: none;
-}
-.debug-table tr.empty td {
-  opacity: 0.45;
-}
-.debug-table .num {
-  text-align: right;
-  white-space: nowrap;
-}
-.debug-table .actions {
-  text-align: right;
-  white-space: nowrap;
-}
+.debug-table { width: 100%; }
+.log-actions { display: flex; justify-content: flex-end; gap: 2px; }
+.log-actions .el-button { margin-left: 0; padding-inline: 6px; }
 .file-desc {
   font-size: 12px;
   color: var(--c-text-muted);
   margin-top: 2px;
-}
-.tag-warn {
-  display: inline-block;
-  margin-left: 6px;
-  font-size: 11px;
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: #fff4d6;
-  color: #8a6100;
-}
-.btn-sm {
-  padding: 4px 10px;
-  font-size: 13px;
 }
 .code-block {
   background: var(--c-bg-subtle, #f5f5f5);

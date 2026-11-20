@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import ViewFeedback from '../components/ViewFeedback.vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import { api, type Task } from '../api/client'
@@ -21,8 +22,10 @@ const items = ref<TaskItem[]>([])
 const message = ref('')
 const messageType = ref<'success' | 'error' | 'info'>('info')
 let stream: EventSource | undefined
-let retryCount = 0
-const maxRetries = 5
+let pollTimer: ReturnType<typeof setInterval> | undefined
+let loadSequence = 0
+let appliedSequence = 0
+const connectionInterrupted = ref(false)
 
 // 任务全部结果图摊平：点开某张图后可跨生成项前后翻页浏览（带尺寸，按真比例展示）
 const allImageRefs = computed(() => items.value.flatMap(i => (i.images || []).map(img => ({ id: img.id, width: img.width, height: img.height }))))
@@ -36,11 +39,18 @@ function openItemImage(item: TaskItem, index: number) {
 }
 
 async function load() {
+  const id = route.params.id
+  const sequence = ++loadSequence
   try {
-    const data = await api<Task & { items?: TaskItem[] }>(`/api/tasks/${route.params.id}`)
+    const data = await api<Task & { items?: TaskItem[] }>(`/api/tasks/${id}`)
+    if (sequence < appliedSequence || id !== route.params.id) return
+    appliedSequence = sequence
     task.value = data
     items.value = data.items || []
+    if (message.value === '加载任务失败') message.value = ''
   } catch {
+    if (sequence < appliedSequence || id !== route.params.id) return
+    appliedSequence = sequence
     message.value = '加载任务失败'
     messageType.value = 'error'
   }
@@ -48,10 +58,10 @@ async function load() {
 
 async function action(path: string) {
   try {
-    await api(path, { method: 'POST' })
+    const result = await api<{ remote_warning?: string }>(path, { method: 'POST' })
     await load()
-    message.value = '操作已提交'
-    messageType.value = 'success'
+    message.value = result.remote_warning || '操作已提交'
+    messageType.value = result.remote_warning ? 'info' : 'success'
   } catch (e) {
     message.value = e instanceof Error ? e.message : '操作失败'
     messageType.value = 'error'
@@ -89,45 +99,56 @@ function progressPercent() {
   return Math.round(((task.value.success_count + task.value.failed_count) / task.value.total_count) * 100)
 }
 
-function connectSSE() {
-  stream = new EventSource(`/api/tasks/${route.params.id}/events`)
-  stream.onmessage = async () => {
-    retryCount = 0
-    await load()
-  }
-  stream.onerror = () => {
-    stream?.close()
-    if (retryCount < maxRetries) {
-      retryCount++
-      const delay = Math.min(1000 * Math.pow(2, retryCount), 10000)
-      message.value = `连接中断，${delay / 1000}秒后重连...`
-      messageType.value = 'info'
-      setTimeout(() => connectSSE(), delay)
-    } else {
-      message.value = '实时连接已断开，请手动刷新页面'
-      messageType.value = 'error'
-    }
-  }
+function disconnect() {
+  appliedSequence = ++loadSequence
+  stream?.close()
+  stream = undefined
+  clearInterval(pollTimer)
 }
 
-onMounted(async () => {
-  await load()
-  connectSSE()
-})
+watch(() => route.params.id, id => {
+  disconnect()
+  if (!id) return
+  task.value = null
+  items.value = []
+  message.value = ''
+  connectionInterrupted.value = false
+  void load()
+  const source = new EventSource(`/api/tasks/${id}/events`)
+  stream = source
+  source.onopen = () => {
+    if (stream !== source) return
+    connectionInterrupted.value = false
+    void load()
+  }
+  source.onmessage = () => {
+    if (stream === source) void load()
+  }
+  source.onerror = () => {
+    if (stream === source) connectionInterrupted.value = true
+  }
+  pollTimer = setInterval(() => {
+    if (!task.value || task.value.status === 'pending' || task.value.status === 'running' || connectionInterrupted.value) {
+      void load()
+    }
+  }, 5000)
+}, { immediate: true })
 
-onUnmounted(() => stream?.close())
+onUnmounted(disconnect)
 </script>
 
 <template>
   <PageHeader :title="`任务 #${route.params.id}`" description="重点查看每个生成项的提示词与结果图。" />
 
-  <button class="btn btn-ghost btn-sm" style="margin-bottom:12px;" @click="backToList">&larr; 返回任务列表</button>
+  <el-button text size="small" style="margin-bottom:12px;" @click="backToList">&larr; 返回任务列表</el-button>
 
-  <div v-if="message" class="status-msg-inline" :class="messageType">{{ message }}</div>
+  <ViewFeedback :kind="messageType" :message="message" />
+  <ViewFeedback v-if="connectionInterrupted" kind="info" message="实时连接暂时中断，正在定时刷新任务状态" />
+  <ViewFeedback v-if="!task && !message" kind="loading" />
 
   <!-- 紧凑状态条 -->
   <div v-if="task" class="status-bar">
-    <span class="badge" :class="statusClass(task.status)">{{ statusLabel(task.status) }}</span>
+    <span class="badge" :class="statusClass(task.status)">{{ task.status === 'completed' && task.failed_count > 0 ? '部分失败' : statusLabel(task.status) }}</span>
     <span class="text-sm muted">{{ task.source_type === 'direct' ? '直接提交' : '提示词库' }}</span>
     <span v-if="task.total_count > 0" class="text-sm muted">
       进度 {{ task.success_count + task.failed_count }}/{{ task.total_count }}
@@ -136,9 +157,9 @@ onUnmounted(() => stream?.close())
     </span>
     <span class="text-sm muted">{{ formatTime(task.created_at) }}</span>
     <div class="btn-group" style="margin-left:auto;">
-      <button v-if="task.status === 'pending' || task.status === 'running'" class="btn btn-secondary btn-sm" @click="action(`/api/tasks/${task.id}/cancel`)">取消任务</button>
-      <button v-if="task.status === 'failed'" class="btn btn-primary btn-sm" @click="action(`/api/tasks/${task.id}/retry`)">重试任务</button>
-      <button class="btn btn-ghost btn-sm" @click="load()">刷新</button>
+      <el-button v-if="task.status === 'pending' || task.status === 'running'" size="small" @click="action(`/api/tasks/${task.id}/cancel`)">取消任务</el-button>
+      <el-button v-if="task.status === 'failed' || (task.status === 'completed' && task.failed_count > 0)" type="primary" size="small" @click="action(`/api/tasks/${task.id}/retry`)">重试任务</el-button>
+      <el-button text size="small" @click="load()">刷新</el-button>
     </div>
   </div>
 
@@ -219,7 +240,6 @@ onUnmounted(() => stream?.close())
 </template>
 
 <style scoped>
-.status-msg-inline { font-size: 13px; margin-bottom: 10px; }
 .status-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 14px; background: var(--c-surface); border: 1px solid var(--c-border); border-radius: 10px; margin-bottom: 14px; }
 .item-list { display: flex; flex-direction: column; gap: 12px; margin-bottom: 14px; }
 .item-card { padding: 14px 16px; }

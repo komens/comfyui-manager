@@ -1,11 +1,14 @@
 <script setup lang="ts">
-import { onMounted, ref, computed } from 'vue'
+import FilterToolbar from '../components/FilterToolbar.vue'
+import ViewFeedback from '../components/ViewFeedback.vue'
+import { Delete } from '@element-plus/icons-vue'
+import { onBeforeUnmount, onMounted, ref, computed } from 'vue'
 import { RouterLink } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import Pagination from '../components/Pagination.vue'
 import PlatformBadge from '../components/PlatformBadge.vue'
 import { api, type Workflow } from '../api/client'
-import { pickWorkflowId, rememberWorkflowId } from '../utils/workflowParams'
+import { fetchWorkflows, pickWorkflowId, rememberWorkflowId } from '../utils/workflowParams'
 import { openImageViewer } from '../utils/imageViewer'
 import { thumbUrl } from '../utils/imageUrls'
 import { useUrlState } from '../composables/useUrlState'
@@ -58,6 +61,15 @@ const state = useUrlState({
 
 // 来源下拉：本平台 + 各外部平台（清单来自后端）
 const platformOptions = ref<Platform[]>([])
+const activeFilters = computed(() => [
+  state.q.trim() && `搜索 · ${state.q.trim()}`,
+  state.group && `分组 · ${state.group}`,
+  state.status && `状态 · ${statusBadge(state.status)}`,
+  state.platform && `来源 · ${state.platform === 'local' ? '本平台' : platformOptions.value.find(p => p.id === state.platform)?.label || state.platform}`,
+  state.favorite && '仅收藏',
+].filter((value): value is string => !!value))
+const loadError = ref('')
+let listRequest: AbortController | undefined
 
 // 多选
 const selectedIds = ref<Set<number>>(new Set())
@@ -71,7 +83,11 @@ const batchRunMode = ref<'selected' | 'group'>('selected')
 const isBatchRunning = ref(false)
 
 async function load() {
+  listRequest?.abort()
+  const request = new AbortController()
+  listRequest = request
   loading.value = true
+  loadError.value = ''
   try {
     const params = new URLSearchParams()
     if (state.group) params.set('group', state.group)
@@ -81,11 +97,14 @@ async function load() {
     if (state.platform) params.set('platform', state.platform)
     params.set('page', String(state.page))
     params.set('page_size', String(state.page_size))
-    const result = await api<PageResult>(`/api/prompts?${params}`)
+    const result = await api<PageResult>(`/api/prompts?${params}`, { signal: request.signal })
+    if (request.signal.aborted) return
     prompts.value = result.items
     total.value = result.total
+  } catch (e) {
+    if (!request.signal.aborted) loadError.value = e instanceof Error ? e.message : '无法加载提示词'
   } finally {
-    loading.value = false
+    if (!request.signal.aborted) loading.value = false
   }
 }
 
@@ -94,14 +113,19 @@ async function loadGroups() {
 }
 
 async function loadWorkflows() {
-  const result = await api<{ items: Workflow[] }>('/api/workflows?page_size=200')
-  workflows.value = result.items
+  workflows.value = await fetchWorkflows()
 }
 
 function resetAndLoad() {
+  clearTimeout(searchTimer)
   selectedIds.value.clear()
   state.page = 1
   load()
+}
+
+function clearFilters() {
+  Object.assign(state, { group: '', q: '', status: '', platform: '', favorite: false })
+  resetAndLoad()
 }
 
 function selectGroup(name: string) {
@@ -238,11 +262,16 @@ function openCover(p: Prompt) {
   if (p.cover_image_id) openImageViewer([p.cover_image_id], 0, { mutated: () => load() })
 }
 
-let searchTimer: any
+let searchTimer: ReturnType<typeof setTimeout> | undefined
 function onSearch() {
   clearTimeout(searchTimer)
   searchTimer = setTimeout(resetAndLoad, 300)
 }
+
+onBeforeUnmount(() => {
+  clearTimeout(searchTimer)
+  listRequest?.abort()
+})
 
 onMounted(() => {
   loadGroups()
@@ -280,80 +309,77 @@ onMounted(() => {
       </div>
       <!-- 分组全部重跑按钮 -->
       <div v-if="state.group" style="padding: 8px 4px 0; flex-shrink: 0;">
-        <button class="btn btn-secondary btn-sm" style="width:100%;" @click="openBatchRun('group')">
+        <el-button size="small" style="width:100%;" @click="openBatchRun('group')">
           &#9654; 重跑此分组待生成项
-        </button>
+        </el-button>
       </div>
     </aside>
 
     <!-- 列表区 -->
     <div class="prompts-main">
-      <div class="toolbar" style="flex-wrap:wrap; gap:10px;">
-        <input
+      <FilterToolbar :active="activeFilters" @clear="clearFilters">
+        <el-input
           v-model="state.q"
-          class="input"
           type="text"
           placeholder="搜索标题或提示词内容..."
-          style="flex:1; min-width:200px;"
-          @input="onSearch"
-        />
-        <select v-model="state.status" class="input" style="width:auto;" @change="resetAndLoad">
-          <option value="">全部状态</option>
-          <option value="pending">待生成</option>
-          <option value="running">生成中</option>
-          <option value="done">已完成</option>
-          <option value="failed">失败</option>
-        </select>
-        <select v-model="state.platform" class="input" style="width:auto;max-width:150px;" @change="resetAndLoad">
-          <option value="">全部来源</option>
-          <option value="local">本平台</option>
-          <option v-for="p in platformOptions" :key="p.id" :value="p.id">{{ p.label }}</option>
-        </select>
-        <button class="btn btn-sm" :class="{ 'btn-primary': state.favorite }" @click="state.favorite = !state.favorite; resetAndLoad()">
+          class="toolbar-search"
+          aria-label="搜索标题或提示词内容"
+          @input="onSearch" />
+        <el-button size="small" :type="state.favorite ? 'primary' : 'default'" @click="state.favorite = !state.favorite; resetAndLoad()">
           {{ state.favorite ? '★ 仅收藏' : '☆ 仅收藏' }}
-        </button>
+        </el-button>
         <RouterLink to="/prompts/new" class="btn btn-primary">+ 新建提示词</RouterLink>
-      </div>
+        <template #secondary>
+          <el-select v-model="state.status" class="filter-select" @change="resetAndLoad" aria-label="状态" :empty-values="[]">
+            <el-option value="" label="全部状态" />
+            <el-option value="pending" label="待生成" />
+            <el-option value="running" label="生成中" />
+            <el-option value="done" label="已完成" />
+            <el-option value="failed" label="失败" />
+          </el-select>
+          <el-select v-model="state.platform" class="filter-select" @change="resetAndLoad" aria-label="来源" :empty-values="[]">
+            <el-option value="" label="全部来源" />
+            <el-option value="local" label="本平台" />
+            <el-option v-for="p in platformOptions" :key="p.id" :value="p.id" :label="p.label" />
+          </el-select>
+        </template>
+      </FilterToolbar>
 
       <!-- 操作栏 -->
       <div class="batch-bar">
-        <label class="checkbox-wrap">
-          <input type="checkbox" :checked="allSelected" @change="toggleSelectAll" />
-          <span class="text-xs">全选</span>
-        </label>
+        <el-checkbox class="checkbox-wrap" :model-value="allSelected" @change="toggleSelectAll">全选</el-checkbox>
         <span class="batch-info">已选 {{ selectedCount }} 条</span>
         <template v-if="selectedCount > 0">
-          <button class="btn btn-primary btn-sm" @click="openBatchRun('selected')">&#9654; 批量重跑</button>
-          <button class="btn btn-ghost btn-sm btn-danger" @click="batchDelete">&#10005; 批量删除</button>
-          <button class="btn btn-ghost btn-sm" @click="selectedIds = new Set()">取消选择</button>
+          <el-button type="primary" size="small" @click="openBatchRun('selected')">&#9654; 批量重跑</el-button>
+          <el-button type="danger" text size="small" @click="batchDelete">&#10005; 批量删除</el-button>
+          <el-button text size="small" @click="selectedIds = new Set()">取消选择</el-button>
         </template>
       </div>
 
-      <span v-if="message" class="text-sm" :style="{ color: messageType === 'success' ? 'var(--c-success)' : 'var(--c-danger)', marginBottom: '8px', display:'block' }">{{ message }}</span>
+      <ViewFeedback :kind="messageType" :message="message" />
 
       <div class="card">
-        <div v-if="loading" class="empty-state"><div class="empty-icon">&#8987;</div><p>加载中...</p></div>
-        <div v-else-if="!prompts.length" class="empty-state">
-          <div class="empty-icon">&#128221;</div>
-          <p>暂无提示词。可通过「直接提交」或「JSON 文件」导入。</p>
-        </div>
+        <ViewFeedback v-if="loading" kind="loading" />
+        <ViewFeedback v-else-if="loadError" kind="error" :message="loadError">
+          <el-button text size="small" @click="load">重试</el-button>
+        </ViewFeedback>
+        <ViewFeedback v-else-if="!prompts.length" kind="empty"
+          :message="activeFilters.length ? '没有匹配的提示词' : '暂无提示词，可通过直接提交或 JSON 文件导入'" />
         <div v-else class="prompt-list">
           <div class="prompt-card" v-for="p in prompts" :key="p.id" :class="{ selected: selectedIds.has(p.id) }">
             <div class="pc-head">
-              <label class="checkbox-wrap" @click.stop>
-                <input type="checkbox" :checked="selectedIds.has(p.id)" @change="toggleSelect(p.id)" />
-              </label>
+              <el-checkbox class="checkbox-wrap" :model-value="selectedIds.has(p.id)" :aria-label="'选择提示词 ' + p.id" @click.stop @change="toggleSelect(p.id)" />
               <RouterLink :to="`/prompts/${p.id}`" class="pc-title" :title="p.title">{{ p.title }}</RouterLink>
               <PlatformBadge v-if="p.source_platform" :platform="p.source_platform" />
               <span class="badge" :class="'badge-' + p.status">{{ statusBadge(p.status) }}</span>
               <span v-if="p.group_name" class="badge badge-muted">{{ p.group_name }}</span>
               <div class="pc-actions">
-                <button class="btn-icon" :class="{ 'fav-active': p.is_favorite }" @click.stop="toggleFavorite(p)" :title="p.is_favorite ? '取消收藏' : '收藏'">
+                <button class="btn-icon" :class="{ 'fav-active': p.is_favorite }" @click.stop="toggleFavorite(p)" :aria-label="p.is_favorite ? '取消收藏' : '收藏'">
                   {{ p.is_favorite ? '★' : '☆' }}
                 </button>
                 <RouterLink :to="`/prompts/${p.id}`" class="btn btn-ghost btn-sm">查看</RouterLink>
                 <RouterLink :to="`/prompts/${p.id}/edit`" class="btn btn-ghost btn-sm">&#9998;</RouterLink>
-                <button class="btn btn-ghost btn-sm btn-danger" @click="deletePrompt(p)">&#10005;</button>
+                <el-button text type="danger" size="small" :icon="Delete" aria-label="删除提示词" @click="deletePrompt(p)" />
               </div>
             </div>
             <div class="pc-body">
@@ -383,39 +409,38 @@ onMounted(() => {
         />
         <div class="page-size-wrap">
           <span class="text-xs muted">每页</span>
-          <select v-model.number="state.page_size" class="input page-size-select" @change="onPageSizeChange">
-            <option :value="20">20</option>
-            <option :value="50">50</option>
-            <option :value="100">100</option>
-            <option :value="200">200</option>
-          </select>
+          <el-select v-model="state.page_size" class="page-size-select" size="small" aria-label="每页条数" @change="onPageSizeChange">
+            <el-option :value="20" label="20" />
+            <el-option :value="50" label="50" />
+            <el-option :value="100" label="100" />
+            <el-option :value="200" label="200" />
+          </el-select>
           <span class="text-xs muted">条</span>
         </div>
       </div>
     </div>
   </div>
 
-  <!-- 批量重跑弹窗 -->
-  <div v-if="showBatchRunModal" class="modal-overlay" @click.self="showBatchRunModal = false">
-    <div class="modal">
-      <h3 style="margin-top:0;">
-        {{ batchRunMode === 'group' ? `重跑分组「${state.group}」` : `批量重跑 ${selectedCount} 条` }}
-      </h3>
-      <label class="form-label">选择工作流</label>
-      <select v-model.number="batchRunWorkflow" class="input">
-        <option v-for="w in workflows.filter(x => x.enabled)" :key="w.id" :value="w.id">{{ w.name }}</option>
-      </select>
-      <p v-if="batchRunMode === 'group'" class="text-xs muted" style="margin-top:8px;">
-        仅重跑状态为「待生成」和「失败」的条目。
-      </p>
-      <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:16px;">
-        <button class="btn btn-ghost" @click="showBatchRunModal = false">取消</button>
-        <button class="btn btn-primary" :disabled="isBatchRunning || !batchRunWorkflow" @click="confirmBatchRun">
-          {{ isBatchRunning ? '提交中...' : '开始生成' }}
-        </button>
-      </div>
-    </div>
-  </div>
+  <el-dialog
+    v-model="showBatchRunModal"
+    :title="batchRunMode === 'group' ? `重跑分组「${state.group}」` : `批量重跑 ${selectedCount} 条`"
+    class="app-dialog"
+    width="min(480px, calc(100% - 24px))"
+    top="6vh"
+    append-to-body
+  >
+    <label class="form-label" for="batch-workflow">选择工作流</label>
+    <el-select id="batch-workflow" v-model="batchRunWorkflow" :empty-values="[0]" placeholder="请选择工作流" filterable popper-class="bounded-select-options">
+      <el-option v-for="w in workflows.filter(x => x.enabled)" :key="w.id" :value="w.id" :label="w.name" />
+    </el-select>
+    <p v-if="batchRunMode === 'group'" class="text-xs muted" style="margin-top:8px;">
+      仅重跑状态为「待生成」和「失败」的条目。
+    </p>
+    <template #footer>
+      <el-button @click="showBatchRunModal = false">取消</el-button>
+      <el-button type="primary" :loading="isBatchRunning" :disabled="!batchRunWorkflow" @click="confirmBatchRun">开始生成</el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <style scoped>
@@ -453,16 +478,12 @@ onMounted(() => {
 .btn-icon:hover { color: #f59e0b; }
 .btn-icon.fav-active { color: #d97706; }
 .btn-icon.fav-active:hover { color: #b45309; }
-.btn-danger { color: var(--c-danger); }
 .badge-muted { background: var(--c-bg-subtle); color: var(--c-muted); }
 .badge-info { background: #e0f2fe; color: #0369a1; }
 .select-row { padding: 6px 12px; border-bottom: 1px solid var(--c-border-light); display: flex; align-items: center; gap: 8px; }
 .checkbox-wrap { display: flex; align-items: center; gap: 6px; cursor: pointer; flex-shrink: 0; }
-.checkbox-wrap input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--c-primary); cursor: pointer; }
 .batch-bar { display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: var(--c-primary-light); border: 1px solid var(--c-primary-border); border-radius: 8px; margin-bottom: 8px; flex-wrap: wrap; }
 .batch-info { font-size: 13px; font-weight: 600; color: var(--c-primary); margin-right: 4px; }
-.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 100; padding: 20px; }
-.modal { background: var(--c-card); border-radius: 12px; padding: 24px; width: 100%; max-width: 480px; max-height: 85vh; overflow-y: auto; box-shadow: var(--shadow-lg); }
 @media (max-width: 768px) {
   /* 移动端防横向溢出：首排允许换行、按钮组收紧（对齐全局 .list-row 的保护策略） */
   .prompt-card { padding: 12px; }

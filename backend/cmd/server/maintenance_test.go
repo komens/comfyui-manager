@@ -6,10 +6,13 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -452,5 +455,224 @@ func mustExec(t *testing.T, a *app, query string, args ...any) {
 	t.Helper()
 	if _, err := a.db.Exec(query, args...); err != nil {
 		t.Fatalf("exec %q: %v", query, err)
+	}
+}
+
+func TestTrashRestoreRecreatesGalleryRowsAndRetainsFailedItems(t *testing.T) {
+	a := newTestApp(t)
+	ctx := context.Background()
+	mustExec(t, a, "INSERT INTO prompts(id,positive_prompt) VALUES(1,'linked')")
+	paths := make(map[int64]string)
+	for _, id := range []int64{1, 2} {
+		name := "sample-" + strconv.FormatInt(id, 10) + ".png"
+		path := filepath.Join(a.dataDir, "images", name)
+		if err := os.WriteFile(path, testPNG(t, 3), 0600); err != nil {
+			t.Fatal(err)
+		}
+		paths[id] = path
+		mustExec(t, a, `INSERT INTO images(id,generation_item_id,prompt_id,filename,storage_path,width,height,created_at)
+			VALUES(?,0,1,?,?,3,1,CURRENT_TIMESTAMP)`, id, name, path)
+	}
+	result, err := a.applyPlan(ctx, &cleanupPlan{ImageIDs: []int64{1, 2}, ImageFiles: paths}, &cleanupFilter{Target: "images"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var missingPath string
+	if err := a.db.QueryRow("SELECT storage_path FROM trash_images WHERE image_id=2").Scan(&missingPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(missingPath); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("POST", "/", nil)
+	req.SetPathValue("id", strconv.FormatInt(result.BatchID, 10))
+	rec := httptest.NewRecorder()
+	a.restoreTrash(rec, req)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"files_restored":1`) || !strings.Contains(rec.Body.String(), `"files_skipped":1`) {
+		t.Fatalf("restore: %d %s", rec.Code, rec.Body)
+	}
+	var promptID, width int
+	if err := a.db.QueryRow("SELECT prompt_id,width FROM images WHERE id=1").Scan(&promptID, &width); err != nil || promptID != 1 || width != 3 {
+		t.Fatalf("restored metadata: prompt=%d width=%d error=%v", promptID, width, err)
+	}
+	if files, _, orphans := a.scanImageDir(ctx); files != 1 || len(orphans) != 0 {
+		t.Fatalf("files=%d orphans=%v", files, orphans)
+	}
+	var remaining int
+	if err := a.db.QueryRow("SELECT COUNT(*) FROM trash_images WHERE batch_id=? AND image_id=2", result.BatchID).Scan(&remaining); err != nil || remaining != 1 {
+		t.Fatalf("remaining=%d error=%v", remaining, err)
+	}
+}
+
+func TestOrphanPurgeWaitsForAnImageToCommit(t *testing.T) {
+	a := newTestApp(t)
+	path := filepath.Join(a.dataDir, "images", "pending.png")
+	orphan := filepath.Join(a.dataDir, "images", "orphan.png")
+	tx, err := a.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`INSERT INTO images(generation_item_id,filename,storage_path,created_at)
+		VALUES(0,'pending.png',?,CURRENT_TIMESTAMP)`, path); err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range []string{path, orphan} {
+		if err := os.WriteFile(file, testPNG(t, 1), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	req := httptest.NewRequest("POST", "/", strings.NewReader(`{"confirm":true}`))
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.purgeOrphans(rec, req)
+	}()
+	select {
+	case <-done:
+		t.Fatalf("purge completed before image committed: %s", rec.Body)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	if _, err := os.Stat(path); err != nil || rec.Code != 200 {
+		t.Fatalf("image lost: %v (%d %s)", err, rec.Code, rec.Body)
+	}
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Fatalf("orphan was not removed: %v", err)
+	}
+}
+
+func TestImageCleanupKeepsRelatedTaskAndPrompt(t *testing.T) {
+	a := newTestApp(t)
+	ctx := context.Background()
+	mustExec(t, a, "INSERT INTO prompts(id,positive_prompt) VALUES(1,'linked')")
+	mustExec(t, a, `INSERT INTO generation_tasks(id,source_type,workflow_id,comfyui_url,parameters_json,status,created_at)
+		VALUES(1,'direct',1,'http://localhost:8188','{}','completed',CURRENT_TIMESTAMP)`)
+	mustExec(t, a, "INSERT INTO generation_items(id,task_id,prompt_id,positive_prompt,status) VALUES(1,1,1,'linked','success')")
+	mustExec(t, a, `INSERT INTO images(id,generation_item_id,filename,storage_path,created_at)
+		VALUES(1,1,'sample.png','sample.png',CURRENT_TIMESTAMP)`)
+	filter := &cleanupFilter{Target: "images"}
+	plan, err := a.resolveCleanup(ctx, filter)
+	if err != nil || len(plan.TaskIDs) != 1 || len(plan.ItemIDs) != 1 {
+		t.Fatalf("expected related records in the preview: %+v, %v", plan, err)
+	}
+	result, err := a.applyPlan(ctx, plan, filter)
+	if err != nil || result.Images != 1 || result.Items != 0 || result.Tasks != 0 {
+		t.Fatalf("cleanup: %+v, %v", result, err)
+	}
+	var related int
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM generation_tasks t
+		JOIN generation_items i ON i.task_id=t.id JOIN prompts p ON p.id=i.prompt_id`).Scan(&related); err != nil || related != 1 {
+		t.Fatalf("related records: %d, %v", related, err)
+	}
+}
+
+func TestCleanupPreviewPagesThroughPlannedImages(t *testing.T) {
+	a := newTestApp(t)
+	mustExec(t, a, `INSERT INTO prompts(id,title,positive_prompt,group_name) VALUES(1,'Preview','linked','Preview group')`)
+	mustExec(t, a, `INSERT INTO generation_tasks(id,source_type,workflow_id,comfyui_url,parameters_json,status,created_at)
+		VALUES(1,'direct',1,'http://localhost:8188','{}','completed',CURRENT_TIMESTAMP)`)
+	mustExec(t, a, `INSERT INTO generation_items(id,task_id,prompt_id,positive_prompt,status) VALUES(1,1,1,'linked','success')`)
+	for id := 1; id <= 26; id++ {
+		filename := strconv.Itoa(id) + ".png"
+		mustExec(t, a, `INSERT INTO images(id,generation_item_id,filename,storage_path,created_at)
+			VALUES(?,1,?,?,CURRENT_TIMESTAMP)`, id, filename, filename)
+	}
+	mustExec(t, a, `INSERT INTO images(id,generation_item_id,filename,storage_path,created_at,is_favorite)
+		VALUES(27,0,'favorite.png','favorite.png',CURRENT_TIMESTAMP,1)`)
+
+	for _, tc := range []struct {
+		name    string
+		filter  string
+		primary int
+	}{
+		{"images", `{"target":"images"}`, 26},
+		{"tasks", `{"target":"tasks"}`, 1},
+		{"prompts with images", `{"target":"prompts","cascade_images":true}`, 1},
+		{"prompts without images", `{"target":"prompts"}`, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, requested := range []int{1, 2, 99} {
+				rec := httptest.NewRecorder()
+				a.previewCleanup(rec, httptest.NewRequest("POST", "/api/maintenance/preview?image_page="+strconv.Itoa(requested), strings.NewReader(tc.filter)))
+				if rec.Code != 200 {
+					t.Fatalf("preview response: %d %s", rec.Code, rec.Body)
+				}
+				var result struct {
+					Primary int                   `json:"primary_count"`
+					Page    int                   `json:"image_page"`
+					Size    int                   `json:"image_page_size"`
+					Stats   cleanupStats          `json:"stats"`
+					Images  []cleanupPreviewImage `json:"samples"`
+				}
+				if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+					t.Fatal(err)
+				}
+				wantPage, wantTotal, wantLength := 1, 26, 24
+				if tc.name == "prompts without images" {
+					wantTotal, wantLength = 0, 0
+				} else if requested > 1 {
+					wantPage, wantLength = 2, 2
+				}
+				if result.Primary != tc.primary || result.Page != wantPage || result.Size != 24 ||
+					result.Stats.Images != wantTotal || result.Images == nil || len(result.Images) != wantLength {
+					t.Fatalf("request page %d: unexpected result %+v", requested, result)
+				}
+				for i, image := range result.Images {
+					if image.ID != int64((wantPage-1)*24+i+1) || image.Title != "Preview" {
+						t.Fatalf("request page %d: unexpected image %+v", requested, image)
+					}
+				}
+			}
+		})
+	}
+	var remaining int
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM images`).Scan(&remaining); err != nil || remaining != 27 {
+		t.Fatalf("preview changed the stored image count: %d, %v", remaining, err)
+	}
+	rec := httptest.NewRecorder()
+	a.runCleanup(rec, httptest.NewRequest("POST", "/api/maintenance/cleanup?image_page=2", strings.NewReader(`{"target":"images","confirm":true}`)))
+	if rec.Code != 200 {
+		t.Fatalf("cleanup response: %d %s", rec.Code, rec.Body)
+	}
+	var remainingID int
+	if err := a.db.QueryRow(`SELECT COUNT(*), COALESCE(MAX(id),0) FROM images`).Scan(&remaining, &remainingID); err != nil || remaining != 1 || remainingID != 27 {
+		t.Fatalf("cleanup should cover every preview page and keep the favorite: %d remaining, last ID %d, %v", remaining, remainingID, err)
+	}
+}
+
+func TestPromptCascadeProtectsFavoriteImagesAndActiveItems(t *testing.T) {
+	a := newTestApp(t)
+	mustExec(t, a, `INSERT INTO prompts(id,positive_prompt) VALUES(1,'favorite image'),(2,'running item')`)
+	mustExec(t, a, `INSERT INTO generation_tasks(id,source_type,workflow_id,comfyui_url,parameters_json,status,created_at)
+		VALUES(1,'direct',1,'http://localhost:8188','{}','completed',CURRENT_TIMESTAMP),
+		      (2,'direct',1,'http://localhost:8188','{}','running',CURRENT_TIMESTAMP)`)
+	mustExec(t, a, `INSERT INTO generation_items(id,task_id,prompt_id,positive_prompt,status)
+		VALUES(1,1,1,'favorite image','success'), (2,2,2,'running item','submitted')`)
+	mustExec(t, a, `INSERT INTO images(id,generation_item_id,filename,storage_path,created_at,is_favorite)
+		VALUES(1,1,'favorite.png','favorite.png',CURRENT_TIMESTAMP,1)`)
+	for _, tc := range []struct {
+		filter string
+		want   string
+	}{
+		{`{"target":"prompts","cascade_images":true}`, `"primary_count":0`},
+		{`{"target":"prompts","cascade_images":true,"only_unfavorite":false}`, `"primary_count":1`},
+		{`{"target":"prompts"}`, `"primary_count":2`},
+		{`{"target":"tasks","status":"running"}`, `"primary_count":0`},
+	} {
+		rec := httptest.NewRecorder()
+		a.previewCleanup(rec, httptest.NewRequest("POST", "/api/maintenance/preview", strings.NewReader(tc.filter)))
+		if rec.Code != 200 || !strings.Contains(rec.Body.String(), tc.want) {
+			t.Fatalf("preview %s: %d %s", tc.filter, rec.Code, rec.Body)
+		}
+	}
+	plan, err := a.resolveCleanup(context.Background(), &cleanupFilter{Target: "prompts", CascadeImages: true})
+	if err != nil || plan.Protected != 1 || len(plan.ImageIDs) != 0 || len(plan.ItemIDs) != 0 {
+		t.Fatalf("unexpected cascade plan %+v, %v", plan, err)
 	}
 }

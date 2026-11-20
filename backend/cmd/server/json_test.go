@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -63,9 +65,7 @@ func TestParseEntriesNegativeResolution(t *testing.T) {
 	})
 }
 
-// TestImportJSONEntriesWritesRow 盯的是「真的写进库了」：只测 parseEntries 时，
-// INSERT 的列数/占位符对不上（多写一个 ?）也照样全绿——那种错误的表现是
-// imported=0、一条都没进去，而且每条都只是静默 continue。
+// 导入返回的 ID 必须对应本次新增的提示词，提交作图会直接使用这些 ID。
 func TestImportJSONEntriesWritesRow(t *testing.T) {
 	a := newTestApp(t)
 	entries, err := parseEntries([]byte(`{"negative":"GLOBAL","entries":[{"id":"a","positive":"pa"}]}`))
@@ -79,11 +79,49 @@ func TestImportJSONEntriesWritesRow(t *testing.T) {
 	if stats.Inserted != 1 {
 		t.Fatalf("Inserted = %d，期望 1（INSERT 失败会静默跳过）", stats.Inserted)
 	}
+	if len(stats.InsertedPromptIDs) != 1 {
+		t.Fatalf("导入返回的 ID：%v，期望只有一条", stats.InsertedPromptIDs)
+	}
 	var positive, negative, group string
-	if err := a.db.QueryRow(`SELECT positive_prompt, negative_prompt, group_name FROM prompts`).Scan(&positive, &negative, &group); err != nil {
+	if err := a.db.QueryRow(`SELECT positive_prompt, negative_prompt, group_name FROM prompts WHERE id=?`, stats.InsertedPromptIDs[0]).Scan(&positive, &negative, &group); err != nil {
 		t.Fatalf("查询失败: %v", err)
 	}
 	if positive != "pa" || negative != "GLOBAL" || group != "测试组" {
 		t.Errorf("落库内容不对：positive=%q negative=%q group=%q", positive, negative, group)
+	}
+	entries = append(entries, jsonEntry{Positive: "pb"}, jsonEntry{Positive: "pb"})
+	next, err := a.importJSONEntries(context.Background(), []byte(`{}`), entries, "测试组")
+	if err != nil {
+		t.Fatalf("再次导入失败: %v", err)
+	}
+	if next.Skipped != 2 || next.Inserted != 1 || len(next.InsertedPromptIDs) != 1 {
+		t.Fatalf("再次导入统计错误: %+v", next)
+	}
+	if err := a.db.QueryRow(`SELECT positive_prompt FROM prompts WHERE id=?`, next.InsertedPromptIDs[0]).Scan(&positive); err != nil || positive != "pb" {
+		t.Fatalf("返回的 ID 应对应本次新增的 pb，查询得到 %q，错误 %v", positive, err)
+	}
+}
+
+func TestImportJSONPreservesExistingBackup(t *testing.T) {
+	a := newTestApp(t)
+	group := "test_20261120_140000"
+	for _, content := range []string{`[{"positive":"first"}]`, `[{"positive":"second"}]`} {
+		entries, err := parseEntries([]byte(content))
+		if err != nil {
+			t.Fatal(err)
+		}
+		stats, err := a.importJSONEntries(context.Background(), []byte(content), entries, group)
+		if err != nil || stats.Inserted != 1 || stats.GroupName != group {
+			t.Fatalf("import: %+v, %v", stats, err)
+		}
+	}
+	for filename, want := range map[string]string{
+		group + ".json":   `[{"positive":"first"}]`,
+		group + "_2.json": `[{"positive":"second"}]`,
+	} {
+		content, err := os.ReadFile(filepath.Join(a.dataDir, "json", filename))
+		if err != nil || string(content) != want {
+			t.Fatalf("%s = %q, %v", filename, content, err)
+		}
 	}
 }

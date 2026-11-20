@@ -43,7 +43,7 @@
 
 /* ===== Reset ===== */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: var(--font-sans); color: var(--c-text); background: var(--c-bg); line-height: 1.6; -webkit-font-smoothing: antialiased; min-width: 320px; }
+body { font-family: var(--font-sans); color: var(--c-text); background: var(--c-bg); line-height: 1.6; -webkit-font-smoothing: antialiased; }
 a { color: inherit; text-decoration: none; }
 img { display: block; max-width: 100%; }
 
@@ -511,18 +511,10 @@ select:not([class*="el-"]) {
 /* ===== Pagination Footer ===== */
 .pagination-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-top: 16px; }
 .page-size-wrap { display: flex; align-items: center; gap: 6px; flex-shrink: 0; white-space: nowrap; }
-/* ⚠️ 必须写成 select.page-size-select（特异性 0,1,1）。
-   全局 select:not([class*="el-"]) 的 padding-right:36px 也是 0,1,1 且先定义，
-   只写 .page-size-select(0,1,0) 压不过它：64px 宽减掉 左6+右36+边框2 只剩 20px，
-   "100" 会被裁成"10"+半个字。提权 + width:auto 让宽度由最长选项自己撑开。 */
-select.page-size-select {
-  width: auto;
-  min-width: 62px;
-  flex: 0 0 auto;
-  padding: 4px 22px 4px 8px;
-  font-size: 13px;
-  background-position: right 6px center;
-}
+.page-size-select { width: 76px; }
+.toolbar .toolbar-search { flex: 1 1 200px; min-width: 0; }
+.toolbar .filter-select { width: min(100%, 136px); }
+.toolbar .filter-select-wide { width: min(100%, 180px); }
 
 /* ===== 移动端分页压成两行（≤640px）=====
    行1：范围信息（左） + 每页条数（右）
@@ -1099,7 +1091,7 @@ select.page-size-select {
     flex-direction: column;
   }
 
-  .btn-group .btn {
+  .btn-group > :is(.btn, .el-button) {
     width: 100%;
   }
 }

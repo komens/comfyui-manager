@@ -1,8 +1,10 @@
 <script setup lang="ts">
+import ResponsiveRecords from '../components/ResponsiveRecords.vue'
+import ViewFeedback from '../components/ViewFeedback.vue'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import PageHeader from '../components/PageHeader.vue'
 import Pagination from '../components/Pagination.vue'
-import { api } from '../api/client'
+import { api, ApiError } from '../api/client'
 import type { ScriptFile, ScriptRun, ScriptRunState, ScriptRunSummary, ScriptStatus } from '../api/client'
 
 /**
@@ -45,6 +47,10 @@ const runError = ref('')
 const running = ref(false)
 const submitting = ref(false)
 const error = ref('')
+const success = ref('')
+const statusError = ref('')
+const historyError = ref('')
+const historyLoading = ref(true)
 const files = ref<ScriptFile[]>([])
 
 const history = ref<ScriptRunSummary[]>([])
@@ -78,6 +84,7 @@ function badgeClass(state: string) {
 
 async function loadStatus() {
   loading.value = true
+  statusError.value = ''
   try {
     const data = await api<ScriptStatus>('/api/scripts/status')
     status.value = data
@@ -85,9 +92,9 @@ async function loadStatus() {
     if (!data.runtimes.some((item) => item.language === language.value) && data.runtimes.length) {
       language.value = data.runtimes[0].language
     }
-  } catch {
-    // 接口不存在 = 后端没开 ENABLE_SCRIPTS，属正常状态
-    available.value = false
+  } catch (e) {
+    available.value = !(e instanceof ApiError && e.status === 404)
+    if (available.value) statusError.value = e instanceof Error ? e.message : '无法加载脚本运行台'
     status.value = null
   } finally {
     loading.value = false
@@ -95,7 +102,9 @@ async function loadStatus() {
 }
 
 async function loadHistory() {
-  if (!available.value) return
+  if (!available.value || statusError.value) return
+  historyLoading.value = true
+  historyError.value = ''
   try {
     const data = await api<{ items: ScriptRunSummary[]; total: number }>(
       `/api/scripts/runs?page=${page.value}&page_size=${pageSize}`,
@@ -103,8 +112,15 @@ async function loadHistory() {
     history.value = data.items
     historyTotal.value = data.total
   } catch (e) {
-    error.value = e instanceof Error ? e.message : '读取历史失败'
+    historyError.value = e instanceof Error ? e.message : '无法加载运行记录'
+  } finally {
+    historyLoading.value = false
   }
+}
+
+async function reload() {
+  await loadStatus()
+  await loadHistory()
 }
 
 function closeStream() {
@@ -224,6 +240,8 @@ async function cancel() {
   if (currentId.value == null) return
   try {
     await api(`/api/scripts/runs/${currentId.value}/cancel`, { method: 'POST' })
+    error.value = ''
+    success.value = '已请求取消脚本运行'
   } catch (e) {
     error.value = e instanceof Error ? e.message : '取消失败'
   }
@@ -259,6 +277,8 @@ async function removeRun(id: number) {
   if (!window.confirm('删除这条运行记录和它的产出文件？')) return
   try {
     await api(`/api/scripts/runs/${id}`, { method: 'DELETE' })
+    error.value = ''
+    success.value = '已删除运行记录'
     if (currentId.value === id) {
       currentId.value = null
       currentStatus.value = ''
@@ -321,10 +341,7 @@ watch(output, async () => {
 
 watch(page, () => void loadHistory())
 
-onMounted(async () => {
-  await loadStatus()
-  await loadHistory()
-})
+onMounted(reload)
 
 onUnmounted(closeStream)
 </script>
@@ -336,7 +353,11 @@ onUnmounted(closeStream)
   />
 
   <!-- 未开启：给开启方法，而不是报错 -->
-  <div v-if="!available && !loading" class="card" style="max-width:760px;">
+  <ViewFeedback v-if="loading" kind="loading" />
+  <ViewFeedback v-else-if="statusError" kind="error" :message="statusError">
+    <el-button text size="small" @click="reload">重试</el-button>
+  </ViewFeedback>
+  <div v-else-if="!available" class="card" style="max-width:760px;">
     <div class="card-header">
       <h2>当前未开启脚本功能</h2>
     </div>
@@ -359,31 +380,29 @@ onUnmounted(closeStream)
   </div>
 
   <template v-else>
-    <div v-if="error" class="status-msg error">{{ error }}</div>
+    <ViewFeedback :kind="error ? 'error' : 'success'" :message="error || success" />
 
     <div class="script-grid">
       <div class="card">
         <div class="card-header">
           <h2>脚本</h2>
           <div class="btn-group">
-            <select v-model="language" class="lang-select" :disabled="running">
-              <option v-for="item in runtimes" :key="item.language" :value="item.language">
-                {{ item.language }} · {{ item.version }}
-              </option>
-            </select>
-            <button v-if="!running" class="btn btn-primary" :disabled="submitting" @click="start">
+            <el-select v-model="language" class="lang-select" :disabled="running">
+              <el-option v-for="item in runtimes" :key="item.language" :value="item.language" :label="`${item.language} · ${item.version}`" />
+            </el-select>
+            <el-button v-if="!running" type="primary" :disabled="submitting" @click="start">
               <span v-if="submitting" class="spinner"></span>
               {{ submitting ? '提交中...' : '运行' }}
-            </button>
-            <button v-else class="btn btn-danger" @click="cancel">取消</button>
+            </el-button>
+            <el-button v-else type="danger" @click="cancel">取消</el-button>
           </div>
         </div>
         <div class="card-body">
           <div class="meta-row">
-            <input v-model="title" type="text" placeholder="标题（可留空，自动用时间）" />
-            <input v-model="args" type="text" placeholder='参数，如 --days 7 "/data/我的 图"' />
+            <el-input v-model="title" type="text" placeholder="标题（可留空，自动用时间）" />
+            <el-input v-model="args" type="text" placeholder='参数，如 --days 7 "/data/我的 图"' />
           </div>
-          <textarea v-model="code" class="code-editor" spellcheck="false"></textarea>
+          <el-input type="textarea" v-model="code" class="code-editor" spellcheck="false" />
           <p class="form-hint" style="margin-bottom:0;">
             工作目录是本次运行专属的目录，产出请写到 <code>out/</code>；
             <code>import wfkit</code> 可以查库（只读）、调本服务接口、存文件。
@@ -402,7 +421,7 @@ onUnmounted(closeStream)
             <span v-if="currentStatus" class="run-meta">
               {{ formatDuration(durationMS) }}<template v-if="currentStatus !== 'queued' && currentStatus !== 'running'"> · 退出码 {{ exitCode }}</template>
             </span>
-            <button class="btn btn-ghost btn-sm" :disabled="!output" @click="copyOutput">复制</button>
+            <el-button text size="small" :disabled="!output" @click="copyOutput">复制</el-button>
           </div>
         </div>
         <div class="card-body no-pad">
@@ -427,35 +446,58 @@ onUnmounted(closeStream)
         <span class="muted text-xs">只保留最近 {{ status?.limits.max_keep ?? 50 }} 次，多余的记录与目录自动清掉</span>
       </div>
       <div class="card-body no-pad">
-        <div v-if="!history.length" class="empty-state">
-          <p>还没有运行过。上面写段代码点「运行」就行。</p>
-        </div>
-        <table v-else class="data-table">
-          <thead>
-            <tr>
-              <th>时间</th>
-              <th>标题</th>
-              <th>状态</th>
-              <th class="num">耗时</th>
-              <th class="actions">操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="item in history" :key="item.id" :class="{ active: item.id === currentId }">
-              <td class="muted text-sm">{{ formatTime(item.created_at) }}</td>
-              <td>
+        <ViewFeedback v-if="historyLoading && !history.length" kind="loading" />
+        <ViewFeedback v-else-if="historyError" kind="error" :message="historyError">
+          <el-button text size="small" @click="loadHistory">重试</el-button>
+        </ViewFeedback>
+        <ResponsiveRecords v-else :items="history" :record-key="item => item.id" empty-message="暂无运行记录">
+          <template #title="{ item }">
+            <strong>{{ item.title }}</strong>
+            <div><span :class="badgeClass(item.status)">{{ statusLabel[item.status] || item.status }}</span></div>
+          </template>
+          <template #actions="{ item }">
+            <el-button text size="small" @click="openRun(item.id)">载入</el-button>
+            <el-button text size="small" :disabled="item.status === 'running' || item.status === 'queued'" @click="removeRun(item.id)">删除</el-button>
+          </template>
+          <template #details="{ item }">
+            <div>运行时间 {{ formatTime(item.created_at) }}</div>
+            <div>耗时 {{ formatDuration(item.duration_ms) }}</div>
+            <div>语言 {{ item.language }}</div>
+            <div v-if="item.error" class="run-error">{{ item.error }}</div>
+          </template>
+          <el-table
+            :data="history"
+            row-key="id"
+            class="history-table"
+            size="small"
+            empty-text="还没有运行记录"
+            :row-class-name="({ row }) => row.id === currentId ? 'active-run' : ''"
+          >
+            <el-table-column label="时间" width="142">
+              <template #default="{ row: item }">{{ formatTime(item.created_at) }}</template>
+            </el-table-column>
+            <el-table-column label="标题" min-width="160">
+              <template #default="{ row: item }">
                 {{ item.title }}
                 <div class="row-sub">{{ item.language }}<template v-if="item.error"> · {{ item.error }}</template></div>
-              </td>
-              <td><span :class="badgeClass(item.status)">{{ statusLabel[item.status] || item.status }}</span></td>
-              <td class="num text-sm">{{ formatDuration(item.duration_ms) }}</td>
-              <td class="actions">
-                <button class="btn btn-ghost btn-sm" @click="openRun(item.id)">载入</button>
-                <button class="btn btn-ghost btn-sm" :disabled="item.status === 'running' || item.status === 'queued'" @click="removeRun(item.id)">删除</button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+              </template>
+            </el-table-column>
+            <el-table-column label="状态" width="92">
+              <template #default="{ row: item }"><span :class="badgeClass(item.status)">{{ statusLabel[item.status] || item.status }}</span></template>
+            </el-table-column>
+            <el-table-column label="耗时" width="94" align="right">
+              <template #default="{ row: item }">{{ formatDuration(item.duration_ms) }}</template>
+            </el-table-column>
+            <el-table-column label="操作" width="116" align="right">
+              <template #default="{ row: item }">
+                <div class="history-actions">
+                  <el-button text size="small" @click="openRun(item.id)">载入</el-button>
+                  <el-button text size="small" :disabled="item.status === 'running' || item.status === 'queued'" @click="removeRun(item.id)">删除</el-button>
+                </div>
+              </template>
+            </el-table-column>
+          </el-table>
+        </ResponsiveRecords>
       </div>
       <div v-if="historyTotal > pageSize" class="card-body" style="padding-top:0;">
         <Pagination :total="historyTotal" :page="page" :page-size="pageSize" @update:page="page = $event" />
@@ -490,10 +532,7 @@ onUnmounted(closeStream)
   .script-grid { grid-template-columns: minmax(0, 1fr); }
 }
 .lang-select {
-  width: auto;
-  min-width: 130px;
-  padding: 6px 30px 6px 10px;
-  font-size: 13px;
+  width: min(180px, 100%);
 }
 .meta-row {
   display: grid;
@@ -504,8 +543,7 @@ onUnmounted(closeStream)
 @media (max-width: 700px) {
   .meta-row { grid-template-columns: minmax(0, 1fr); }
 }
-.code-editor {
-  width: 100%;
+.code-editor :deep(textarea) {
   min-height: 320px;
   font-family: var(--font-mono);
   font-size: 13px;
@@ -513,7 +551,7 @@ onUnmounted(closeStream)
   tab-size: 4;
 }
 @media (max-width: 1100px) {
-  .code-editor { min-height: 240px; }
+  .code-editor :deep(textarea) { min-height: 240px; }
 }
 .card-body.no-pad { padding: 0; }
 .output {
@@ -574,9 +612,9 @@ onUnmounted(closeStream)
 .file-link small {
   color: var(--c-text-muted);
 }
-.data-table .num { text-align: right; white-space: nowrap; }
-.data-table .actions { text-align: right; white-space: nowrap; }
-.data-table tr.active td { background: var(--c-primary-light); }
+.history-table :deep(.active-run td.el-table__cell) { background: var(--c-primary-light); }
+.history-actions { display: flex; justify-content: flex-end; gap: 2px; }
+.history-actions .el-button { margin-left: 0; padding-inline: 6px; }
 .row-sub {
   font-size: 12px;
   color: var(--c-text-muted);

@@ -1,6 +1,8 @@
 <script setup lang="ts">
+import FilterToolbar from '../components/FilterToolbar.vue'
+import ViewFeedback from '../components/ViewFeedback.vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { RouterLink, useRouter } from 'vue-router'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import Pagination from '../components/Pagination.vue'
 import PlatformBadge from '../components/PlatformBadge.vue'
@@ -8,6 +10,7 @@ import { api } from '../api/client'
 import { openImageViewer } from '../utils/imageViewer'
 import { previewUrl, thumbUrl } from '../utils/imageUrls'
 import { useUrlState } from '../composables/useUrlState'
+import { rememberGalleryScroll } from '../utils/galleryScroll'
 import { ensurePlatforms, platforms, type Platform } from '../utils/platforms'
 
 type ImageItem = { id: number; filename: string; created_at: string; is_favorite: boolean; prompt_id: number; prompt_title: string; width: number; height: number; source_platform: string }
@@ -15,13 +18,17 @@ type PageResult = { items: ImageItem[]; total: number; page: number; page_size: 
 type BatchResult = { applied: number; skipped: number }
 
 const router = useRouter()
+const route = useRoute()
 
 const images = ref<ImageItem[]>([])
 const loading = ref(true)
 const loadError = ref(false)
+const scrollReady = ref(false)
+const resultsStart = ref<HTMLElement | null>(null)
 let loadController: AbortController | undefined
 const batchBusy = ref(false)
 const message = ref('')
+const messageKind = ref<'success' | 'error'>('success')
 const total = ref(0)
 
 // 分页与筛选进 URL query：从详情页返回、刷新、分享链接都保持当前位置
@@ -39,10 +46,14 @@ const state = useUrlState({
   },
 })
 
-const hasFilters = computed(() => !!(state.q || state.group || state.platform || state.favorite))
-
-// 来源下拉：本平台 + 各外部平台（清单来自后端，加平台前端不用改）
 const platformOptions = ref<Platform[]>([])
+const activeFilters = computed(() => [
+  state.q.trim() && `搜索 · ${state.q.trim()}`,
+  state.group && `分组 · ${state.group}`,
+  state.platform && `来源 · ${state.platform === 'local' ? '本平台' : platformOptions.value.find(p => p.id === state.platform)?.label || state.platform}`,
+  state.favorite && '仅收藏',
+].filter((value): value is string => !!value))
+const hasFilters = computed(() => activeFilters.value.length > 0)
 
 type Group = { group_name: string; group_id: string; count: number }
 const groups = ref<Group[]>([])
@@ -59,12 +70,13 @@ const selectedIds = ref<Set<number>>(new Set())
 const selectedCount = computed(() => selectedIds.value.size)
 const allSelected = computed(() => images.value.length > 0 && images.value.every(i => selectedIds.value.has(i.id)))
 
-async function load() {
+async function load(scrollToResults = false) {
   loadController?.abort()
   const controller = new AbortController()
   loadController = controller
   loading.value = true
   loadError.value = false
+  scrollReady.value = false
   try {
     const params = new URLSearchParams()
     if (state.favorite) params.set('favorite', '1')
@@ -87,7 +99,19 @@ async function load() {
     clearSelection()
     loadError.value = true
   } finally {
-    if (!controller.signal.aborted) loading.value = false
+    if (!controller.signal.aborted) {
+      loading.value = false
+      await nextTick()
+      if (!controller.signal.aborted) {
+        layoutMasonry()
+        scrollReady.value = true
+        if (scrollToResults && !loadError.value && resultsStart.value) {
+          const headerHeight = document.querySelector('.mobile-header')?.getBoundingClientRect().height ?? 0
+          const top = window.scrollY + resultsStart.value.getBoundingClientRect().top - headerHeight - 12
+          window.scrollTo({ top, behavior: 'auto' })
+        }
+      }
+    }
   }
 }
 
@@ -156,15 +180,18 @@ async function copyPrompt(key: 'positive' | 'negative') {
 }
 
 function onPageChange(p: number) {
+  if (p === state.page) return
+  clearTimeout(searchTimer)
   state.page = p
   clearSelection()
-  load()
+  void load(true)
 }
 
 function onPageSizeChange() {
+  clearTimeout(searchTimer)
   state.page = 1
   clearSelection()
-  load()
+  void load(true)
 }
 
 function onFavOnlyChange() {
@@ -206,7 +233,8 @@ function toggleSelectAll() {
   selectedIds.value = allSelected.value ? new Set() : new Set(images.value.map(i => i.id))
 }
 
-function flash(msg: string) {
+function flash(msg: string, kind: 'success' | 'error' = 'success') {
+  messageKind.value = kind
   message.value = msg
   setTimeout(() => {
     if (message.value === msg) message.value = ''
@@ -226,7 +254,7 @@ async function batchFavorite(fav: boolean) {
     clearSelection()
     await load()
   } catch (e) {
-    flash(e instanceof Error ? e.message : '操作失败')
+    flash(e instanceof Error ? e.message : '操作失败', 'error')
   } finally {
     batchBusy.value = false
   }
@@ -246,7 +274,7 @@ async function batchDelete() {
     clearSelection()
     await load()
   } catch (e) {
-    flash(e instanceof Error ? e.message : '删除失败')
+    flash(e instanceof Error ? e.message : '删除失败', 'error')
   } finally {
     batchBusy.value = false
   }
@@ -295,6 +323,10 @@ function scheduleMasonry() {
   })
 }
 
+function saveScrollForReload() {
+  if (route.path === '/gallery' && scrollReady.value) rememberGalleryScroll(route.fullPath)
+}
+
 // 只看宽度变化：高度变化正是重排自己造成的，跟着它重排会死循环
 function observeGrid(el: HTMLElement) {
   if (!gridObserver) {
@@ -309,16 +341,15 @@ function observeGrid(el: HTMLElement) {
   gridObserver.observe(el)
 }
 
-watch(gridEl, el => {
+watch(gridEl, (el, previous) => {
+  if (previous) gridObserver?.unobserve(previous)
   if (!el) return
   observeGrid(el)
   scheduleMasonry()
 })
 
-// 换页 / 改筛选后重排
-watch(images, () => { nextTick(scheduleMasonry) }, { flush: 'post' })
-
 onBeforeUnmount(() => {
+  window.removeEventListener('scroll', saveScrollForReload)
   loadController?.abort()
   clearTimeout(searchTimer)
   gridObserver?.disconnect()
@@ -327,22 +358,27 @@ onBeforeUnmount(() => {
 })
 
 function openViewer(index: number) {
+  let leavingForPrompt = false
   // 带上宽高：查看器按真比例排布，跨页预取也不用再逐张拉原图量尺寸
   const refs = images.value.map(i => ({ id: i.id, width: i.width, height: i.height }))
   openImageViewer(
     refs,
     index,
     {
-      goToPrompt: id => router.push(`/prompts/${id}`),
+      goToPrompt: id => {
+        leavingForPrompt = true
+        void router.push(`/prompts/${id}`)
+      },
       // 关闭时按「最后停留的那张」定位页码：翻到第 3 页的图再关，
       // 列表就停在第 3 页，而不是退回点开时的第 1 页。
       onClose: (lastIndex, changed) => {
+        if (leavingForPrompt || route.path !== '/gallery') return
         const page = Math.floor(lastIndex / state.page_size) + 1
         const pageChanged = page !== state.page
         if (pageChanged) state.page = page
         if (pageChanged || changed) {
           clearSelection()
-          load()
+          void load(pageChanged)
         }
       },
     },
@@ -369,6 +405,7 @@ async function toggleFavorite(image: ImageItem) {
 }
 
 onMounted(() => {
+  window.addEventListener('scroll', saveScrollForReload, { passive: true })
   load()
   loadGroups()
   ensurePlatforms().then(list => { platformOptions.value = list })
@@ -378,72 +415,52 @@ onMounted(() => {
 <template>
   <PageHeader title="图片库" description="查看已生成的图片，支持预览、下载、提示词查看与批量管理。" />
 
-  <div class="toolbar" style="flex-wrap:wrap; gap:10px;">
-    <input
+  <FilterToolbar :active="activeFilters" @clear="clearFilters">
+    <el-input
       v-model="state.q"
-      class="input"
       type="text"
       placeholder="搜索提示词或文件名..."
       aria-label="搜索提示词或文件名"
-      style="flex:1; min-width:200px;"
-      @input="onSearch"
-    />
-    <select v-model="state.group" aria-label="图片分组" class="input" style="width:auto;max-width:180px;" @change="onFilterChange">
-      <option value="">全部分组</option>
-      <option v-for="g in groups" :key="g.group_name" :value="g.group_name">{{ g.group_name }}（{{ g.count }}）</option>
-    </select>
-    <select v-model="state.platform" aria-label="图片来源" class="input" style="width:auto;max-width:150px;" @change="onFilterChange">
-      <option value="">全部来源</option>
-      <option value="local">本平台</option>
-      <option v-for="p in platformOptions" :key="p.id" :value="p.id">{{ p.label }}</option>
-    </select>
-    <button class="btn btn-sm" :aria-pressed="state.favorite" :class="{ 'btn-primary': state.favorite }" @click="onFavOnlyChange">
+      class="toolbar-search"
+      @input="onSearch" />
+    <el-button size="small" :aria-pressed="state.favorite" :type="state.favorite ? 'primary' : 'default'" @click="onFavOnlyChange">
       {{ state.favorite ? '★ 仅收藏' : '☆ 仅收藏' }}
-    </button>
-  </div>
+    </el-button>
+    <template #secondary>
+      <el-select v-model="state.group" aria-label="图片分组" class="filter-select filter-select-wide" @change="onFilterChange" :empty-values="[]">
+        <el-option value="" label="全部分组" />
+        <el-option v-for="g in groups" :key="g.group_name" :value="g.group_name" :label="`${g.group_name}（${g.count}）`" />
+      </el-select>
+      <el-select v-model="state.platform" aria-label="图片来源" class="filter-select" @change="onFilterChange" :empty-values="[]">
+        <el-option value="" label="全部来源" />
+        <el-option value="local" label="本平台" />
+        <el-option v-for="p in platformOptions" :key="p.id" :value="p.id" :label="p.label" />
+      </el-select>
+    </template>
+  </FilterToolbar>
 
   <!-- 多选操作栏 -->
   <div class="batch-bar">
-    <label class="checkbox-wrap">
-      <input type="checkbox" :checked="allSelected" :disabled="!images.length" @change="toggleSelectAll" />
-      <span class="text-xs">全选本页</span>
-    </label>
+    <el-checkbox class="checkbox-wrap" :model-value="allSelected" :disabled="!images.length" @change="toggleSelectAll">全选本页</el-checkbox>
     <span class="batch-info">已选 {{ selectedCount }} 张</span>
     <template v-if="selectedCount > 0">
-      <button class="btn btn-ghost btn-sm" :disabled="batchBusy" @click="batchFavorite(true)">★ 收藏</button>
-      <button class="btn btn-ghost btn-sm" :disabled="batchBusy" @click="batchFavorite(false)">☆ 取消收藏</button>
-      <button class="btn btn-ghost btn-sm btn-danger" :disabled="batchBusy" @click="batchDelete">&#128465; 批量删除</button>
-      <button class="btn btn-ghost btn-sm" @click="clearSelection">取消选择</button>
+      <el-button text size="small" :disabled="batchBusy" @click="batchFavorite(true)">★ 收藏</el-button>
+      <el-button text size="small" :disabled="batchBusy" @click="batchFavorite(false)">☆ 取消收藏</el-button>
+      <el-button type="danger" text size="small" :disabled="batchBusy" @click="batchDelete">&#128465; 批量删除</el-button>
+      <el-button text size="small" @click="clearSelection">取消选择</el-button>
     </template>
-    <span v-if="message" class="text-xs batch-msg">{{ message }}</span>
   </div>
+  <ViewFeedback :kind="messageKind" :message="message" />
 
-  <!-- Loading -->
-  <div v-if="loading" class="card">
-    <div class="card-body flex items-center gap-3">
-      <span class="spinner"></span>
-      <span class="muted">加载中...</span>
-    </div>
-  </div>
-
-  <div v-else-if="loadError" class="card">
-    <div class="empty-state" role="status">
-      <p>图片加载失败，请重试。</p>
-      <button type="button" class="btn btn-secondary btn-sm" @click="load">重试</button>
-    </div>
-  </div>
-
-  <div v-else-if="!images.length" class="card">
-    <div class="empty-state">
-      <template v-if="hasFilters">
-        <p>没有匹配的图片。</p>
-        <button type="button" class="btn btn-secondary btn-sm" @click="clearFilters">清空筛选</button>
-      </template>
-      <template v-else>
-        <p>图片库还没有素材。</p>
-        <RouterLink class="btn btn-primary btn-sm" to="/submit">创建作图任务</RouterLink>
-      </template>
-    </div>
+  <div ref="resultsStart" :data-gallery-ready="scrollReady ? route.fullPath : undefined"></div>
+  <div v-if="loadError || !images.length" class="card">
+    <ViewFeedback v-if="loading" kind="loading" />
+    <ViewFeedback v-else-if="loadError" kind="error" message="无法加载图片">
+      <el-button text size="small" @click="load()">重试</el-button>
+    </ViewFeedback>
+    <ViewFeedback v-else kind="empty" :message="hasFilters ? '没有匹配的图片' : '图片库还没有素材'">
+      <RouterLink v-if="!hasFilters" class="btn btn-primary btn-sm" to="/submit">创建作图任务</RouterLink>
+    </ViewFeedback>
   </div>
 
   <!-- Image Grid：瀑布流，卡片高度按图片比例（span 由 layoutMasonry 计算） -->
@@ -460,9 +477,7 @@ onMounted(() => {
       class="image-card"
       :class="{ selected: selectedIds.has(image.id) }"
     >
-      <label class="checkbox-wrap image-check">
-        <input type="checkbox" :aria-label="'选择图片 ' + image.filename" :checked="selectedIds.has(image.id)" @change="toggleSelect(image.id)" />
-      </label>
+      <el-checkbox class="checkbox-wrap image-check" :aria-label="'选择图片 ' + image.filename" :model-value="selectedIds.has(image.id)" @change="toggleSelect(image.id)" />
       <button type="button" class="fav-badge" :aria-pressed="image.is_favorite"
         :aria-label="'收藏图片 ' + image.filename" @click="toggleFavorite(image)">{{ image.is_favorite ? '★' : '☆' }}</button>
       <button type="button" class="image-thumb-wrap" :aria-label="'预览图片 ' + image.filename" @click="openViewer(index)">
@@ -487,66 +502,70 @@ onMounted(() => {
     />
     <div class="page-size-wrap">
       <span class="text-xs muted">每页</span>
-      <select v-model.number="state.page_size" class="input page-size-select" @change="onPageSizeChange">
-        <option :value="20">20</option>
-        <option :value="50">50</option>
-        <option :value="100">100</option>
-        <option :value="200">200</option>
-      </select>
+      <el-select v-model="state.page_size" class="page-size-select" size="small" aria-label="每页条数" @change="onPageSizeChange">
+        <el-option :value="20" label="20" />
+        <el-option :value="50" label="50" />
+        <el-option :value="100" label="100" />
+        <el-option :value="200" label="200" />
+      </el-select>
       <span class="text-xs muted">条</span>
     </div>
   </div>
 
-  <!-- 图片信息弹窗 -->
-  <div v-if="detailOpen" class="modal-overlay" @click.self="closeDetail">
-    <div class="modal detail-modal">
-      <div class="detail-head">
-        <img v-if="detailImage" class="detail-thumb" :src="thumbUrl(detailImage.id)" :alt="detailImage.filename" />
-        <div class="detail-meta">
-          <div class="detail-title-row">
-            <span class="detail-id">#{{ detailImage?.id }}</span>
-            <PlatformBadge v-if="detail?.source_platform" :platform="detail.source_platform" size="md" />
-            <span v-if="detail?.is_favorite" class="detail-fav">★ 已收藏</span>
-          </div>
-          <div class="detail-filename" :title="detail?.filename">{{ detail?.filename || '…' }}</div>
-          <div v-if="detail" class="text-xs muted">{{ new Date(detail.created_at).toLocaleString('zh-CN') }}</div>
-          <RouterLink v-if="detail && detail.prompt_id" :to="`/prompts/${detail.prompt_id}`" class="detail-prompt-link">
-            查看关联提示词 &rarr;
-          </RouterLink>
-          <div v-else-if="detail" class="text-xs muted">手动提交，未入库</div>
+  <el-dialog
+    :model-value="detailOpen"
+    title="图片信息"
+    class="app-dialog"
+    width="min(560px, calc(100% - 24px))"
+    top="6vh"
+    append-to-body
+    @update:model-value="open => { if (!open) closeDetail() }"
+  >
+    <div class="detail-head">
+      <img v-if="detailImage" class="detail-thumb" :src="thumbUrl(detailImage.id)" :alt="detailImage.filename" />
+      <div class="detail-meta">
+        <div class="detail-title-row">
+          <span class="detail-id">#{{ detailImage?.id }}</span>
+          <PlatformBadge v-if="detail?.source_platform" :platform="detail.source_platform" size="md" />
+          <span v-if="detail?.is_favorite" class="detail-fav">★ 已收藏</span>
         </div>
-      </div>
-
-      <div v-if="detailLoading" class="detail-loading">
-        <span class="spinner"></span><span class="text-xs muted">加载图片信息…</span>
-      </div>
-      <template v-else-if="detail">
-        <section class="detail-prompt">
-          <div class="detail-prompt-head">
-            <span class="dp-label"><span class="label-dot positive"></span>正面提示词</span>
-            <button v-if="detail.positive_prompt" class="btn btn-ghost btn-sm" @click="copyPrompt('positive')">
-              {{ copiedKey === 'positive' ? '已复制 ✓' : '复制' }}
-            </button>
-          </div>
-          <p class="detail-prompt-body">{{ detail.positive_prompt || '（无）' }}</p>
-        </section>
-        <section v-if="detail.negative_prompt" class="detail-prompt">
-          <div class="detail-prompt-head">
-            <span class="dp-label"><span class="label-dot negative"></span>负面提示词</span>
-            <button class="btn btn-ghost btn-sm" @click="copyPrompt('negative')">
-              {{ copiedKey === 'negative' ? '已复制 ✓' : '复制' }}
-            </button>
-          </div>
-          <p class="detail-prompt-body">{{ detail.negative_prompt }}</p>
-        </section>
-      </template>
-
-      <div class="detail-footer">
-        <a v-if="detailImage" :href="`/api/images/${detailImage.id}/download`" class="btn btn-secondary btn-sm">&#8681; 下载</a>
-        <button class="btn btn-ghost" @click="closeDetail">关闭</button>
+        <div class="detail-filename" :title="detail?.filename">{{ detail?.filename || '…' }}</div>
+        <div v-if="detail" class="text-xs muted">{{ new Date(detail.created_at).toLocaleString('zh-CN') }}</div>
+        <RouterLink v-if="detail && detail.prompt_id" :to="`/prompts/${detail.prompt_id}`" class="detail-prompt-link">
+          查看关联提示词 &rarr;
+        </RouterLink>
+        <div v-else-if="detail" class="text-xs muted">手动提交，未入库</div>
       </div>
     </div>
-  </div>
+
+    <div v-if="detailLoading" class="detail-loading">
+      <span class="spinner"></span><span class="text-xs muted">加载图片信息…</span>
+    </div>
+    <template v-else-if="detail">
+      <section class="detail-prompt">
+        <div class="detail-prompt-head">
+          <span class="dp-label"><span class="label-dot positive"></span>正面提示词</span>
+          <el-button v-if="detail.positive_prompt" text size="small" @click="copyPrompt('positive')">
+            {{ copiedKey === 'positive' ? '已复制 ✓' : '复制' }}
+          </el-button>
+        </div>
+        <p class="detail-prompt-body">{{ detail.positive_prompt || '（无）' }}</p>
+      </section>
+      <section v-if="detail.negative_prompt" class="detail-prompt">
+        <div class="detail-prompt-head">
+          <span class="dp-label"><span class="label-dot negative"></span>负面提示词</span>
+          <el-button text size="small" @click="copyPrompt('negative')">
+            {{ copiedKey === 'negative' ? '已复制 ✓' : '复制' }}
+          </el-button>
+        </div>
+        <p class="detail-prompt-body">{{ detail.negative_prompt }}</p>
+      </section>
+    </template>
+    <template #footer>
+      <a v-if="detailImage" :href="`/api/images/${detailImage.id}/download`" class="el-button">下载</a>
+      <el-button @click="closeDetail">关闭</el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <style scoped>
@@ -645,13 +664,10 @@ onMounted(() => {
 .title-info-hint { float: right; opacity: 0; color: var(--c-primary); transition: opacity 0.15s; }
 
 /* 图片信息弹窗 */
-.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 100; padding: 20px; }
-.modal { background: var(--c-card); border-radius: 12px; padding: 24px; width: 100%; max-height: 85vh; overflow-y: auto; box-shadow: var(--shadow-lg); }
-.detail-modal { max-width: 560px; }
 .detail-head { display: flex; gap: 14px; margin-bottom: 16px; }
 .detail-thumb { width: 120px; height: 120px; object-fit: cover; border-radius: 10px; border: 1px solid var(--c-border); flex-shrink: 0; background: var(--c-bg-subtle); }
 .detail-meta { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
-.detail-title-row { display: flex; align-items: center; gap: 8px; }
+.detail-title-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .detail-id { font-weight: 700; color: var(--c-primary); }
 .detail-fav { font-size: 12px; color: #d97706; }
 .detail-filename { font-size: 13px; word-break: break-all; }
@@ -663,5 +679,7 @@ onMounted(() => {
 .dp-label { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: var(--c-muted); }
 /* 不单独限高滚动：长文本完整展开，由弹窗外层统一滚动，避免双滚动条 */
 .detail-prompt-body { font-size: 13px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
-.detail-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+@media (max-width: 480px) {
+  .detail-thumb { width: 80px; height: 80px; }
+}
 </style>

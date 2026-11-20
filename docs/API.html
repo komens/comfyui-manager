@@ -1244,7 +1244,7 @@ curl -s $BASE/api/tasks/11
 </tbody>
 </table>
 <blockquote>
-<p>地址变更只影响<strong>后续</strong>提交。已在跑的任务用任务创建时的快照做展示，但实际出站请求一律实时读取当前设置。</p>
+<p>地址变更影响新建的任务和主动重试。已排队的任务按创建时的地址提交。取图和取消使用生成项实际接单的地址。</p>
 </blockquote>
 <h3 id="46-测试-comfyui-连通性">4.6 测试 ComfyUI 连通性</h3>
 <pre><code>POST /api/settings/comfyui/test?url=http://127.0.0.1:8188
@@ -2402,8 +2402,13 @@ curl -s $BASE/api/tasks/11
 </tbody>
 </table>
 <blockquote>
-<p>默认为<strong>全局唯一</strong>：设为默认时会先把其它工作流的默认标记清零。</p>
+<p>默认为<strong>全局唯一</strong>：设为默认时会先把其它工作流的默认标记清零。工作流须已启用，否则接口返回 409。</p>
 </blockquote>
+<h4>启用或禁用工作流</h4>
+<pre><code>PUT /api/workflows/{id}/enabled
+</code></pre>
+<p>请求体为 <code>{"enabled": false}</code> 或 <code>{"enabled": true}</code>。成功返回 <code>id</code>、<code>enabled</code> 和 <code>is_default</code>。缺少布尔值时返回 400，工作流不存在时返回 404。</p>
+<p>禁用会清除默认标记并阻止新建任务。已排队任务照常处理，失败的历史任务仍可重试。</p>
 <h3 id="59-识别落点未保存的工作流">5.9 识别落点（未保存的工作流）</h3>
 <pre><code>POST /api/workflows/prompt-targets
 </code></pre>
@@ -2702,7 +2707,7 @@ POST /api/workflows/{id}/validate     # 校验已保存的工作流
 <tr>
 <td><code>unsupported_feature</code></td>
 <td>errors</td>
-<td>使用了不支持的特性（如子图）</td>
+<td>使用了无法展开的前端结构（例如缺少内部节点或循环引用的子图）</td>
 </tr>
 <tr>
 <td><code>node_type_missing</code></td>
@@ -3465,7 +3470,7 @@ data: {&quot;task_id&quot;:11,&quot;item_id&quot;:23,&quot;status&quot;:&quot;su
 </tbody>
 </table>
 <blockquote>
-<p>取消时会异步通知 ComfyUI 从队列中移除已提交的任务（仅移除排队项，不中断正在执行的）。</p>
+<p>服务会请求实际接单的 ComfyUI 撤队或停止执行。若远端取消未确认，响应中的 <code>remote_warning</code> 会说明原因。</p>
 </blockquote>
 <h3 id="67-重试任务">6.7 重试任务</h3>
 <pre><code>POST /api/tasks/{id}/retry
@@ -3492,7 +3497,7 @@ data: {&quot;task_id&quot;:11,&quot;item_id&quot;:23,&quot;status&quot;:&quot;su
 </tr>
 </tbody>
 </table>
-<p><strong>前置条件</strong>：任务状态必须是 <code>failed</code>，且其关联工作流仍然存在。</p>
+<p><strong>前置条件</strong>：任务状态必须是 <code>failed</code> 或 <code>completed</code>，至少有一个失败的生成项，且关联工作流仍存在。</p>
 <p>已成功的 item 保持不变（不会重复出图），只有失败的 item 被重置。</p>
 <table>
 <thead>
@@ -3510,8 +3515,8 @@ data: {&quot;task_id&quot;:11,&quot;item_id&quot;:23,&quot;status&quot;:&quot;su
 </tr>
 <tr>
 <td>409</td>
-<td>状态不是 <code>failed</code></td>
-<td><code>only failed tasks can be retried</code></td>
+<td>没有可重试的失败项</td>
+<td><code>task has no retryable failed items</code></td>
 </tr>
 <tr>
 <td>409</td>
@@ -5536,7 +5541,7 @@ Content-Type: multipart/form-data
 <tr>
 <td><code>prompts</code></td>
 <td>提示词行；<code>cascade_images=true</code> 时连带删图与生成项，否则只把 <code>items.prompt_id</code> 置 NULL</td>
-<td>提示词自身的 <code>is_favorite</code></td>
+<td>默认保护收藏提示词。级联时也会跳过有关联收藏图片或仍在生成的提示词</td>
 </tr>
 </tbody>
 </table>
@@ -5546,10 +5551,13 @@ Content-Type: multipart/form-data
 </code></pre>
 <p>只查询，不改任何数据。</p>
 <p><strong>请求体</strong>：见 10.1。</p>
+<p>可传查询参数 <code>image_page</code>，默认第 1 页，每页 24 张。页码超过范围时返回最后一页。统计数据始终覆盖完整命中范围。</p>
 <p><strong>响应</strong></p>
 <pre><code class="language-json">{
   &quot;target&quot;: &quot;images&quot;,
   &quot;primary_count&quot;: 5,
+  &quot;image_page&quot;: 1,
+  &quot;image_page_size&quot;: 24,
   &quot;only_unfavorite&quot;: true,
   &quot;warning&quot;: &quot;已跳过 6 张收藏图片&quot;,
   &quot;stats&quot;: {
@@ -5584,7 +5592,11 @@ Content-Type: multipart/form-data
 </tr>
 <tr>
 <td><code>samples</code></td>
-<td>最多 8 条，供人眼确认</td>
+<td>当前页的待删除图片，按图片 ID 升序排列。总张数见 <code>stats.images</code></td>
+</tr>
+<tr>
+<td><code>image_page</code> / <code>image_page_size</code></td>
+<td>实际返回的图片页码和每页张数</td>
 </tr>
 <tr>
 <td><code>warning</code></td>
@@ -5702,11 +5714,8 @@ Content-Type: multipart/form-data
 <h3 id="109-还原批次">10.9 还原批次</h3>
 <pre><code>POST /api/maintenance/trash/{id}/restore
 </code></pre>
-<p>把该批次的图片文件移回 <code>data/images/</code>。</p>
-<p><strong>响应</strong>：<code>{"batch_id": 1, "files_restored": 5, "files_skipped": 0, "note": "..."}</code></p>
-<blockquote>
-<p>⚠️ <strong>只还原文件，不还原库记录</strong>。清理时 <code>generation_items</code> 已被级联删除且未留快照，因此无法重建 <code>images</code> 行 —— 图片会回到磁盘目录，但不会出现在图片库里。响应里的 <code>note</code> 字段就是提醒这件事的。</p>
-</blockquote>
+<p>把该批次的图片文件和图库记录一起恢复。仍存在的生成项或提示词关联会恢复。旧批次缺少元数据时，原图以独立图库图片恢复。恢复失败的图片保留在回收站。</p>
+<p><strong>响应</strong>：<code>{"batch_id": 1, "files_restored": 5, "files_skipped": 0}</code></p>
 <h3 id="1010-彻底删除批次">10.10 彻底删除批次</h3>
 <pre><code>DELETE /api/maintenance/trash/{id}
 </code></pre>
@@ -6090,7 +6099,7 @@ Content-Type: multipart/form-data
 </ul>
 <p><strong>已知限制</strong></p>
 <ul>
-<li><strong>子图（Subgraph）不支持</strong>：含子图的工作流会在保存/提交时被拒绝。</li>
+<li><strong>子图</strong>支持常见的嵌套结构和边界连线。缺失内部节点、循环引用等无法展开的结构会在校验或提交时报错。</li>
 <li><strong>无鉴权</strong>：接口不做认证，请勿直接暴露到公网。</li>
 <li><strong>CORS 实际不生效</strong>：白名单配置项未被读取，不会输出跨域头；跨域访问需自建反向代理。</li>
 <li><code>POST /api/prompts/batch-delete</code> 与 <code>POST /api/prompts/batch-run</code> 不校验 500 条上限。</li>

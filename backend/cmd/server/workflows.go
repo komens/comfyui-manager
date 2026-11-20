@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -107,15 +109,36 @@ func readWorkflowFile(path string) ([]byte, error) {
 }
 
 func (a *app) listWorkflows(w http.ResponseWriter, r *http.Request) {
-	// 统计总数
+	ctx := r.Context()
+	query := r.URL.Query()
+	where := " WHERE 1=1"
+	args := make([]any, 0, 3)
+	if keyword := strings.TrimSpace(query.Get("q")); keyword != "" {
+		where += " AND instr(lower(name), lower(?)) > 0"
+		args = append(args, keyword)
+	}
+	switch query.Get("status") {
+	case "":
+	case "enabled":
+		where += " AND enabled=1"
+	case "disabled":
+		where += " AND enabled!=1"
+	case "default":
+		where += " AND enabled=1 AND is_default=1"
+	default:
+		writeError(w, http.StatusBadRequest, "invalid workflow status filter")
+		return
+	}
 	var total int
-	_ = a.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM workflows`).Scan(&total)
-	// 分页
+	if err := a.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM workflows"+where, args...).Scan(&total); err != nil {
+		writeError(w, http.StatusInternalServerError, "count workflows failed")
+		return
+	}
 	page, pageSize, offset := parsePagination(r)
 	rows, err := a.db.QueryContext(r.Context(), `SELECT id, name, description, workflow_path, mapping_json, COALESCE(negative_prompt,''), enabled, is_default, created_at, updated_at,
 		(SELECT COUNT(*) FROM generation_tasks t WHERE t.workflow_id=workflows.id),
 		(SELECT COUNT(*) FROM generation_tasks t WHERE t.workflow_id=workflows.id AND t.status IN ('pending','running'))
-		FROM workflows ORDER BY id DESC LIMIT ? OFFSET ?`, pageSize, offset)
+		FROM workflows`+where+` ORDER BY id DESC LIMIT ? OFFSET ?`, append(args, pageSize, offset)...)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "query workflows failed")
 		return
@@ -133,8 +156,12 @@ func (a *app) listWorkflows(w http.ResponseWriter, r *http.Request) {
 		items = append(items, map[string]any{"id": id, "name": name, "description": description,
 			"workflow_path": path, "mapping": json.RawMessage(mapping),
 			"negative_prompt": negative,
-			"enabled":         enabled == 1, "is_default": isDefault == 1, "created_at": created, "updated_at": updated,
+			"enabled":         enabled == 1, "is_default": enabled == 1 && isDefault == 1, "created_at": created, "updated_at": updated,
 			"task_count": taskCount, "in_flight": inFlight})
+	}
+	if err := rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "read workflow failed")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "page": page, "page_size": pageSize})
 }
@@ -224,12 +251,39 @@ func (a *app) getWorkflow(w http.ResponseWriter, r *http.Request) {
 		"id": id, "name": name, "description": description, "workflow_path": filepath.Base(path),
 		"workflow_json": json.RawMessage(workflowJSON), "mapping": json.RawMessage(mapping),
 		"negative_prompt": negative,
-		"enabled":         enabled == 1, "is_default": isDefault == 1, "created_at": created, "updated_at": updated,
+		"enabled":         enabled == 1, "is_default": enabled == 1 && isDefault == 1, "created_at": created, "updated_at": updated,
 	})
 }
 
-// setDefaultWorkflow 设置/取消默认工作流。默认工作流全局唯一：
-// 设为默认时会先把其它工作流的 is_default 清零，保证任意时刻至多一个默认。
+func (a *app) setWorkflowEnabled(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid workflow id")
+		return
+	}
+	var input struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := decodeJSON(r, &input); err != nil || input.Enabled == nil {
+		writeError(w, http.StatusBadRequest, "enabled is required")
+		return
+	}
+	var isDefault bool
+	err = a.db.QueryRowContext(r.Context(), `UPDATE workflows
+		SET enabled=?, is_default=CASE WHEN enabled=1 AND ? THEN is_default ELSE 0 END, updated_at=?
+		WHERE id=? RETURNING is_default`, *input.Enabled, *input.Enabled, time.Now(), id).Scan(&isDefault)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "workflow not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "set workflow status failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "enabled": *input.Enabled, "is_default": isDefault})
+}
+
+// setDefaultWorkflow keeps the single default on an enabled workflow.
 func (a *app) setDefaultWorkflow(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
@@ -237,41 +291,48 @@ func (a *app) setDefaultWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		IsDefault bool `json:"is_default"`
+		IsDefault *bool `json:"is_default"`
 	}
-	if err := decodeJSON(r, &input); err != nil {
+	if err := decodeJSON(r, &input); err != nil || input.IsDefault == nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	tx, err := a.db.BeginTx(r.Context(), nil)
+	ctx := r.Context()
+	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "set default failed")
 		return
 	}
-	var exists int
-	if err := tx.QueryRowContext(r.Context(), `SELECT 1 FROM workflows WHERE id=?`, id).Scan(&exists); err != nil {
-		_ = tx.Rollback()
+	defer tx.Rollback()
+	var enabled bool
+	err = tx.QueryRowContext(ctx, "SELECT enabled FROM workflows WHERE id=?", id).Scan(&enabled)
+	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "workflow not found")
 		return
 	}
-	if _, err := tx.ExecContext(r.Context(), `UPDATE workflows SET is_default=0 WHERE is_default=1`); err != nil {
-		_ = tx.Rollback()
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "set default failed")
 		return
 	}
-	if input.IsDefault {
-		if _, err := tx.ExecContext(r.Context(), `UPDATE workflows SET is_default=1, updated_at=? WHERE id=?`, time.Now(), id); err != nil {
-			_ = tx.Rollback()
+	if *input.IsDefault {
+		if !enabled {
+			writeError(w, http.StatusConflict, "请先启用该工作流，再设为默认")
+			return
+		}
+		if _, err := tx.ExecContext(ctx, "UPDATE workflows SET is_default=0, updated_at=? WHERE is_default=1 AND id!=?", time.Now(), id); err != nil {
 			writeError(w, http.StatusInternalServerError, "set default failed")
 			return
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		_ = tx.Rollback()
+	if _, err := tx.ExecContext(ctx, "UPDATE workflows SET is_default=?, updated_at=? WHERE id=?", *input.IsDefault, time.Now(), id); err != nil {
 		writeError(w, http.StatusInternalServerError, "set default failed")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": id, "is_default": input.IsDefault})
+	if err := tx.Commit(); err != nil {
+		writeError(w, http.StatusInternalServerError, "set default failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "is_default": *input.IsDefault})
 }
 
 func (a *app) updateWorkflow(w http.ResponseWriter, r *http.Request) {
@@ -285,35 +346,40 @@ func (a *app) updateWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
+	ctx := r.Context()
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		writeError(w, 500, "update workflow failed")
+		return
+	}
+	defer tx.Rollback()
 	var oldPath, oldMapping, oldName, oldDescription, oldNegative string
-	err = a.db.QueryRowContext(r.Context(),
+	err = tx.QueryRowContext(ctx,
 		`SELECT name, description, workflow_path, mapping_json, COALESCE(negative_prompt,'') FROM workflows WHERE id=?`, id).
 		Scan(&oldName, &oldDescription, &oldPath, &oldMapping, &oldNegative)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, 404, "workflow not found")
+		return
+	}
 	if err != nil {
-		writeError(w, http.StatusNotFound, "workflow not found")
+		writeError(w, 500, "read workflow failed")
 		return
 	}
 	name := strings.TrimSpace(input.Name)
 	if name == "" {
 		name = oldName
 	}
-	// 归一化为文件名（兼容旧数据里的 "./data/workflows/x.json"）
 	path := filepath.Base(oldPath)
+	if len(input.Mapping) > 0 && !json.Valid(input.Mapping) {
+		writeError(w, 400, "mapping must be valid JSON")
+		return
+	}
 	if len(input.WorkflowJSON) > 0 {
 		workflowJSON, ok := decodeWorkflowBody(w, input.WorkflowJSON, "workflow_json")
 		if !ok {
 			return
 		}
-		input.WorkflowJSON = workflowJSON // 后面的自动识别与落盘都用归一化后的形态
-		path = workflowFileName(name, id)
-		if err := writeAtomic(filepath.Join(a.dataDir, "workflows", path), workflowJSON); err != nil {
-			writeError(w, http.StatusInternalServerError, "save workflow file failed")
-			return
-		}
-	}
-	if len(input.Mapping) > 0 && !json.Valid(input.Mapping) {
-		writeError(w, http.StatusBadRequest, "mapping must be valid JSON")
-		return
+		input.WorkflowJSON = workflowJSON
 	}
 	// 拿哪份工作流做自动识别：优先请求里带的新内容，其次是已经存着的那份。
 	// 换了工作流却不重新识别的话，旧映射会冲着旧节点 id 写，提示词就打偏了。
@@ -335,15 +401,34 @@ func (a *app) updateWorkflow(w http.ResponseWriter, r *http.Request) {
 	// nil = 请求里没带这个字段（保持原值）；非 nil = 以请求为准，空串即清空
 	description := strOrFallback(input.Description, oldDescription)
 	negative := strOrFallback(input.NegativePrompt, oldNegative)
-	_, err = a.db.ExecContext(r.Context(),
+	path = oldPath
+	committed := false
+	if len(input.WorkflowJSON) > 0 {
+		// Keep the current file intact until the new revision and its mapping commit together.
+		path = fmt.Sprintf("%s-%d-%s.json", safeFilename(name), id, randomHex(8))
+		newPath := filepath.Join(a.dataDir, "workflows", path)
+		if err := writeAtomic(newPath, input.WorkflowJSON); err != nil {
+			writeError(w, 500, "save workflow file failed")
+			return
+		}
+		defer func() {
+			if !committed {
+				_ = os.Remove(newPath)
+			}
+		}()
+	}
+	_, err = tx.ExecContext(ctx,
 		`UPDATE workflows SET name=?, description=?, workflow_path=?, mapping_json=?, negative_prompt=?, updated_at=? WHERE id=?`,
 		name, description, path, mapping, negative, time.Now(), id)
+	if err == nil {
+		err = tx.Commit()
+	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "update workflow failed")
+		writeError(w, 500, "update workflow failed")
 		return
 	}
-	// 换了文件名就顺手清掉旧文件（只在没有任何其它记录指向它时才删）
-	a.removeOrphanWorkflowFile(r.Context(), id, oldPath, path)
+	committed = true
+	a.removeOrphanWorkflowFile(ctx, id, oldPath, path)
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "name": name, "workflow_path": path, "mapping": json.RawMessage(mapping)})
 }
 
@@ -374,10 +459,7 @@ func autoDetectPromptMapping(workflowRaw json.RawMessage) json.RawMessage {
 	if err := json.Unmarshal(workflowRaw, &workflow); err != nil {
 		return nil
 	}
-	targets := resolvePromptTargetsFromUI(workflow)
-	if _, isUIFormat := workflow["nodes"].([]any); !isUIFormat {
-		targets = resolvePromptTargets(workflow)
-	}
+	targets := buildPromptTargetsResponse(workflow).Detected
 	if targets.Positive == nil && targets.Negative == nil {
 		return nil
 	}
@@ -526,6 +608,11 @@ type promptTargetsResponse struct {
 
 // buildPromptTargetsResponse 组装落点信息。
 func buildPromptTargetsResponse(workflow map[string]any) promptTargetsResponse {
+	if definitions := workflowSubgraphs(workflow); len(definitions) > 0 {
+		if flattened, err := subgraphsToAPI(workflow, definitions, nil); err == nil {
+			workflow = flattened
+		}
+	}
 	_, isUIFormat := workflow["nodes"].([]any)
 	detected := resolvePromptTargetsFromUI(workflow)
 	if !isUIFormat {

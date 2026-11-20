@@ -10,12 +10,10 @@ agent can generate images through the existing image service.
 Transport: stdio (dsh-mcp-client launches `uv run <this file>`).
 
 Env:
-  COMFY_BASE       comfyui-server backend URL. default http://127.0.0.1:8080
-  COMFY_UI_TARGET  ComfyUI address the backend should proxy to.
-                   default http://nas.youngam.cn:8188
-                   On startup, if the backend's current target differs, it is
-                   applied via PUT /api/settings/comfyui. Set to empty string
-                   to disable auto-apply and let the backend UI own the value.
+  COMFY_BASE       comfyui-server backend URL. Defaults to the NAS service.
+  COMFY_UI_TARGET  Optional ComfyUI address the backend should proxy to.
+                   When set, the bridge applies it at startup if it differs
+                   from the backend's current target. Defaults to empty.
 
 This file parses under Python 3.9 (system python) for `--selftest`, which only
 performs read-only HTTP calls and never imports the mcp package or mutates the
@@ -50,7 +48,7 @@ def _log(msg):
 
 
 def _http(method, path, body=None, timeout=DEFAULT_TIMEOUT):
-    """Return (status_code, response_bytes). Raise ConnectionError on transport failure."""
+    """Return (status_code, response_bytes, response_headers). Raise ConnectionError on transport failure."""
     url = COMFY_BASE + path
     data = None
     headers = {"Accept": "application/json"}
@@ -75,34 +73,58 @@ def _jload(raw):
         return {"_raw": raw.decode("utf-8", "replace")[:500]}
 
 
+class BackendHTTPError(RuntimeError):
+    pass
+
+
+def _check_status(status, raw, allowed=()):
+    if 200 <= status < 300 or status in allowed:
+        return
+    result = _jload(raw)
+    details = (result.get("error") or result.get("_raw")) if isinstance(result, dict) else result
+    raise BackendHTTPError("HTTP %s%s" % (status, ": " + str(details)[:500] if details else ""))
+
+
+def _api_json(method, path, body=None, allowed=()):
+    status, raw, _headers = _http(method, path, body=body)
+    _check_status(status, raw, allowed)
+    result = _jload(raw)
+    if not isinstance(result, dict) or "_raw" in result:
+        raise BackendHTTPError("后端响应不是有效的 JSON 对象")
+    return result
+
+
 # ---- read-only / management helpers (used by both selftest and tools) --------
 
 def health():
-    _s, raw, _h = _http("GET", "/api/health")
-    return _jload(raw)
+    return _api_json("GET", "/api/health")
 
 
 def get_target():
-    _s, raw, _h = _http("GET", "/api/settings")
-    return _jload(raw)
+    return _api_json("GET", "/api/settings")
 
 
 def test_target(url=None):
     path = "/api/settings/comfyui/test"
     if url:
         path += "?url=" + urllib.parse.quote(url, safe="")
-    _s, raw, _h = _http("POST", path, body={})
-    return _jload(raw)
+    return _api_json("POST", path, body={}, allowed=(502,))
 
 
 def set_target(url):
-    _s, raw, _h = _http("PUT", "/api/settings/comfyui", body={"url": url})
-    return _jload(raw)
+    return _api_json("PUT", "/api/settings/comfyui", body={"url": url})
 
 
 def list_workflows():
-    _s, raw, _h = _http("GET", "/api/workflows?page_size=50")
-    return _jload(raw)
+    workflows = {}
+    page, page_size = 1, 200
+    while True:
+        result = _api_json("GET", "/api/workflows?page=%s&page_size=%s" % (page, page_size))
+        items = result["items"]
+        workflows.update((item["id"], item) for item in items)
+        if len(items) < page_size or page * page_size >= result["total"]:
+            return {"items": list(workflows.values()), "total": result["total"]}
+        page += 1
 
 
 def resolve_workflow(workflow_id=None):
@@ -136,14 +158,17 @@ def submit(positive, workflow_id=None, negative=None, title=None):
 
 
 def task_status(task_id):
-    _s, raw, _h = _http("GET", "/api/tasks/%s" % task_id)
-    return _jload(raw)
+    return _api_json("GET", "/api/tasks/%s" % task_id)
 
 
 def image_bytes(image_id, full=False):
     path = "/api/images/%s/%s" % (image_id, "file" if full else "preview")
-    _s, raw, h = _http("GET", path, timeout=60)
-    mime = h.get("Content-Type", "image/webp" if not full else "image/png")
+    status, raw, headers = _http("GET", path, timeout=60)
+    _check_status(status, raw)
+    mime = next((v for k, v in headers.items() if k.lower() == "content-type"), "")
+    mime = mime.partition(";")[0].strip().lower()
+    if not mime.startswith("image/") or not raw:
+        raise BackendHTTPError("取图响应没有有效的图片")
     return raw, mime
 
 
@@ -156,7 +181,7 @@ def apply_default_target():
         return
     try:
         cur = (get_target().get("comfyui_url") or "").strip()
-    except ConnectionError as e:
+    except (ConnectionError, BackendHTTPError) as e:
         _log("cannot read backend target (backend down?): %s" % e)
         return
     if cur == COMFY_UI_TARGET:
@@ -164,7 +189,7 @@ def apply_default_target():
     # Only write when the configured target responds; otherwise keep current.
     try:
         chk = test_target(COMFY_UI_TARGET)
-    except ConnectionError as e:
+    except (ConnectionError, BackendHTTPError) as e:
         _log("cannot test target %s (backend down?): %s; leaving %s" % (COMFY_UI_TARGET, e, cur))
         return
     if not chk.get("reachable"):
@@ -173,7 +198,7 @@ def apply_default_target():
     try:
         res = set_target(COMFY_UI_TARGET)
         _log("backend comfyui_url: %s -> %s" % (cur or "<empty>", res.get("comfyui_url")))
-    except ConnectionError as e:
+    except (ConnectionError, BackendHTTPError) as e:
         _log("failed to apply comfyui_url: %s" % e)
 
 
@@ -184,17 +209,17 @@ def selftest():
     ok = True
     try:
         _log("health: %s" % health())
-    except ConnectionError as e:
+    except (ConnectionError, BackendHTTPError) as e:
         ok = False
         _log("health FAILED (backend unreachable at %s): %s" % (COMFY_BASE, e))
     try:
         _log("target: %s" % get_target())
-    except ConnectionError as e:
+    except (ConnectionError, BackendHTTPError) as e:
         ok = False
         _log("target FAILED: %s" % e)
     try:
         _log("test_target: %s" % test_target())
-    except ConnectionError as e:
+    except (ConnectionError, BackendHTTPError) as e:
         _log("test_target FAILED (non-fatal if target host offline): %s" % e)
     try:
         j = list_workflows()
@@ -203,7 +228,7 @@ def selftest():
             {"id": i.get("id"), "name": i.get("name"), "enabled": i.get("enabled"), "default": i.get("is_default")}
             for i in items[:5]]))
         _log("resolve_workflow(None) -> %s" % resolve_workflow(None))
-    except ConnectionError as e:
+    except (ConnectionError, BackendHTTPError) as e:
         ok = False
         _log("workflows FAILED: %s" % e)
     except ValueError as e:
@@ -223,7 +248,7 @@ def run_server():
         "1) comfy_status 看后端与 ComfyUI 目标是否可达;"
         "2) comfy_list_workflows 选 workflow_id(描述里含尺寸/采样器/模型);"
         "3) comfy_generate(positive, workflow_id?, negative?, title?) 提交,返回 task id;"
-        "4) comfy_task(task_id) 每 3-5 秒轮询到 completed/failed(单张通常 20-90 秒);"
+        "4) comfy_task(task_id) 每 3-5 秒轮询到 completed/failed/cancelled(单张通常 20-90 秒);"
         "5) comfy_view_image(image_id) 把图取回对话。"
         "仅当 ComfyUI 目标在线时才真正出图;要在对话里看到图,需当前模型支持图像输入。"
     )
@@ -275,9 +300,10 @@ def run_server():
         wid = None if workflow_id is None or workflow_id < 0 else workflow_id
         s, j = submit(positive, workflow_id=wid,
                       negative=(negative or None), title=(title or None))
-        return json.dumps({"http": s, "task": j,
-                           "hint": "用 comfy_task(%s) 轮询到 completed/failed" % j.get("id")},
-                          ensure_ascii=False, indent=2)
+        result = {"http": s, "task": j}
+        if 200 <= s < 300 and j.get("id") is not None:
+            result["hint"] = "用 comfy_task(%s) 轮询到任务结束" % j["id"]
+        return json.dumps(result, ensure_ascii=False, indent=2)
 
     @mcp.tool()
     @_safe
@@ -286,7 +312,9 @@ def run_server():
         j = task_status(task_id)
         status = j.get("status")
         images = []
+        items = []
         for it in (j.get("items") or []):
+            items.append({"id": it.get("id"), "status": it.get("status"), "error": it.get("error_message")})
             for im in (it.get("images") or []):
                 images.append({"image_id": im.get("id"), "filename": im.get("filename"),
                                "width": im.get("width"), "height": im.get("height"),
@@ -294,15 +322,21 @@ def run_server():
                                "error": it.get("error_message")})
         hint = ""
         if status in ("pending", "running"):
-            hint = "仍在 %s,3-5 秒后再查" % status
+            if any(item["status"] == "submitted" and item["error"] for item in items):
+                hint = "ComfyUI 连接或响应异常，服务正在重试查询"
+            else:
+                hint = "仍在 %s,3-5 秒后再查" % status
         elif status == "completed":
-            hint = "已完成,用 comfy_view_image 查看" if images else "已完成但无图(看 items 报错)"
+            if j.get("failed_count"):
+                hint = "部分生成项失败，可查看各项错误与已生成的图片"
+            else:
+                hint = "已完成,用 comfy_view_image 查看" if images else "已完成但无图(看 items 报错)"
         else:
             hint = "终态 %s" % status
         return json.dumps({"task_id": task_id, "status": status,
                            "success_count": j.get("success_count"),
                            "failed_count": j.get("failed_count"),
-                           "images": images, "hint": hint},
+                           "items": items, "images": images, "hint": hint},
                           ensure_ascii=False, indent=2)
 
     @mcp.tool()
@@ -313,6 +347,8 @@ def run_server():
             raw, mime = image_bytes(image_id, full=full)
         except ConnectionError as e:
             return "后端不可达: %s" % e
+        except BackendHTTPError as e:
+            return "取图失败: %s" % e
         subtype = (mime or "image/webp").split("/", 1)[-1].lower()
         if subtype in ("jpg",):
             subtype = "jpeg"

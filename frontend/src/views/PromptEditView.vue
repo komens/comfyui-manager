@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ViewFeedback from '../components/ViewFeedback.vue'
 import { onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
@@ -38,6 +39,13 @@ async function load() {
 
 async function loadGroups() {
   groups.value = await api<{ group_name: string }[]>('/api/prompts/groups')
+}
+
+function suggestGroups(query: string, done: (items: { value: string }[]) => void) {
+  const keyword = query.trim().toLowerCase()
+  done(groups.value
+    .filter(group => group.group_name.toLowerCase().includes(keyword))
+    .map(group => ({ value: group.group_name })))
 }
 
 async function save() {
@@ -86,60 +94,48 @@ onMounted(() => {
 <template>
   <PageHeader :title="isEdit ? '编辑提示词' : '新建提示词'" description="维护提示词内容和分组。" />
 
+  <ViewFeedback :kind="messageType" :message="message" />
+
   <div class="card" style="max-width:760px;">
     <div class="card-body">
       <div class="form-group">
         <label for="p-title">标题</label>
-        <input id="p-title" type="text" v-model="title" placeholder="留空则自动取提示词前50字" />
+        <el-input id="p-title" type="text" v-model="title" placeholder="留空则自动取提示词前50字" />
       </div>
       <div class="form-group">
         <label for="p-group">分组</label>
-        <input id="p-group" type="text" v-model="groupName" list="group-list" placeholder="例如：人物、风景，或导入的文件名" />
-        <datalist id="group-list">
-          <option v-for="g in groups" :key="g.group_name" :value="g.group_name" />
-        </datalist>
+        <el-autocomplete
+          id="p-group"
+          v-model="groupName"
+          :fetch-suggestions="suggestGroups"
+          popper-class="bounded-select-options"
+          style="width:100%;"
+          placeholder="例如：人物、风景，或导入的文件名"
+        />
       </div>
       <div class="form-group">
         <label for="p-desc">描述 <span class="text-xs muted">(可选)</span></label>
-        <input id="p-desc" type="text" v-model="description" placeholder="补充说明" />
+        <el-input id="p-desc" type="text" v-model="description" placeholder="补充说明" />
       </div>
       <div class="form-group">
         <label for="p-positive">正面提示词</label>
-        <textarea id="p-positive" v-model="positive" rows="10" placeholder="描述你想要生成的图像内容..." />
+        <el-input type="textarea" id="p-positive" v-model="positive" :rows="10" placeholder="描述你想要生成的图像内容..." />
       </div>
       <div class="form-group">
         <label for="p-negative">负面提示词 <span class="text-xs muted">(可选)</span></label>
-        <textarea id="p-negative" v-model="negative" rows="4" placeholder="描述你想要避免的内容；提交时若为空则使用所属工作流的默认负面" />
+        <el-input type="textarea" id="p-negative" v-model="negative" :rows="4" placeholder="描述你想要避免的内容；提交时若为空则使用所属工作流的默认负面" />
       </div>
       <div class="btn-group" style="margin-top:20px;">
-        <button class="btn btn-primary" :disabled="busy || !positive.trim()" @click="save">
+        <el-button type="primary" :disabled="busy || !positive.trim()" @click="save">
           {{ busy ? '保存中...' : '保存' }}
-        </button>
-        <button class="btn btn-ghost" @click="backToList">取消</button>
+        </el-button>
+        <el-button text @click="backToList">取消</el-button>
       </div>
     </div>
   </div>
 
-  <!-- Toast 消息 -->
-  <Teleport to="body">
-    <div v-if="message" class="toast-msg" :class="messageType">{{ message }}</div>
-  </Teleport>
 </template>
 
 <style scoped>
-.toast-msg {
-  position: fixed;
-  top: 20px;
-  right: 20px;
-  z-index: 300;
-  padding: 10px 18px;
-  border-radius: var(--radius-sm);
-  font-size: 14px;
-  font-weight: 500;
-  box-shadow: var(--shadow-lg);
-  animation: fadeIn .2s ease;
-}
-.toast-msg.success { background: var(--c-success-light); color: var(--c-success); border: 1px solid var(--c-success-border); }
-.toast-msg.error { background: var(--c-danger-light); color: var(--c-danger); border: 1px solid var(--c-danger-border); }
 @keyframes fadeIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
 </style>

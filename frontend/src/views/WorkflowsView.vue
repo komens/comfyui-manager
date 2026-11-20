@@ -1,7 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import ViewFeedback from '../components/ViewFeedback.vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import PageHeader from '../components/PageHeader.vue'
 import Pagination from '../components/Pagination.vue'
+import { Delete, EditPen } from '@element-plus/icons-vue'
+import { ElMessageBox } from 'element-plus'
+import 'element-plus/es/components/message-box/style/css'
 import {
   api,
   type PromptCandidate,
@@ -33,13 +37,13 @@ const storedMapping = ref<{ positive_prompt?: PromptTarget; negative_prompt?: Pr
 const message = ref('')
 const messageType = ref<'success' | 'error'>('success')
 const busy = ref(false)
-const loading = ref(false)
+const loading = ref(true)
 const showForm = ref(false)
 const editingId = ref<number | null>(null)
 const detecting = ref(false)
 const validating = ref(false)
 const validation = ref<ValidationResult | null>(null)
-const defaultBusy = ref<number | null>(null)
+const workflowStatusBusy = ref(false)
 
 /**
  * 报错的「节点 + 字段」索引。
@@ -106,31 +110,72 @@ const onlyAutoFixable = computed(() => {
 })
 
 const total = ref(0)
+const loadError = ref('')
+let listRequest: AbortController | undefined
+let searchTimer: ReturnType<typeof setTimeout> | undefined
 
-// 分页进 URL query：离开再回来、刷新、分享链接都保持页码
 const state = useUrlState({
   page: 1,
   page_size: 50,
+  q: '',
+  status: '',
 }, {
-  onExternalSync: load,
+  onExternalSync: () => {
+    clearTimeout(searchTimer)
+    void load()
+  },
 })
 
 async function load() {
+  listRequest?.abort()
+  const request = new AbortController()
+  listRequest = request
   loading.value = true
+  loadError.value = ''
   try {
-    const params = new URLSearchParams()
-    params.set('page', String(state.page))
-    params.set('page_size', String(state.page_size))
-    const result = await api<PageResult>(`/api/workflows?${params}`)
+    const params = new URLSearchParams({
+      page: String(state.page), page_size: String(state.page_size),
+    })
+    if (state.q.trim()) params.set('q', state.q.trim())
+    if (state.status) params.set('status', state.status)
+    const result = await api<PageResult>(`/api/workflows?${params}`, { signal: request.signal })
+    if (request.signal.aborted) return
+    const lastPage = Math.max(1, Math.ceil(result.total / state.page_size))
+    if (state.page > lastPage) {
+      state.page = lastPage
+      await load()
+      return
+    }
     workflows.value = result.items
     total.value = result.total
   } catch (e) {
-    message.value = e instanceof Error ? e.message : '加载失败'
-    messageType.value = 'error'
+    if (!request.signal.aborted) loadError.value = e instanceof Error ? e.message : '无法加载工作流'
   } finally {
-    loading.value = false
+    if (!request.signal.aborted) loading.value = false
   }
 }
+
+function applyFilters() {
+  clearTimeout(searchTimer)
+  state.page = 1
+  void load()
+}
+
+function scheduleSearch() {
+  clearTimeout(searchTimer)
+  searchTimer = setTimeout(applyFilters, 250)
+}
+
+function clearFilters() {
+  state.q = ''
+  state.status = ''
+  applyFilters()
+}
+
+onBeforeUnmount(() => {
+  clearTimeout(searchTimer)
+  listRequest?.abort()
+})
 
 function onPageChange(p: number) {
   state.page = p
@@ -347,7 +392,13 @@ async function deleteWorkflow(wf: Workflow) {
   } else if ((wf.task_count ?? 0) > 0) {
     tip = `该工作流有 ${wf.task_count} 条历史任务。删除后历史任务与图片记录保留，但无法再重试。\n\n确定删除工作流「${wf.name}」？`
   }
-  if (!confirm(tip)) return
+  try {
+    await ElMessageBox.confirm(tip, '删除工作流', {
+      type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消',
+    })
+  } catch {
+    return
+  }
   try {
     await api(`/api/workflows/${wf.id}`, { method: 'DELETE' })
     await load()
@@ -357,9 +408,32 @@ async function deleteWorkflow(wf: Workflow) {
   }
 }
 
+async function setWorkflowEnabled(wf: Workflow) {
+  const enabled = !wf.enabled
+  const action = enabled ? '启用' : '禁用'
+  workflowStatusBusy.value = true
+  try {
+    const status = await api<Pick<Workflow, 'enabled' | 'is_default'>>(`/api/workflows/${wf.id}/enabled`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    })
+    const row = workflows.value.find(item => item.id === wf.id)
+    if (row) Object.assign(row, status)
+    message.value = `已${action}「${wf.name}」`
+    messageType.value = 'success'
+    await load()
+  } catch (e) {
+    message.value = e instanceof Error ? e.message : `${action}工作流失败`
+    messageType.value = 'error'
+  } finally {
+    workflowStatusBusy.value = false
+  }
+}
+
 // 设为默认 / 取消默认：默认工作流全局唯一，由后端在事务内保证
 async function setDefaultWorkflow(wf: Workflow, value: boolean) {
-  defaultBusy.value = wf.id
+  workflowStatusBusy.value = true
   try {
     await api(`/api/workflows/${wf.id}/default`, {
       method: 'PUT',
@@ -373,7 +447,7 @@ async function setDefaultWorkflow(wf: Workflow, value: boolean) {
     message.value = e instanceof Error ? e.message : '设置默认工作流失败'
     messageType.value = 'error'
   } finally {
-    defaultBusy.value = null
+    workflowStatusBusy.value = false
   }
 }
 
@@ -426,36 +500,33 @@ onMounted(load)
   <div class="card mb-4" v-if="showForm" style="max-width:860px;">
     <div class="card-header">
       <h2>{{ editingId ? '编辑工作流' : '新增工作流' }}</h2>
-      <button class="btn btn-ghost btn-sm" @click="resetForm">取消</button>
+      <el-button size="small" text @click="resetForm">取消</el-button>
     </div>
     <div class="card-body">
       <div class="form-row">
         <div class="form-group">
           <label for="wf-name">名称</label>
-          <input id="wf-name" v-model="name" type="text" placeholder="例如：普通人像" />
+          <el-input id="wf-name" v-model="name" type="text" placeholder="例如：普通人像" />
         </div>
         <div class="form-group">
           <label for="wf-desc">描述 <span class="text-xs muted">(可选)</span></label>
-          <input id="wf-desc" v-model="description" type="text" placeholder="工作流用途说明" />
+          <el-input id="wf-desc" v-model="description" type="text" placeholder="工作流用途说明" />
         </div>
       </div>
 
       <div class="form-group">
         <label for="wf-neg">通用负面提示词 <span class="text-xs muted">(该工作流默认)</span></label>
-        <textarea id="wf-neg" v-model="negativePrompt" rows="3" placeholder="例如：nsfw, bad anatomy, worst quality..." spellcheck="false" />
+        <el-input id="wf-neg" type="textarea" v-model="negativePrompt" :rows="3" placeholder="例如：nsfw, bad anatomy, worst quality..." spellcheck="false" />
       </div>
 
       <div class="form-group">
-        <div style="display:flex; justify-content:space-between; align-items:center;">
+        <div class="workflow-json-heading">
           <label for="wf-json" style="margin:0;">Workflow JSON</label>
-          <div style="display:flex; gap:8px;">
-            <button class="btn btn-secondary btn-sm" :disabled="validating || detecting" @click="validateCurrent" type="button" title="把这份工作流拿给目标 ComfyUI 校验，提前发现会导致提交失败的字段">
-              <span v-if="validating" class="spinner"></span>
-              {{ validating ? '校验中...' : '校验工作流' }}
-            </button>
-          </div>
+          <el-button size="small" :loading="validating" :disabled="detecting" @click="validateCurrent">
+            校验工作流
+          </el-button>
         </div>
-        <textarea id="wf-json" v-model="workflowJSON" rows="8" placeholder='粘贴从 ComfyUI 导出的 workflow JSON...' spellcheck="false" style="margin-top:8px;" />
+        <el-input id="wf-json" type="textarea" class="workflow-json" v-model="workflowJSON" :rows="8" placeholder='粘贴从 ComfyUI 导出的 workflow JSON...' spellcheck="false" style="margin-top:8px;" />
       </div>
 
       <!-- 提示词落点：本系统对工作流只做这一件事，其余内容原样提交给 ComfyUI。
@@ -469,21 +540,17 @@ onMounted(load)
         <div class="form-row">
           <div class="form-group">
             <label class="text-xs" for="wf-positive-node">正向提示词节点</label>
-            <select id="wf-positive-node" v-model="positiveChoice">
-              <option :value="AUTO">自动识别</option>
-              <option v-for="c in candidates" :key="`p-${choiceKey(c)}`" :value="choiceKey(c)">
-                {{ choiceLabel(c) }}
-              </option>
-            </select>
+            <el-select id="wf-positive-node" v-model="positiveChoice" filterable :empty-values="[]" popper-class="workflow-node-options">
+              <el-option label="自动识别" :value="AUTO" />
+              <el-option v-for="c in candidates" :key="`p-${choiceKey(c)}`" :label="choiceLabel(c)" :value="choiceKey(c)" />
+            </el-select>
           </div>
           <div class="form-group">
             <label class="text-xs" for="wf-negative-node">负向提示词节点</label>
-            <select id="wf-negative-node" v-model="negativeChoice">
-              <option :value="AUTO">自动识别</option>
-              <option v-for="c in candidates" :key="`n-${choiceKey(c)}`" :value="choiceKey(c)">
-                {{ choiceLabel(c) }}
-              </option>
-            </select>
+            <el-select id="wf-negative-node" v-model="negativeChoice" filterable :empty-values="[]" popper-class="workflow-node-options">
+              <el-option label="自动识别" :value="AUTO" />
+              <el-option v-for="c in candidates" :key="`n-${choiceKey(c)}`" :label="choiceLabel(c)" :value="choiceKey(c)" />
+            </el-select>
           </div>
         </div>
         <p v-if="targets && targets.negative_unavailable" class="targets-hint is-warn">
@@ -505,9 +572,9 @@ onMounted(load)
             ⚠ {{ autoFixableCount }} 处取值会在提交时自动纠正
           </strong>
           <strong v-else style="color:var(--c-danger);">✗ 发现 {{ visibleErrors.length }} 个会导致提交失败的问题</strong>
-          <div style="display:flex; gap:4px;">
-            <button class="btn btn-ghost btn-sm" type="button" :disabled="validating" @click="validateCurrent">重新校验</button>
-            <button class="btn btn-ghost btn-sm" type="button" @click="validation = null">关闭</button>
+          <div class="workflow-actions">
+            <el-button size="small" text :disabled="validating" @click="validateCurrent">重新校验</el-button>
+            <el-button size="small" text @click="validation = null">关闭</el-button>
           </div>
         </div>
 
@@ -540,13 +607,13 @@ onMounted(load)
           <div class="validate-item-msg">{{ issue.message }}</div>
           <div v-if="issue.candidates && issue.candidates.length" class="validate-cands">
             <span class="muted">候选（点击复制）：</span>
-            <button
+            <el-button
               v-for="cand in issue.candidates.slice(0, 10)"
               :key="cand"
-              class="btn btn-ghost btn-sm cand-btn"
-              type="button"
+              class="cand-btn" size="small"
+
               @click="copyCandidate(cand)"
-            >{{ cand }}</button>
+            >{{ cand }}</el-button>
             <span v-if="issue.candidates.length > 10" class="muted">…共 {{ issue.candidates.length }} 项</span>
           </div>
           <div v-if="issue.candidates && issue.candidates.length" class="muted text-xs" style="margin-top:6px;">
@@ -568,13 +635,13 @@ onMounted(load)
           <div class="validate-item-msg">{{ item.warning.message }}</div>
           <div v-if="item.candidates.length" class="validate-cands">
             <span class="muted">候选（点击复制）：</span>
-            <button
+            <el-button
               v-for="cand in item.candidates.slice(0, 10)"
               :key="cand"
-              class="btn btn-ghost btn-sm cand-btn"
-              type="button"
+              class="cand-btn" size="small"
+
               @click="copyCandidate(cand)"
-            >{{ cand }}</button>
+            >{{ cand }}</el-button>
             <span v-if="item.candidates.length > 10" class="muted">…共 {{ item.candidates.length }} 项</span>
           </div>
         </div>
@@ -604,53 +671,61 @@ onMounted(load)
       </div>
 
       <div class="btn-group">
-        <button class="btn btn-primary" :disabled="busy || !name.trim()" @click="save">
-          <span v-if="busy" class="spinner"></span>
-          {{ busy ? '保存中...' : (editingId ? '更新工作流' : '创建工作流') }}
-        </button>
-        <button class="btn btn-secondary" @click="resetForm">取消</button>
+        <el-button type="primary" :loading="busy" :disabled="!name.trim()" @click="save">
+          {{ editingId ? '更新工作流' : '创建工作流' }}
+        </el-button>
+        <el-button @click="resetForm">取消</el-button>
       </div>
-      <div v-if="message" class="status-msg mt-4" :class="messageType">{{ message }}</div>
+      <ViewFeedback :kind="messageType" :message="message" />
     </div>
   </div>
 
   <!-- Workflow List -->
-  <div class="toolbar" v-if="!showForm">
-    <button class="btn btn-primary" @click="showForm = true">新增工作流</button>
-    <span v-if="message" class="text-sm" :style="{ color: messageType === 'success' ? 'var(--c-success)' : 'var(--c-danger)' }">{{ message }}</span>
+  <div v-if="!showForm" class="toolbar">
+    <el-input v-model="state.q" class="toolbar-search" placeholder="搜索工作流名称" aria-label="搜索工作流名称"
+      clearable @input="scheduleSearch" @keydown.enter="applyFilters" />
+    <el-select v-model="state.status" class="filter-select" aria-label="工作流状态" :empty-values="[]" @change="applyFilters">
+      <el-option value="" label="全部工作流" />
+      <el-option value="enabled" label="已启用" />
+      <el-option value="disabled" label="已禁用" />
+      <el-option value="default" label="默认工作流" />
+    </el-select>
+    <el-button v-if="state.q || state.status" text @click="clearFilters">清空筛选</el-button>
+    <el-button type="primary" @click="showForm = true">新增工作流</el-button>
   </div>
+  <ViewFeedback v-if="!showForm" :kind="messageType" :message="message" />
 
   <div class="card" v-if="!showForm">
-    <div v-if="!workflows.length" class="empty-state">
-      <div class="empty-icon">&#9881;</div>
-      <p>暂无工作流，点击上方按钮创建。</p>
-    </div>
-    <div v-else>
-      <div v-for="wf in workflows" :key="wf.id" class="list-row">
-        <div class="flex-1" style="min-width:0;">
-          <div style="font-weight:600;">
-            {{ wf.name }}
-            <span v-if="wf.is_default" class="badge badge-default">默认</span>
+    <ViewFeedback v-if="loading && !workflows.length" kind="loading" />
+    <ViewFeedback v-else-if="loadError" kind="error" :message="loadError">
+      <el-button text size="small" @click="load">重试</el-button>
+    </ViewFeedback>
+    <ViewFeedback v-else-if="!workflows.length" kind="empty" :message="state.q || state.status ? '没有匹配的工作流' : '暂无工作流'" />
+    <ul v-else class="workflow-list">
+      <li v-for="wf in workflows" :key="wf.id" class="list-row workflow-row">
+        <div class="workflow-summary">
+          <div class="workflow-name">{{ wf.name }}</div>
+          <div class="workflow-tags">
+            <el-tag v-if="wf.is_default" size="small">默认</el-tag>
+            <el-tag :type="wf.enabled ? 'success' : 'info'" size="small">{{ wf.enabled ? '已启用' : '已禁用' }}</el-tag>
           </div>
-          <div class="text-xs muted" style="margin-top:3px;">{{ wf.description || '未填写描述' }}</div>
+          <div v-if="wf.description" class="text-xs muted workflow-description">{{ wf.description }}</div>
         </div>
-        <span class="badge" :class="wf.enabled ? 'badge-success' : 'badge-cancelled'">
-          {{ wf.enabled ? '启用' : '禁用' }}
-        </span>
-        <button
-          class="btn btn-ghost btn-sm"
-          :class="{ 'is-default': wf.is_default }"
-          :disabled="defaultBusy === wf.id"
-          :title="wf.is_default ? '取消默认工作流' : '设为默认工作流'"
-          @click="setDefaultWorkflow(wf, !wf.is_default)"
-        >{{ wf.is_default ? '★ 默认' : '☆ 设为默认' }}</button>
-        <button class="btn btn-ghost btn-sm" @click="editWorkflow(wf)" title="编辑">&#9998;</button>
-        <button class="btn btn-ghost btn-sm" @click="deleteWorkflow(wf)" title="删除">&#10005;</button>
-      </div>
-    </div>
+        <div class="workflow-actions">
+          <el-button size="small" :disabled="workflowStatusBusy" @click="setWorkflowEnabled(wf)">
+            {{ wf.enabled ? '禁用' : '启用' }}
+          </el-button>
+          <el-button v-if="wf.enabled" size="small" :disabled="workflowStatusBusy" @click="setDefaultWorkflow(wf, !wf.is_default)">
+            {{ wf.is_default ? '取消默认' : '设为默认' }}
+          </el-button>
+          <el-button size="small" :icon="EditPen" @click="editWorkflow(wf)">编辑</el-button>
+          <el-button size="small" type="danger" plain :icon="Delete" @click="deleteWorkflow(wf)">删除</el-button>
+        </div>
+      </li>
+    </ul>
   </div>
 
-  <div v-if="!showForm && total > 0" class="pagination-footer">
+  <div v-if="!showForm && !loadError && total > 0" class="pagination-footer">
     <Pagination
       :total="total"
       :page="state.page"
@@ -659,21 +734,29 @@ onMounted(load)
     />
     <div class="page-size-wrap">
       <span class="text-xs muted">每页</span>
-      <select v-model.number="state.page_size" class="input page-size-select" @change="onPageSizeChange">
-        <option :value="20">20</option>
-        <option :value="50">50</option>
-        <option :value="100">100</option>
-        <option :value="200">200</option>
-      </select>
+      <el-select v-model="state.page_size" class="page-size-select" size="small" aria-label="每页条数" @change="onPageSizeChange">
+        <el-option v-for="size in [20, 50, 100, 200]" :key="size" :label="String(size)" :value="size" />
+      </el-select>
       <span class="text-xs muted">条</span>
     </div>
   </div>
 </template>
 
 <style scoped>
-.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-.badge-default { margin-left: 6px; background: var(--c-primary-light); color: var(--c-primary); border: 1px solid var(--c-primary-border); }
-.is-default { color: var(--c-primary); font-weight: 600; }
+.form-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.workflow-list { margin: 0; padding: 0; list-style: none; }
+.workflow-summary { flex: 1; min-width: 0; }
+.workflow-name { font-weight: 600; overflow-wrap: anywhere; }
+.workflow-tags, .workflow-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.workflow-tags, .workflow-description { margin-top: 5px; }
+.workflow-description { overflow-wrap: anywhere; }
+.workflow-actions { justify-content: flex-end; }
+.workflow-actions .el-button + .el-button, .validate-cands .el-button + .el-button { margin-left: 0; }
+.workflow-json-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.workflow-json :deep(textarea) { min-width: 0; font-family: ui-monospace, monospace; }
+:global(.workflow-node-options) { max-width: calc(100vw - 24px); }
+.workflow-row .workflow-actions { flex: 0 0 auto; }
+.page-size-select { width: 76px; }
 
 /* 提示词落点 */
 .targets-panel { background: var(--c-bg-subtle); border: 1px solid var(--c-border); border-radius: 10px; padding: 14px; margin: 16px 0; }
@@ -683,7 +766,7 @@ onMounted(load)
 
 /* 工作流校验结果 */
 .validate-panel { border: 1px solid var(--c-border); border-radius: 10px; padding: 12px 14px; margin: 12px 0; background: var(--c-bg-subtle); }
-.validate-head { display: flex; justify-content: space-between; align-items: center; font-size: 14px; gap: 8px; }
+.validate-head { display: flex; justify-content: space-between; align-items: center; font-size: 14px; gap: 8px; flex-wrap: wrap; }
 .validate-line { font-size: 13px; color: var(--c-muted); margin: 8px 0 0; word-break: break-all; }
 .validate-item { margin-top: 10px; padding: 10px 12px; border-radius: 8px; background: var(--c-bg, #fff); border-left: 3px solid var(--c-danger); }
 .validate-item.is-warning { border-left-color: var(--c-warning, #b8860b); }
@@ -692,9 +775,12 @@ onMounted(load)
 .validate-item-title code { font-size: 12px; background: var(--c-bg-subtle); padding: 1px 5px; border-radius: 4px; }
 .validate-item-msg { font-size: 13px; margin-top: 4px; word-break: break-all; }
 .validate-cands { margin-top: 8px; font-size: 12px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-.cand-btn { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; padding: 2px 6px; border: 1px solid var(--c-border); }
+.cand-btn { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; padding: 2px 6px; border: 1px solid var(--c-border); max-width: 100%; height: auto; min-height: 24px; white-space: normal; overflow-wrap: anywhere; }
 
-@media (max-width: 600px) {
-  .form-row { grid-template-columns: 1fr; }
+@media (max-width: 768px) {
+  .form-row { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .workflow-row { flex-direction: column; align-items: stretch; }
+  .workflow-row .workflow-actions { justify-content: flex-start; }
+  .workflow-row .el-button { min-height: 36px; }
 }
 </style>

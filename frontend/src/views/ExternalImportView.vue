@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ViewFeedback from '../components/ViewFeedback.vue'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
@@ -29,6 +30,7 @@ const previewUrl = ref('')
 const dragging = ref(false)
 const submitting = ref(false)
 const errorMsg = ref('')
+const successMsg = ref('')
 const recent = ref<ImportResult[]>([])
 
 const available = computed(() => platforms())
@@ -72,6 +74,7 @@ async function submit() {
   if (!canSubmit.value || !file.value) return
   submitting.value = true
   errorMsg.value = ''
+  successMsg.value = ''
   try {
     const form = new FormData()
     form.append('platform', platform.value)
@@ -80,6 +83,7 @@ async function submit() {
     form.append('file', file.value)
     const result = await api<ImportResult>('/api/external/images', { method: 'POST', body: form })
     recent.value = [result, ...recent.value].slice(0, 20)
+    successMsg.value = '已添加到素材库'
     // 只清内容，保留平台：连续录同一家平台的素材是常态
     setFile(null)
     promptText.value = ''
@@ -123,9 +127,9 @@ onBeforeUnmount(() => {
       <div class="card-body">
         <div class="form-group">
           <label for="ext-platform">来源平台</label>
-          <select id="ext-platform" v-model="platform" class="input">
-            <option v-for="p in available" :key="p.id" :value="p.id">{{ p.label }}</option>
-          </select>
+          <el-select id="ext-platform" v-model="platform">
+            <el-option v-for="p in available" :key="p.id" :value="p.id" :label="p.label" />
+          </el-select>
           <p class="form-hint">会记住上次的选择，下次打开自动带出。</p>
         </div>
 
@@ -141,7 +145,7 @@ onBeforeUnmount(() => {
           >
             <template v-if="previewUrl">
               <img :src="previewUrl" class="drop-preview" alt="待上传图片预览" />
-              <button class="btn btn-ghost btn-sm drop-clear" @click.stop="clearFile">重新选择</button>
+              <el-button text size="small" class="drop-clear" @click.stop="clearFile">重新选择</el-button>
             </template>
             <template v-else>
               <div class="drop-icon">&#128444;</div>
@@ -155,26 +159,25 @@ onBeforeUnmount(() => {
 
         <div class="form-group">
           <label for="ext-prompt">提示词</label>
-          <textarea
+          <el-input type="textarea"
             id="ext-prompt"
             v-model="promptText"
-            rows="6"
-            placeholder="粘贴该平台生成这张图时使用的提示词..."
-          ></textarea>
+            :rows="6"
+            placeholder="粘贴该平台生成这张图时使用的提示词..." />
         </div>
 
         <div class="form-group">
           <label for="ext-title">标题（可选）</label>
-          <input id="ext-title" v-model="title" type="text" placeholder="留空则取提示词前 50 个字" />
+          <el-input id="ext-title" v-model="title" type="text" placeholder="留空则取提示词前 50 个字" />
         </div>
 
-        <div v-if="errorMsg" class="status-msg error">{{ errorMsg }}</div>
+        <ViewFeedback :kind="errorMsg ? 'error' : 'success'" :message="errorMsg || successMsg" />
 
         <div class="btn-group">
-          <button class="btn btn-primary" :disabled="!canSubmit" @click="submit">
+          <el-button type="primary" :disabled="!canSubmit" @click="submit">
             <span v-if="submitting" class="spinner"></span>
             {{ submitting ? '添加中...' : '添加到素材库' }}
-          </button>
+          </el-button>
           <RouterLink :to="platform ? `/gallery?platform=${platform}` : '/gallery'" class="btn btn-ghost">
             去图片库查看
           </RouterLink>
@@ -187,10 +190,7 @@ onBeforeUnmount(() => {
         <h2>本次已添加（{{ recent.length }}）</h2>
       </div>
       <div class="card-body">
-        <div v-if="!recent.length" class="empty-state recent-empty">
-          <div class="empty-icon">&#10133;</div>
-          <p class="text-sm muted">还没有添加记录，左侧填完点「添加到素材库」。</p>
-        </div>
+        <ViewFeedback v-if="!recent.length" kind="empty" message="暂无添加记录" />
         <div v-else class="recent-list">
           <div v-for="item in recent" :key="item.image_id" class="recent-item">
             <img class="recent-thumb" :src="thumbUrl(item.image_id)" :alt="item.filename" loading="lazy" decoding="async" />

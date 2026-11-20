@@ -6,8 +6,8 @@
 
 - **提示词库** - 统一管理所有提示词，支持分组、搜索、分页、批量操作（删除/重跑）
 - **直接作图** - 输入正向/负向提示词，选择工作流直接生成
-- **工作流管理** - 保存 ComfyUI workflow JSON，自动识别参数，支持可视化编辑
-- **任务列表** - 查看所有任务状态，支持取消排队中的任务（同步通知 ComfyUI 删除队列）
+- **工作流管理** - 保存 ComfyUI workflow JSON，自动识别参数，支持可视化编辑、启用和禁用
+- **任务列表** - 查看所有任务状态，支持撤掉排队任务、按任务中断远端执行，以及重试失败的生成项
 - **图片库** - 网格浏览、灯箱预览（左右分栏）、查看提示词、下载原图
 - **JSON 文件** - 上传提示词 JSON 自动入库，按文件名分组，支持去重
 - **负面提示词** - 三级：每条提示词 / 每次提交可自带负面，留空则回落到工作流的通用负面；无独立负面框的工作流（负向从正向派生）会自动安全忽略
@@ -112,7 +112,7 @@ export COMFYUI_URL=http://192.168.1.20:8188
 docker compose up -d --build
 ```
 
-访问 `http://localhost:8080` 即可使用（可通过 `SERVER_PORT` 环境变量修改端口）。
+访问 `http://localhost:40016` 即可使用。可通过 `HOST_PORT` 修改宿主端口，通过 `SERVER_PORT` 修改容器内监听端口。
 
 ### 构建说明
 
@@ -189,7 +189,8 @@ docker save comfyui-server:1.12.1 -o comfyui-server-1.12.1.tar
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `COMFYUI_URL` | `http://127.0.0.1:8188` | ComfyUI 服务地址（首次写入数据库） |
+| `COMFYUI_URL` | 本地运行用 `http://127.0.0.1:8188`，Compose 用 `http://host.docker.internal:8188` | ComfyUI 服务地址（首次写入数据库） |
+| `ALLOWED_ORIGINS` | 空 | 前后端分开部署时允许的浏览器来源，用逗号分隔 |
 | `SERVER_PORT` | `8080` | 后端监听端口 |
 | `DATA_DIR` | `/app/data` | 数据存储目录 |
 | `DB_PATH` | `/app/data/db/comfyui.db` | SQLite 数据库路径 |
@@ -403,6 +404,7 @@ comfyui-server/
 | POST | `/api/workflows` | 创建 |
 | GET | `/api/workflows/:id` | 详情 |
 | PUT | `/api/workflows/:id` | 编辑 |
+| PUT | `/api/workflows/:id/enabled` | 启用或禁用 |
 | DELETE | `/api/workflows/:id` | 删除 |
 | POST | `/api/workflows/detect-params` | 自动识别参数 |
 
@@ -413,8 +415,8 @@ comfyui-server/
 | POST | `/api/tasks/direct` | 直接提交 |
 | GET | `/api/tasks` | 列表（支持 status 筛选） |
 | GET | `/api/tasks/:id` | 详情 |
-| POST | `/api/tasks/:id/cancel` | 取消（同步删除 ComfyUI 队列） |
-| POST | `/api/tasks/:id/retry` | 重试 |
+| POST | `/api/tasks/:id/cancel` | 取消本地任务，并请求 ComfyUI 停止对应的远端任务 |
+| POST | `/api/tasks/:id/retry` | 重试失败的生成项，保留已成功的项 |
 | GET | `/api/tasks/:id/events` | SSE 进度流 |
 
 ### 图片

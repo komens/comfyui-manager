@@ -123,6 +123,7 @@ func main() {
 	mux.HandleFunc("PUT /api/workflows/{id}", a.updateWorkflow)
 	mux.HandleFunc("DELETE /api/workflows/{id}", a.deleteWorkflow)
 	mux.HandleFunc("PUT /api/workflows/{id}/default", a.setDefaultWorkflow)
+	mux.HandleFunc("PUT /api/workflows/{id}/enabled", a.setWorkflowEnabled)
 	// 提示词落点：正负向各写到哪个节点的哪个字段。带 id 读库里那份，
 	// 不带 id 时用 body 里的 workflow_json（编辑态下还没保存也能看落点）。
 	mux.HandleFunc("POST /api/workflows/prompt-targets", a.detectWorkflowPromptTargets)
@@ -210,9 +211,11 @@ func main() {
 		mux.HandleFunc("GET /api/scripts/runs/{id}/files/download", a.downloadScriptRunFile)
 		mux.HandleFunc("DELETE /api/scripts/runs/{id}", a.deleteScriptRun)
 	}
+	if err := a.recoverTasks(); err != nil {
+		log.Fatal(err)
+	}
 	go a.submitter()
 	go a.downloader()
-	go a.recoverTasks()
 	// 补齐历史图片的像素宽高（首启新列的库会扫一遍，之后每次只剩零星新增）
 	go a.backfillImageSizes()
 	// 给存量图补缩略图。放在宽高回填之后：新图走写入时的队列，这里只处理历史数据。
@@ -272,6 +275,7 @@ func loadConfig() config {
 		InitialComfyUI: envOr("COMFYUI_URL", "http://127.0.0.1:8188"),
 		Port:           envOr("SERVER_PORT", "8080"),
 		StaticDir:      envOr("STATIC_DIR", ""),
+		AllowedOrigins: os.Getenv("ALLOWED_ORIGINS"),
 	}
 }
 
@@ -437,6 +441,12 @@ VALUES ('comfyui_url', ?, CURRENT_TIMESTAMP);
 		"ALTER TABLE generation_items ADD COLUMN saved_output_count INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE generation_items ADD COLUMN submitted_comfyui_url TEXT NOT NULL DEFAULT ''",
 		"ALTER TABLE generation_items ADD COLUMN remote_missing_since INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE generation_items ADD COLUMN remote_failure_since INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE generation_items ADD COLUMN effective_negative_prompt TEXT",
+		"ALTER TABLE images ADD COLUMN effective_negative_prompt TEXT",
+		"ALTER TABLE generation_tasks ADD COLUMN workflow_snapshot TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE generation_tasks ADD COLUMN workflow_mapping_snapshot TEXT NOT NULL DEFAULT '{}'",
+		"ALTER TABLE generation_tasks ADD COLUMN workflow_negative_snapshot TEXT NOT NULL DEFAULT ''",
 		"CREATE UNIQUE INDEX IF NOT EXISTS idx_images_comfy_output ON images(comfy_output_key) WHERE comfy_output_key!=''",
 	} {
 		if _, err := a.db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
@@ -476,28 +486,24 @@ func (a *app) getStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"total_tasks": taskCount, "total_images": imageCount, "pending_entries": pendingEntries, "running_tasks": runningTasks})
 }
 
-func (a *app) recoverTasks() {
-	// 重启恢复策略：
-	// 1) 已经拿到 comfy_prompt_id 的 item —— 说明 ComfyUI 那边已收单，保留 submitted 与原 prompt_id，
-	//    交给 downloader 查 /history 收尾。之前这里无条件清空 prompt_id 并重置为 pending，
-	//    会导致每次重启都把已提交的任务重新提交一遍（重复排队、重复出图）。
-	kept, _ := a.db.Exec(`UPDATE generation_items SET status='submitted' WHERE status IN ('submitted','running') AND COALESCE(comfy_prompt_id,'')!=''`)
-	keptN, _ := kept.RowsAffected()
-	// 2) 没有 prompt_id 的 item —— 提交中途中断（HTTP 已发但结果未知除外），重置为 pending 重新提交
-	reset, _ := a.db.Exec(`UPDATE generation_items SET status='pending', comfy_prompt_id='' WHERE status IN ('submitted','running') AND COALESCE(comfy_prompt_id,'')=''`)
-	resetN, _ := reset.RowsAffected()
-	// 3) task 状态跟随：先统一回到 pending，若仍有 in-flight item 再提升为 running
-	_, _ = a.db.Exec(`UPDATE generation_tasks SET status='pending', completed_at=NULL WHERE status IN ('pending','running')`)
-	_, _ = a.db.Exec(`UPDATE generation_tasks SET status='running' WHERE status='pending' AND EXISTS (
-		SELECT 1 FROM generation_items gi WHERE gi.task_id=generation_tasks.id AND gi.status IN ('submitted','running'))`)
-	if keptN > 0 || resetN > 0 {
-		a.log.Printf("recovered tasks: %d items kept in-flight (awaiting ComfyUI history), %d items reset to pending", keptN, resetN)
-		// 「重启后任务自己变了状态」是最容易让人怀疑数据被改的地方，留个记录。
-		debugEvent("recover", map[string]any{
-			"kept_in_flight": keptN,
-			"reset_pending":  resetN,
-		})
+func (a *app) recoverTasks() error {
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
 	}
+	defer tx.Rollback()
+	for _, query := range []string{
+		`UPDATE generation_items SET status='submitted' WHERE status IN ('submitted','running') AND COALESCE(comfy_prompt_id,'')!=''`,
+		`UPDATE generation_items SET status='pending', comfy_prompt_id='' WHERE status IN ('submitted','running') AND COALESCE(comfy_prompt_id,'')=''`,
+		`UPDATE generation_tasks SET status=CASE WHEN EXISTS (
+			SELECT 1 FROM generation_items gi WHERE gi.task_id=generation_tasks.id AND gi.status IN ('submitted','running')
+		) THEN 'running' ELSE 'pending' END, completed_at=NULL WHERE status IN ('pending','running')`,
+	} {
+		if _, err := tx.Exec(query); err != nil {
+			return fmt.Errorf("recover tasks: %w", err)
+		}
+	}
+	return tx.Commit()
 }
 
 func (a *app) getSettings(w http.ResponseWriter, r *http.Request) {

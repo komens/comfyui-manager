@@ -17,7 +17,7 @@ var (
 	errTaskNotFound       = errors.New("task not found")
 	errTaskRunning        = errors.New("cannot delete running task, cancel it first")
 	errTaskNotCancellable = errors.New("task is not cancellable")
-	errTaskNotFailed      = errors.New("only failed tasks can be retried")
+	errTaskNotFailed      = errors.New("task has no retryable failed items")
 	errTaskWorkflowGone   = errors.New("workflow has been deleted, task cannot be retried")
 )
 
@@ -29,17 +29,40 @@ type directTaskInput struct {
 	Parameters     map[string]any `json:"parameters"`
 }
 
-// beginTaskCreation validates the workflow under the same write transaction that queues the task.
-func (a *app) beginTaskCreation(w http.ResponseWriter, r *http.Request, workflowID int64) (*sql.Tx, string) {
-	tx, err := a.db.BeginTx(r.Context(), nil)
+type taskWorkflow struct {
+	name, json, mapping, negative string
+}
+
+func (a *app) readTaskWorkflow(ctx context.Context, tx *sql.Tx, workflowID int64, requireEnabled bool) (taskWorkflow, error) {
+	var workflow taskWorkflow
+	var path string
+	err := tx.QueryRowContext(ctx, `SELECT name, workflow_path, mapping_json, negative_prompt
+		FROM workflows WHERE id=? AND (?=0 OR enabled=1)`, workflowID, requireEnabled).
+		Scan(&workflow.name, &path, &workflow.mapping, &workflow.negative)
+	if err != nil {
+		return workflow, err
+	}
+	raw, err := readWorkflowFile(a.workflowFilePath(path))
+	if err != nil || !json.Valid(raw) {
+		// Keep the failure attached to this submission even if the workflow is later repaired.
+		workflow.json = "null"
+	} else {
+		workflow.json = string(raw)
+	}
+	return workflow, nil
+}
+
+// Read the workflow revision under the same write transaction that queues the task.
+func (a *app) beginTaskCreation(w http.ResponseWriter, r *http.Request, workflowID int64) (*sql.Tx, taskWorkflow) {
+	ctx := r.Context()
+	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
 		writeError(w, 500, "create task failed")
-		return nil, ""
+		return nil, taskWorkflow{}
 	}
-	var name string
-	err = tx.QueryRowContext(r.Context(), "SELECT name FROM workflows WHERE id=? AND enabled=1", workflowID).Scan(&name)
+	workflow, err := a.readTaskWorkflow(ctx, tx, workflowID, true)
 	if err == nil {
-		return tx, name
+		return tx, workflow
 	}
 	_ = tx.Rollback()
 	if errors.Is(err, sql.ErrNoRows) {
@@ -47,7 +70,7 @@ func (a *app) beginTaskCreation(w http.ResponseWriter, r *http.Request, workflow
 	} else {
 		writeError(w, 500, "read workflow failed")
 	}
-	return nil, ""
+	return nil, taskWorkflow{}
 }
 
 func (a *app) createDirectTask(w http.ResponseWriter, r *http.Request) {
@@ -67,7 +90,7 @@ func (a *app) createDirectTask(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now()
 	parameters, _ := json.Marshal(map[string]any{"positive_prompt": input.PositivePrompt, "parameters": input.Parameters})
-	tx, workflowName := a.beginTaskCreation(w, r, input.WorkflowID)
+	tx, workflow := a.beginTaskCreation(w, r, input.WorkflowID)
 	if tx == nil {
 		return
 	}
@@ -83,8 +106,9 @@ func (a *app) createDirectTask(w http.ResponseWriter, r *http.Request) {
 	}
 	promptID, _ := promptResult.LastInsertId()
 	result, err := tx.ExecContext(r.Context(),
-		`INSERT INTO generation_tasks(source_type, workflow_id, comfyui_url, parameters_json, workflow_name, created_at) VALUES('direct',?,?,?,?,?)`,
-		input.WorkflowID, comfyURL, string(parameters), workflowName, now)
+		`INSERT INTO generation_tasks(source_type, workflow_id, comfyui_url, parameters_json, workflow_name,
+			workflow_snapshot, workflow_mapping_snapshot, workflow_negative_snapshot, created_at) VALUES('direct',?,?,?,?,?,?,?,?)`,
+		input.WorkflowID, comfyURL, string(parameters), workflow.name, workflow.json, workflow.mapping, workflow.negative, now)
 	if err != nil {
 		_ = tx.Rollback()
 		writeError(w, http.StatusInternalServerError, "create task failed")
@@ -128,7 +152,13 @@ func (a *app) listTasks(w http.ResponseWriter, r *http.Request) {
 	// 分页
 	page, pageSize, offset := parsePagination(r)
 	queryArgs := append(args, pageSize, offset)
-	rows, err := a.db.QueryContext(r.Context(), `SELECT t.id, t.source_type, t.workflow_id, COALESCE(NULLIF(t.workflow_name,''), w.name), t.status, t.total_count, t.success_count, t.failed_count, t.created_at
+	rows, err := a.db.QueryContext(r.Context(), `SELECT t.id, t.source_type, t.workflow_id, COALESCE(NULLIF(t.workflow_name,''), w.name), t.status, t.total_count, t.success_count, t.failed_count, t.created_at,
+		EXISTS (SELECT 1 FROM generation_items gi WHERE gi.task_id=t.id AND gi.status='submitted' AND gi.remote_failure_since>0),
+		EXISTS (SELECT 1 FROM generation_items gi WHERE gi.task_id=t.id AND gi.status='cancelled' AND gi.error_message!=''),
+		COALESCE((SELECT substr(gi.error_message,1,400) FROM generation_items gi
+			WHERE gi.task_id=t.id AND gi.error_message!=''
+			  AND (gi.status IN ('failed','cancelled') OR gi.status='submitted' AND gi.remote_failure_since>0)
+			ORDER BY (gi.remote_failure_since>0) DESC, gi.id DESC LIMIT 1),'')
 		FROM generation_tasks t LEFT JOIN workflows w ON w.id=t.workflow_id`+where+` ORDER BY t.id DESC LIMIT ? OFFSET ?`, queryArgs...)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "query tasks failed")
@@ -139,16 +169,18 @@ func (a *app) listTasks(w http.ResponseWriter, r *http.Request) {
 	taskIDs := make([]int64, 0, pageSize)
 	for rows.Next() {
 		var id, workflowID, totalC, success, failed int
-		var source, status, created string
+		var source, status, created, failureReason string
 		var workflowName sql.NullString
-		if err := rows.Scan(&id, &source, &workflowID, &workflowName, &status, &totalC, &success, &failed, &created); err != nil {
+		var connectionIssue, cancelUnconfirmed bool
+		if err := rows.Scan(&id, &source, &workflowID, &workflowName, &status, &totalC, &success, &failed, &created, &connectionIssue, &cancelUnconfirmed, &failureReason); err != nil {
 			writeError(w, http.StatusInternalServerError, "read task failed")
 			return
 		}
 		taskIDs = append(taskIDs, int64(id))
 		items = append(items, map[string]any{"id": id, "source_type": source, "workflow_id": workflowID,
 			"workflow_name": workflowName.String, "status": status, "total_count": totalC,
-			"success_count": success, "failed_count": failed, "created_at": created})
+			"success_count": success, "failed_count": failed, "created_at": created,
+			"connection_issue": connectionIssue, "cancel_unconfirmed": cancelUnconfirmed, "failure_reason": failureReason})
 	}
 	a.enrichTaskListItems(r.Context(), items, taskIDs)
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "page": page, "page_size": pageSize})
@@ -164,22 +196,25 @@ func (a *app) enrichTaskListItems(ctx context.Context, items []map[string]any, t
 	for i, id := range taskIDs {
 		args[i] = id
 	}
-	// 每个任务一张代表图
-	if rows, err := a.db.QueryContext(ctx, `SELECT gi.task_id, MIN(i.id) FROM images i
+	// Keep the representative image stable and include the total without loading every image ID.
+	if rows, err := a.db.QueryContext(ctx, `SELECT gi.task_id, MIN(i.id), COUNT(*) FROM images i
 		JOIN generation_items gi ON gi.id=i.generation_item_id
 		WHERE gi.task_id IN (`+placeholders+`) GROUP BY gi.task_id`, args...); err == nil {
-		imageByTask := map[int64]int64{}
+		type imageSummary struct{ firstID, count int64 }
+		imageByTask := map[int64]imageSummary{}
 		for rows.Next() {
-			var taskID, imageID int64
-			if err := rows.Scan(&taskID, &imageID); err == nil {
-				imageByTask[taskID] = imageID
+			var taskID int64
+			var summary imageSummary
+			if err := rows.Scan(&taskID, &summary.firstID, &summary.count); err == nil {
+				imageByTask[taskID] = summary
 			}
 		}
 		_ = rows.Close()
 		for _, item := range items {
 			if id, ok := item["id"].(int); ok {
-				if imageID, found := imageByTask[int64(id)]; found {
-					item["image_id"] = imageID
+				if summary, found := imageByTask[int64(id)]; found {
+					item["image_id"] = summary.firstID
+					item["image_count"] = summary.count
 				}
 			}
 		}
@@ -240,25 +275,22 @@ func (a *app) getTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items := make([]map[string]any, 0)
-	// 回显「本条实际用的负面」：item 自带非空优先，否则回落工作流静态负面。
-	// TRIM 与提交侧 resolveEffectiveNegative 的判空保持一致：纯空白的 item 负面提交时
-	// 会回落到工作流，列表里就不该再显示一个空的「负面」块。
-	// 用 LEFT JOIN workflows：工作流被删后 item 仍要照常列出（见 workflow_name 冗余列的同一考量）。
-	rows, rowsErr := a.db.QueryContext(r.Context(), `SELECT i.id, i.prompt_id, i.positive_prompt, COALESCE(NULLIF(TRIM(i.negative_prompt),''), w.negative_prompt, ''), COALESCE(i.comfy_prompt_id,''), i.status, i.error_message, COALESCE(i.notes,''), i.output_count, i.saved_output_count
-		FROM generation_items i
-		JOIN generation_tasks t ON t.id=i.task_id
-		LEFT JOIN workflows w ON w.id=t.workflow_id
-		WHERE i.task_id=? ORDER BY i.id`, id)
+	rows, rowsErr := a.db.QueryContext(r.Context(), `SELECT i.id, i.prompt_id, i.positive_prompt,
+		COALESCE(i.effective_negative_prompt, NULLIF(TRIM(i.negative_prompt),''), CASE WHEN t.workflow_snapshot!='' THEN t.workflow_negative_snapshot END, w.negative_prompt, ''),
+		COALESCE(i.comfy_prompt_id,''), i.status, i.error_message, COALESCE(i.notes,''), i.output_count, i.saved_output_count,
+		COALESCE(NULLIF(i.submitted_comfyui_url,''), t.comfyui_url)
+		FROM generation_items i JOIN generation_tasks t ON t.id=i.task_id
+		LEFT JOIN workflows w ON w.id=t.workflow_id WHERE i.task_id=? ORDER BY i.id`, id)
 	if rowsErr == nil {
 		defer rows.Close()
 		for rows.Next() {
 			var itemID, outputCount, savedOutputCount int
 			var promptID sql.NullInt64
-			var positive, negative, promptIDStr, itemStatus, itemError, itemNotes string
-			if err := rows.Scan(&itemID, &promptID, &positive, &negative, &promptIDStr, &itemStatus, &itemError, &itemNotes, &outputCount, &savedOutputCount); err == nil {
+			var positive, negative, promptIDStr, itemStatus, itemError, itemNotes, itemURL string
+			if err := rows.Scan(&itemID, &promptID, &positive, &negative, &promptIDStr, &itemStatus, &itemError, &itemNotes, &outputCount, &savedOutputCount, &itemURL); err == nil {
 				items = append(items, map[string]any{"id": itemID, "prompt_id": promptID.Int64,
 					"positive_prompt": positive, "negative_prompt": negative, "comfy_prompt_id": promptIDStr,
-					"status": itemStatus, "error_message": itemError, "notes": itemNotes, "output_count": outputCount, "saved_output_count": savedOutputCount})
+					"status": itemStatus, "error_message": itemError, "notes": itemNotes, "comfyui_url": itemURL, "output_count": outputCount, "saved_output_count": savedOutputCount})
 			}
 		}
 	}
@@ -444,7 +476,7 @@ func (a *app) cancelTaskByID(ctx context.Context, id int64) error {
 	if _, err := tx.ExecContext(ctx, "UPDATE generation_tasks SET status='cancelled', completed_at=CURRENT_TIMESTAMP WHERE id=?", id); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, "UPDATE generation_items SET status='cancelled', remote_missing_since=0 WHERE task_id=? AND status IN ('pending','running','submitted')", id); err != nil {
+	if _, err := tx.ExecContext(ctx, "UPDATE generation_items SET status='cancelled', remote_missing_since=0, remote_failure_since=0, error_message='' WHERE task_id=? AND status IN ('pending','running','submitted')", id); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE prompts SET status=CASE WHEN completed_at IS NULL THEN 'pending' ELSE 'done' END, updated_at=CURRENT_TIMESTAMP
@@ -458,21 +490,38 @@ func (a *app) cancelTaskByID(ctx context.Context, id int64) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	// 只撤排队项。已经开始执行的任务可能仍会在 ComfyUI 侧跑完。
+	remoteCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
 	for _, entry := range queued {
-		go a.deleteComfyQueueItem(entry.baseURL, entry.promptID)
+		if err := cancelComfyJob(remoteCtx, entry.baseURL, entry.promptID); err != nil {
+			a.recordRemoteCancellationError(entry.itemID, err)
+		}
 	}
 	a.forgetSaveFailures(ctx, id)
 	a.publish(id, map[string]any{"task_id": id, "status": "cancelled"})
 	return nil
 }
 
+func (a *app) recordRemoteCancellationError(itemID int64, err error) {
+	a.log.Printf("cancel ComfyUI job for item %d: %v", itemID, err)
+	var taskID int64
+	dbErr := a.db.QueryRow("UPDATE generation_items SET error_message=? WHERE id=? AND status='cancelled' RETURNING task_id",
+		"本地已取消，远端取消未确认："+err.Error(), itemID).Scan(&taskID)
+	if dbErr == nil {
+		a.publish(taskID, map[string]any{"task_id": taskID, "item_id": itemID, "status": "cancelled"})
+	} else if !errors.Is(dbErr, sql.ErrNoRows) {
+		a.log.Printf("save remote cancellation error for item %d: %v", itemID, dbErr)
+	}
+}
+
 type comfyQueueEntry struct {
+	itemID            int64
 	baseURL, promptID string
 }
 
 func cancellableQueueEntries(ctx context.Context, tx *sql.Tx, taskID int64, currentURL string) ([]comfyQueueEntry, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT COALESCE(NULLIF(submitted_comfyui_url,''),?), comfy_prompt_id
+	rows, err := tx.QueryContext(ctx, `SELECT id, COALESCE(NULLIF(submitted_comfyui_url,''),
+		NULLIF((SELECT comfyui_url FROM generation_tasks WHERE id=generation_items.task_id),''), ?), comfy_prompt_id
 		FROM generation_items WHERE task_id=? AND status='submitted' AND COALESCE(comfy_prompt_id,'')!=''`, currentURL, taskID)
 	if err != nil {
 		return nil, err
@@ -481,7 +530,7 @@ func cancellableQueueEntries(ctx context.Context, tx *sql.Tx, taskID int64, curr
 	var entries []comfyQueueEntry
 	for rows.Next() {
 		var entry comfyQueueEntry
-		if err := rows.Scan(&entry.baseURL, &entry.promptID); err != nil {
+		if err := rows.Scan(&entry.itemID, &entry.baseURL, &entry.promptID); err != nil {
 			return nil, err
 		}
 		if entry.baseURL != "" {
@@ -493,42 +542,52 @@ func cancellableQueueEntries(ctx context.Context, tx *sql.Tx, taskID int64, curr
 
 // retryTaskByID 重跑失败任务：重置 task 与失败 item，成功的 item 保持不动，避免重复出图。
 func (a *app) retryTaskByID(ctx context.Context, id int64) error {
-	// 先查一次是否存在：只靠下面带 status='failed' 条件的 UPDATE，
-	// 「任务不存在」和「任务不是 failed」都只会得到 n==0，接口层没法分别返回 404 / 409。
-	var status string
-	if err := a.db.QueryRowContext(ctx, `SELECT status FROM generation_tasks WHERE id=?`, id).Scan(&status); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return errTaskNotFound
-		}
-		return err
-	}
-	if status != "failed" {
-		return errTaskNotFailed
-	}
-	// 工作流已被删除时禁止重试。submitter 用的是 LEFT JOIN workflows，工作流没了也照样
-	// 会捞起这条 item，只是立刻给一句「找不到该任务的工作流」判失败——所以这里拦的不是
-	// 卡死，而是把一次注定失败的提交提前拦成一条明确的接口错误。
-	// 注意：这里只判存在、不判 enabled。停用的工作流不允许新建任务，但允许重跑旧任务
-	// （重跑是修历史，不是新开工），这是有意为之，别当成漏洞补上。
-	var workflowID int64
-	if err := a.db.QueryRowContext(ctx, `SELECT workflow_id FROM generation_tasks WHERE id=?`, id).Scan(&workflowID); err == nil {
-		var has int
-		if err := a.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM workflows WHERE id=?`, workflowID).Scan(&has); err == nil && has == 0 {
-			return errTaskWorkflowGone
-		}
-	}
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE generation_tasks SET status='pending', failed_count=0, completed_at=NULL WHERE id=? AND status='failed'`, id)
+	defer tx.Rollback()
+	var status string
+	var workflowID int64
+	var hasFailures bool
+	err = tx.QueryRowContext(ctx, `SELECT status, workflow_id, EXISTS (
+		SELECT 1 FROM generation_items WHERE task_id=? AND status='failed') FROM generation_tasks WHERE id=?`, id, id).
+		Scan(&status, &workflowID, &hasFailures)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errTaskNotFound
+	}
 	if err != nil {
-		_ = tx.Rollback()
 		return err
 	}
-	if n, _ := result.RowsAffected(); n == 0 {
-		_ = tx.Rollback()
+	if (status != "failed" && status != "completed") || !hasFailures {
 		return errTaskNotFailed
+	}
+	workflow, err := a.readTaskWorkflow(ctx, tx, workflowID, false)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errTaskWorkflowGone
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE generation_items SET effective_negative_prompt=COALESCE(
+			NULLIF(TRIM(negative_prompt),''), (SELECT CASE WHEN t.workflow_snapshot!='' THEN t.workflow_negative_snapshot
+				ELSE w.negative_prompt END FROM generation_tasks t LEFT JOIN workflows w ON w.id=t.workflow_id
+				WHERE t.id=generation_items.task_id), '')
+		WHERE task_id=? AND status IN ('success','failed') AND effective_negative_prompt IS NULL`, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE images SET effective_negative_prompt=(
+			SELECT effective_negative_prompt FROM generation_items WHERE id=images.generation_item_id)
+		WHERE effective_negative_prompt IS NULL AND generation_item_id IN
+			(SELECT id FROM generation_items WHERE task_id=? AND status='failed')`, id); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE generation_tasks SET status='pending', failed_count=0, completed_at=NULL,
+		comfyui_url=(SELECT value FROM settings WHERE key='comfyui_url'),
+		workflow_snapshot=?, workflow_mapping_snapshot=?, workflow_negative_snapshot=? WHERE id=?`,
+		workflow.json, workflow.mapping, workflow.negative, id)
+	if err != nil {
+		return err
 	}
 	// 关键：只重置 task 是没用的，submitter 只捞 item.status='pending'。
 	// 必须把该 task 下失败的 item 一并重置（成功的 item 保持不动，避免重复出图）。
@@ -537,7 +596,7 @@ func (a *app) retryTaskByID(ctx context.Context, id int64) error {
 	// 重新生成另一批图，旧图是上一版的结果，删掉等于用户拿不回来。图片的清理只走
 	// 图库里的删除 / 整理页，重试不承担删图职责。
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE generation_items SET status='pending', comfy_prompt_id='', error_message='', output_count=0, saved_output_count=0, submitted_comfyui_url='', remote_missing_since=0 WHERE task_id=? AND status='failed'`, id); err != nil {
+		`UPDATE generation_items SET status='pending', comfy_prompt_id='', error_message='', output_count=0, saved_output_count=0, submitted_comfyui_url='', remote_missing_since=0, remote_failure_since=0, effective_negative_prompt=NULL, notes='' WHERE task_id=? AND status='failed'`, id); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
@@ -562,8 +621,13 @@ func (a *app) retryTaskByID(ctx context.Context, id int64) error {
 // 直到有人去维护页点「清理孤儿」。收藏的图片例外——那是用户在图库里明确留下的，
 // 它的行、原图和缩略图都原地保留（只删掉所属的生成项，图库里照常能看到）。
 func (a *app) deleteTaskByID(ctx context.Context, id int64) error {
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	var status string
-	if err := a.db.QueryRowContext(ctx, `SELECT status FROM generation_tasks WHERE id=?`, id).Scan(&status); err != nil {
+	if err := tx.QueryRowContext(ctx, "SELECT status FROM generation_tasks WHERE id=?", id).Scan(&status); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return errTaskNotFound
 		}
@@ -572,17 +636,19 @@ func (a *app) deleteTaskByID(ctx context.Context, id int64) error {
 	if status == "running" {
 		return errTaskRunning
 	}
-	// 必须在删 items 之前清计数：删完就查不到 item id 了
-	a.forgetSaveFailures(ctx, id)
-	// 文件路径也得在删行之前取：删完就查不到 storage_path 了。
-	// 非 running 的任务不会再有 downloader 往里加图，所以事务外先查一遍是安全的。
-	purge, err := a.taskImagesToPurge(ctx, id)
+	purge, err := taskImagesToPurge(ctx, tx, id)
 	if err != nil {
 		return err
 	}
-	tx, err := a.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
+	if status == "pending" {
+		if _, err := tx.ExecContext(ctx, `UPDATE prompts SET
+			status=CASE WHEN completed_at IS NULL THEN 'pending' ELSE 'done' END, updated_at=CURRENT_TIMESTAMP
+			WHERE status='running' AND id IN (SELECT prompt_id FROM generation_items WHERE task_id=?)
+			AND NOT EXISTS (SELECT 1 FROM generation_items i JOIN generation_tasks t ON t.id=i.task_id
+				WHERE i.prompt_id=prompts.id AND t.id!=? AND t.status IN ('pending','running')
+				AND i.status IN ('pending','running','submitted'))`, id, id); err != nil {
+			return err
+		}
 	}
 	if len(purge) > 0 {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM images WHERE is_favorite=0 AND id IN (`+placeholders(len(purge))+`)`, imageIDs(purge)...); err != nil {
@@ -590,7 +656,9 @@ func (a *app) deleteTaskByID(ctx context.Context, id int64) error {
 			return err
 		}
 	}
-	_, _ = tx.ExecContext(ctx, `DELETE FROM generation_items WHERE task_id=?`, id)
+	if _, err := tx.ExecContext(ctx, `DELETE FROM generation_items WHERE task_id=?`, id); err != nil {
+		return err
+	}
 	// 带上状态条件，避免 SELECT 之后任务转为 running 时被并发删除
 	result, err := tx.ExecContext(ctx, `DELETE FROM generation_tasks WHERE id=? AND status!='running'`, id)
 	if err != nil {
@@ -623,8 +691,8 @@ type taskImage struct {
 
 // taskImagesToPurge 取任务下「非收藏」的图片，供删除任务时清行+清盘。
 // 收藏的图不在结果里，删除任务不会碰它的行、原图和缩略图。
-func (a *app) taskImagesToPurge(ctx context.Context, taskID int64) ([]taskImage, error) {
-	rows, err := a.db.QueryContext(ctx, `SELECT img.id, COALESCE(img.storage_path,'') FROM images img
+func taskImagesToPurge(ctx context.Context, tx *sql.Tx, taskID int64) ([]taskImage, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT img.id, COALESCE(img.storage_path,'') FROM images img
 		WHERE img.is_favorite=0
 		AND img.generation_item_id IN (SELECT id FROM generation_items WHERE task_id=?)`, taskID)
 	if err != nil {

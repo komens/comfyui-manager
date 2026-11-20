@@ -325,12 +325,12 @@ func (a *app) runPrompt(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "read ComfyUI URL failed")
 		return
 	}
-	tx, workflowName := a.beginTaskCreation(w, r, input.WorkflowID)
+	tx, workflow := a.beginTaskCreation(w, r, input.WorkflowID)
 	if tx == nil {
 		return
 	}
 	defer tx.Rollback()
-	taskID, err := queuePromptTask(r.Context(), tx, id, input.WorkflowID, workflowName, comfyURL, input.Parameters)
+	taskID, err := queuePromptTask(r.Context(), tx, id, input.WorkflowID, workflow, comfyURL, input.Parameters)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, 404, "prompt not found")
 		return
@@ -342,7 +342,7 @@ func (a *app) runPrompt(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 202, map[string]any{"task_id": taskID, "prompt_id": id, "status": "pending"})
 }
 
-func queuePromptTask(ctx context.Context, tx *sql.Tx, promptID, workflowID int64, workflowName, comfyURL string, parameters map[string]any) (int64, error) {
+func queuePromptTask(ctx context.Context, tx *sql.Tx, promptID, workflowID int64, workflow taskWorkflow, comfyURL string, parameters map[string]any) (int64, error) {
 	var positive, negative string
 	if err := tx.QueryRowContext(ctx, "SELECT positive_prompt, COALESCE(negative_prompt,'') FROM prompts WHERE id=?", promptID).Scan(&positive, &negative); err != nil {
 		return 0, err
@@ -352,8 +352,9 @@ func queuePromptTask(ctx context.Context, tx *sql.Tx, promptID, workflowID int64
 		return 0, err
 	}
 	result, err := tx.ExecContext(ctx,
-		"INSERT INTO generation_tasks(source_type, workflow_id, comfyui_url, parameters_json, workflow_name, created_at) VALUES('prompt',?,?,?,?,?)",
-		workflowID, comfyURL, string(payload), workflowName, time.Now())
+		`INSERT INTO generation_tasks(source_type, workflow_id, comfyui_url, parameters_json, workflow_name,
+			workflow_snapshot, workflow_mapping_snapshot, workflow_negative_snapshot, created_at) VALUES('prompt',?,?,?,?,?,?,?,?)`,
+		workflowID, comfyURL, string(payload), workflow.name, workflow.json, workflow.mapping, workflow.negative, time.Now())
 	if err != nil {
 		return 0, err
 	}
@@ -472,7 +473,7 @@ func (a *app) queuePromptBatch(w http.ResponseWriter, r *http.Request, workflowI
 		writeError(w, 500, "read ComfyUI URL failed")
 		return
 	}
-	tx, workflowName := a.beginTaskCreation(w, r, workflowID)
+	tx, workflow := a.beginTaskCreation(w, r, workflowID)
 	if tx == nil {
 		return
 	}
@@ -486,7 +487,7 @@ func (a *app) queuePromptBatch(w http.ResponseWriter, r *http.Request, workflowI
 	}
 	created := 0
 	for _, id := range ids {
-		_, err := queuePromptTask(ctx, tx, id, workflowID, workflowName, comfyURL, parameters)
+		_, err := queuePromptTask(ctx, tx, id, workflowID, workflow, comfyURL, parameters)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
 		}

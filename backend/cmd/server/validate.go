@@ -331,7 +331,7 @@ func buildSubmitPayload(rawJSON []byte, order widgetOrderLookup) ([]payloadNode,
 	if _, hasNodes := workflow["nodes"]; hasNodes {
 		converted, err := uiToAPIFormatWithOrder(workflow, order)
 		if err != nil {
-			return nil, fmt.Errorf("UI 格式转 API 格式失败：%v", err)
+			return nil, fmt.Errorf("UI 格式转 API 格式失败：%w", err)
 		}
 		workflow = converted
 	}

@@ -1,39 +1,59 @@
 <script setup lang="ts">
+import ViewFeedback from '../components/ViewFeedback.vue'
+import { MoreFilled, Picture } from '@element-plus/icons-vue'
 import { computed, onMounted, ref, onUnmounted } from 'vue'
 import { RouterLink } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import Pagination from '../components/Pagination.vue'
-import { api } from '../api/client'
-import { openImageViewer } from '../utils/imageViewer'
+import { api, type Task } from '../api/client'
+import { openImageViewer, type ViewerRef } from '../utils/imageViewer'
 import { thumbUrl } from '../utils/imageUrls'
 import { useUrlState } from '../composables/useUrlState'
 
-type Task = {
-  id: number
-  source_type: string
-  workflow_id: number
-  workflow_name: string
-  status: string
-  total_count: number
-  success_count: number
-  failed_count: number
-  created_at: string
-  image_id?: number
-  prompt_id?: number
-  prompt_title?: string
-  prompt_count?: number
-}
 type PageResult = { items: Task[]; total: number; page: number; page_size: number }
 type BatchResult = { applied: number; skipped: number }
 
-function openTaskImage(t: Task) {
-  if (t.image_id) openImageViewer([t.image_id], 0)
+const failedCovers = ref(new Set<number>())
+let pendingPreview: AbortController | undefined
+
+async function openTaskImage(task: Task) {
+  const cover = task.image_id
+  if (!cover) return
+  pendingPreview?.abort()
+  const request = new AbortController()
+  pendingPreview = request
+  let images: ViewerRef[] = [cover]
+  let start = 0
+  if ((task.image_count ?? 1) > 1) {
+    try {
+      const detail = await api<{ items: { images?: { id: number; width?: number; height?: number }[] }[] }>(
+        `/api/tasks/${task.id}`, { signal: request.signal },
+      )
+      const results = detail.items.flatMap(item => item.images ?? [])
+      if (results.length) {
+        images = results
+        start = Math.max(0, results.findIndex(image => image.id === cover))
+      }
+    } catch {
+      // The cover is still available if fetching the other results failed.
+    }
+  }
+  if (!request.signal.aborted) openImageViewer(images, start, { mutated: load })
+}
+
+function coverLabel(task: Task) {
+  if (task.image_id) return '缩略图不可用'
+  if (task.status === 'pending') return '排队中'
+  if (task.status === 'running') return '等待出图'
+  return '暂无可预览图片'
 }
 
 const tasks = ref<Task[]>([])
-const loading = ref(false)
+const loading = ref(true)
+const loadError = ref('')
+let requestID = 0
 const message = ref('')
-const messageType = ref<'success' | 'error'>('success')
+const messageType = ref<'success' | 'error' | 'info'>('success')
 const batchBusy = ref(false)
 const total = ref(0)
 let timer: ReturnType<typeof setInterval> | null = null
@@ -68,11 +88,13 @@ const allSelected = computed(() => tasks.value.length > 0 && tasks.value.every(t
 const selectedCount = computed(() => selectedIds.value.size)
 const selectedTasks = computed(() => tasks.value.filter(t => selectedIds.value.has(t.id)))
 const canBatchCancel = computed(() => selectedTasks.value.some(t => canCancel(t.status)))
-const canBatchRetry = computed(() => selectedTasks.value.some(t => t.status === 'failed'))
+const canBatchRetry = computed(() => selectedTasks.value.some(canRetry))
 const canBatchDelete = computed(() => selectedTasks.value.some(t => canDelete(t.status)))
 
 async function load() {
+  const id = ++requestID
   loading.value = true
+  loadError.value = ''
   try {
     const params = new URLSearchParams()
     if (state.status) params.set('status', state.status)
@@ -80,13 +102,16 @@ async function load() {
     params.set('page', String(state.page))
     params.set('page_size', String(state.page_size))
     const result = await api<PageResult>(`/api/tasks?${params}`)
+    if (id !== requestID) return
     tasks.value = result.items
     total.value = result.total
     // 轮询刷新时，清掉已不在当前列表中的选中项，避免对已消失的任务误操作
     const visible = new Set(tasks.value.map(t => t.id))
     selectedIds.value = new Set([...selectedIds.value].filter(id => visible.has(id)))
+  } catch (e) {
+    if (id === requestID) loadError.value = e instanceof Error ? e.message : '无法加载任务'
   } finally {
-    loading.value = false
+    if (id === requestID) loading.value = false
   }
 }
 
@@ -123,6 +148,28 @@ function toggleSelectAll() {
   }
 }
 
+function isActive(task: Task) {
+  return task.status === 'pending' || task.status === 'running'
+}
+
+function handleTaskAction(command: string, task: Task) {
+  if (command === 'retry') void retryTask(task)
+  if (command === 'cancel') void cancelTask(task)
+  if (command === 'delete') void deleteTask(task)
+}
+
+function sourceLabel(source: string) {
+  return source === 'direct' ? '直接提交' : source === 'prompt' ? '提示词库' : '其他来源'
+}
+
+function doneCount(task: Task) {
+  return Math.min(task.total_count, task.success_count + task.failed_count)
+}
+
+function progress(task: Task) {
+  return task.total_count > 0 ? Math.round(doneCount(task) * 100 / task.total_count) : 0
+}
+
 function statusLabel(s: string) {
   return { pending: '排队中', running: '生成中', completed: '已完成', failed: '失败', cancelled: '已取消' }[s] || s
 }
@@ -135,8 +182,8 @@ function canDelete(s: string) {
   return s !== 'running'
 }
 
-function canRetry(s: string) {
-  return s === 'failed'
+function canRetry(task: Task) {
+  return task.status === 'failed' || (task.status === 'completed' && task.failed_count > 0)
 }
 
 function formatTime(t: string) {
@@ -178,7 +225,7 @@ async function batchCancel() {
 async function batchRetry() {
   const ids = Array.from(selectedIds.value)
   if (!ids.length) return
-  if (!confirm(`确定重跑选中的 ${ids.length} 个任务？（仅失败任务会生效）`)) return
+  if (!confirm(`确定重跑选中的 ${ids.length} 个任务？（只补跑失败的生成项）`)) return
   await runBatch('/api/tasks/batch-retry', ids, '重跑')
 }
 
@@ -192,9 +239,9 @@ async function batchDelete() {
 async function cancelTask(task: Task) {
   if (!confirm(`确定取消任务 #${task.id}？`)) return
   try {
-    await api(`/api/tasks/${task.id}/cancel`, { method: 'POST' })
-    message.value = `任务 #${task.id} 已取消`
-    messageType.value = 'success'
+    const result = await api<{ remote_warning?: string }>(`/api/tasks/${task.id}/cancel`, { method: 'POST' })
+    message.value = result.remote_warning || `任务 #${task.id} 已取消`
+    messageType.value = result.remote_warning ? 'info' : 'success'
     await load()
   } catch (e) {
     message.value = e instanceof Error ? e.message : '取消失败'
@@ -233,82 +280,110 @@ onMounted(() => {
   loadGroups()
   timer = setInterval(load, 5000)
 })
-onUnmounted(() => { if (timer) clearInterval(timer) })
+onUnmounted(() => {
+  if (timer) clearInterval(timer)
+  pendingPreview?.abort()
+})
 </script>
 
 <template>
   <PageHeader title="任务列表" description="查看所有生成任务状态，支持多选批量取消、重跑、删除。" />
 
   <div class="toolbar" style="flex-wrap:wrap; gap:10px; margin-bottom:16px;">
-    <select v-model="state.status" class="input" style="width:auto;" @change="onFilterChange">
-      <option value="">全部状态</option>
-      <option value="pending">排队中</option>
-      <option value="running">生成中</option>
-      <option value="completed">已完成</option>
-      <option value="failed">失败</option>
-      <option value="cancelled">已取消</option>
-    </select>
-    <select v-model="state.group" class="input" style="width:auto;max-width:180px;" @change="onFilterChange">
-      <option value="">全部分组</option>
-      <option v-for="g in groups" :key="g.group_name" :value="g.group_name">{{ g.group_name }}（{{ g.count }}）</option>
-    </select>
-    <button class="btn btn-ghost" @click="load()">&#8635; 刷新</button>
+    <el-select v-model="state.status" class="filter-select" @change="onFilterChange" aria-label="状态" :empty-values="[]">
+      <el-option value="" label="全部状态" />
+      <el-option value="pending" label="排队中" />
+      <el-option value="running" label="生成中" />
+      <el-option value="completed" label="已完成" />
+      <el-option value="failed" label="失败" />
+      <el-option value="cancelled" label="已取消" />
+    </el-select>
+    <el-select v-model="state.group" class="filter-select filter-select-wide" @change="onFilterChange" aria-label="分组" :empty-values="[]">
+      <el-option value="" label="全部分组" />
+      <el-option v-for="g in groups" :key="g.group_name" :value="g.group_name" :label="`${g.group_name}（${g.count}）`" />
+    </el-select>
+    <el-button text @click="load()">&#8635; 刷新</el-button>
   </div>
 
-  <span v-if="message" class="text-sm" :style="{ color: messageType === 'success' ? 'var(--c-success)' : 'var(--c-danger)', marginBottom:'8px', display:'block' }">{{ message }}</span>
+  <ViewFeedback :kind="messageType" :message="message" />
+
+  <ViewFeedback v-if="loadError && tasks.length" kind="error" :message="loadError">
+    <el-button text size="small" @click="load">重试</el-button>
+  </ViewFeedback>
 
   <!-- 多选操作栏 -->
   <div class="batch-bar">
-    <label class="checkbox-wrap">
-      <input type="checkbox" :checked="allSelected" @change="toggleSelectAll" />
-      <span class="text-xs">全选本页</span>
-    </label>
+    <el-checkbox class="checkbox-wrap" :model-value="allSelected" @change="toggleSelectAll">全选本页</el-checkbox>
     <span class="batch-info">已选 {{ selectedCount }} 条</span>
     <template v-if="selectedCount > 0">
-      <button class="btn btn-ghost btn-sm btn-warn" :disabled="batchBusy || !canBatchCancel" @click="batchCancel">&#10005; 批量取消</button>
-      <button class="btn btn-ghost btn-sm" :disabled="batchBusy || !canBatchRetry" @click="batchRetry">&#8635; 批量重跑</button>
-      <button class="btn btn-ghost btn-sm btn-danger" :disabled="batchBusy || !canBatchDelete" @click="batchDelete">&#128465; 批量删除</button>
-      <button class="btn btn-ghost btn-sm" @click="selectedIds = new Set()">取消选择</button>
+      <el-button type="warning" text size="small" :disabled="batchBusy || !canBatchCancel" @click="batchCancel">&#10005; 批量取消</el-button>
+      <el-button text size="small" :disabled="batchBusy || !canBatchRetry" @click="batchRetry">&#8635; 批量重跑</el-button>
+      <el-button type="danger" text size="small" :disabled="batchBusy || !canBatchDelete" @click="batchDelete">&#128465; 批量删除</el-button>
+      <el-button text size="small" @click="selectedIds = new Set()">取消选择</el-button>
     </template>
   </div>
 
   <div class="card">
-    <div v-if="loading && !tasks.length" class="empty-state"><div class="empty-icon">&#8987;</div><p>加载中...</p></div>
-    <div v-else-if="!tasks.length" class="empty-state">
-      <div class="empty-icon">&#128640;</div>
-      <p>暂无任务记录。</p>
-    </div>
+    <ViewFeedback v-if="loading && !tasks.length" kind="loading" />
+    <ViewFeedback v-else-if="loadError && !tasks.length" kind="error" :message="loadError">
+      <el-button text size="small" @click="load">重试</el-button>
+    </ViewFeedback>
+    <ViewFeedback v-else-if="!tasks.length" kind="empty" :message="state.status || state.group ? '没有匹配的任务' : '暂无任务记录'" />
     <div v-else>
       <div class="list-row task-row" :class="{ selected: selectedIds.has(t.id) }" v-for="t in tasks" :key="t.id">
-        <label class="checkbox-wrap" @click.stop>
-          <input type="checkbox" :checked="selectedIds.has(t.id)" @change="toggleSelect(t.id)" />
-        </label>
-        <img v-if="t.image_id" class="task-thumb" :src="thumbUrl(t.image_id)" alt="结果图" loading="lazy" decoding="async" @click.stop="openTaskImage(t)" />
-        <div v-else class="task-thumb task-thumb-empty">无图</div>
+        <el-checkbox class="checkbox-wrap" :model-value="selectedIds.has(t.id)" :aria-label="'选择任务 ' + t.id" @change="toggleSelect(t.id)" />
+        <button v-if="t.image_id" class="task-cover" type="button" :aria-label="`查看任务 ${t.id} 的 ${t.image_count ?? 1} 张结果图`" @click="openTaskImage(t)">
+          <img v-if="!failedCovers.has(t.image_id)" :src="thumbUrl(t.image_id)" alt="" loading="lazy" decoding="async"
+            @error="failedCovers.add(t.image_id)" />
+          <span v-else class="task-cover-placeholder"><el-icon><Picture /></el-icon>{{ coverLabel(t) }}</span>
+          <span v-if="(t.image_count ?? 0) > 1" class="task-image-count">共 {{ t.image_count }} 张</span>
+        </button>
+        <div v-else class="task-cover">
+          <span class="task-cover-placeholder"><el-icon><Picture /></el-icon>{{ coverLabel(t) }}</span>
+        </div>
         <div class="task-main">
           <div class="task-head">
-            <RouterLink :to="`/tasks/${t.id}`" class="task-id">#{{ t.id }}</RouterLink>
-            <span class="badge" :class="'badge-' + t.status">{{ statusLabel(t.status) }}</span>
-            <span class="badge badge-muted">{{ t.source_type }}</span>
-            <span v-if="t.workflow_name" class="badge badge-muted" :title="t.workflow_name">{{ t.workflow_name }}</span>
-            <div class="task-actions">
-              <RouterLink :to="`/tasks/${t.id}`" class="btn btn-ghost btn-sm">详情</RouterLink>
-              <button v-if="canRetry(t.status)" class="btn btn-ghost btn-sm" @click="retryTask(t)">重跑</button>
-              <button v-if="canCancel(t.status)" class="btn btn-ghost btn-sm btn-warn" @click="cancelTask(t)">取消</button>
-              <button v-if="canDelete(t.status)" class="btn btn-ghost btn-sm btn-danger" @click="deleteTask(t)">&#10005;</button>
-            </div>
+            <RouterLink :to="`/tasks/${t.id}`" class="task-title" :title="t.workflow_name">
+              <span class="task-id">#{{ t.id }}</span>
+              <span class="task-workflow">{{ t.workflow_name || '任务详情' }}</span>
+            </RouterLink>
+            <el-dropdown v-if="canRetry(t) || canCancel(t.status) || canDelete(t.status)" trigger="click"
+              @command="command => handleTaskAction(command, t)">
+              <el-button text size="small" :icon="MoreFilled" :aria-label="`任务 ${t.id} 的操作`" />
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item v-if="canRetry(t)" command="retry">重跑失败项</el-dropdown-item>
+                  <el-dropdown-item v-if="canCancel(t.status)" command="cancel">取消任务</el-dropdown-item>
+                  <el-dropdown-item v-if="canDelete(t.status)" command="delete" class="task-delete">删除任务</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
           </div>
-          <RouterLink v-if="t.prompt_id" :to="`/prompts/${t.prompt_id}`" class="task-prompt" :title="`提示词 #${t.prompt_id}`">
-            <span class="prompt-label">提示词</span>
+          <RouterLink v-if="t.prompt_id" :to="`/prompts/${t.prompt_id}`" class="task-prompt" :title="t.prompt_title">
             <span class="prompt-title">{{ t.prompt_title || '未命名提示词' }}</span>
             <span v-if="(t.prompt_count || 0) > 1" class="prompt-more">等 {{ t.prompt_count }} 个</span>
-            <span class="prompt-link">查看 →</span>
+            <span aria-hidden="true">›</span>
           </RouterLink>
-          <div class="task-meta text-xs muted">
-            <span>{{ formatTime(t.created_at) }}</span>
-            <span v-if="t.total_count > 0"> · {{ t.success_count }}/{{ t.total_count }} 成功</span>
-            <span v-if="t.failed_count > 0" style="color:var(--c-danger);"> · {{ t.failed_count }} 失败</span>
+          <div class="task-result text-xs">
+            <el-tag
+              size="small"
+              :type="t.connection_issue || (t.status === 'completed' && t.failed_count > 0) ? 'warning' : t.status === 'failed' ? 'danger' : t.status === 'completed' ? 'success' : 'info'"
+            >{{ t.connection_issue ? '连接异常' : t.status === 'completed' && t.failed_count > 0 ? '部分失败' : statusLabel(t.status) }}</el-tag>
+            <span v-if="!isActive(t) && (t.image_count || t.success_count)" class="muted">
+              {{ t.image_count ? `产出 ${t.image_count} 张` : `成功 ${t.success_count} 项` }}
+            </span>
+            <span v-if="t.failed_count" class="task-failure">失败 {{ t.failed_count }} 项</span>
           </div>
+          <div v-if="isActive(t) && t.total_count > 0" class="task-progress">
+            <div class="text-xs muted">已处理 {{ doneCount(t) }}/{{ t.total_count }}</div>
+            <el-progress :aria-label="`任务 ${t.id} 进度`" :percentage="progress(t)" :stroke-width="5" :show-text="false"
+              :status="t.failed_count || t.connection_issue ? 'warning' : undefined" />
+          </div>
+          <p v-if="t.failure_reason || t.connection_issue || t.cancel_unconfirmed" class="task-reason text-xs">
+            <strong>{{ t.connection_issue ? '等待连接恢复' : t.cancel_unconfirmed ? '远端取消未确认' : '失败原因' }}</strong>
+            <span v-if="t.failure_reason">{{ t.failure_reason }}</span>
+          </p>
+          <div class="task-meta text-xs muted"><span>{{ sourceLabel(t.source_type) }}</span><time :datetime="t.created_at">{{ formatTime(t.created_at) }}</time></div>
         </div>
       </div>
     </div>
@@ -323,44 +398,49 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
     />
     <div class="page-size-wrap">
       <span class="text-xs muted">每页</span>
-      <select v-model.number="state.page_size" class="input page-size-select" @change="onPageSizeChange">
-        <option :value="20">20</option>
-        <option :value="50">50</option>
-        <option :value="100">100</option>
-        <option :value="200">200</option>
-      </select>
+      <el-select v-model="state.page_size" class="page-size-select" size="small" aria-label="每页条数" @change="onPageSizeChange">
+        <el-option :value="20" label="20" />
+        <el-option :value="50" label="50" />
+        <el-option :value="100" label="100" />
+        <el-option :value="200" label="200" />
+      </el-select>
       <span class="text-xs muted">条</span>
     </div>
   </div>
 </template>
 
 <style scoped>
-.task-row { align-items: flex-start; }
+.task-row { display: grid; grid-template-columns: auto 120px minmax(0, 1fr); align-items: start; gap: 12px; }
 .task-row.selected { background: var(--c-primary-light); }
-.task-thumb { width: 56px; height: 56px; object-fit: cover; border-radius: 8px; flex-shrink: 0; cursor: zoom-in; border: 1px solid var(--c-border); }
-.task-thumb-empty { display: grid; place-items: center; font-size: 10px; color: var(--c-muted); background: var(--c-bg-subtle); cursor: default; }
-.task-main { flex: 1; min-width: 0; overflow: hidden; display: flex; flex-direction: column; gap: 4px; }
-.task-prompt { display: flex; align-items: center; gap: 6px; font-size: 12px; min-width: 0; text-decoration: none; color: inherit; }
-.task-prompt:hover .prompt-link { opacity: 1; }
-.prompt-label { flex-shrink: 0; color: var(--c-muted); }
-.prompt-title { color: var(--c-primary); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.task-cover { position: relative; display: grid; place-items: center; width: 100%; aspect-ratio: 1; padding: 0; overflow: hidden; border: 1px solid var(--c-border); border-radius: 9px; background: var(--c-bg-subtle); }
+button.task-cover { cursor: zoom-in; }
+button.task-cover:focus-visible { outline: 2px solid var(--c-primary); outline-offset: 2px; }
+.task-cover img { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: contain; object-position: center; }
+.task-cover-placeholder { display: grid; justify-items: center; gap: 4px; padding: 5px; font-size: 11px; color: var(--c-muted); text-align: center; }
+.task-cover-placeholder .el-icon { font-size: 19px; }
+.task-image-count { position: absolute; right: 4px; bottom: 4px; padding: 1px 5px; border-radius: 4px; background: rgb(0 0 0 / 72%); color: white; font-size: 11px; }
+.task-main { display: grid; gap: 4px; min-width: 0; }
+.task-head, .task-result, .task-meta { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.task-head { justify-content: space-between; }
+.task-title { display: flex; align-items: baseline; gap: 6px; min-width: 0; font-weight: 700; color: var(--c-text); text-decoration: none; }
+.task-id { flex-shrink: 0; font-size: 12px; color: var(--c-muted); }
+.task-workflow, .prompt-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-title:hover .task-workflow { color: var(--c-primary); }
+.task-head .el-button { min-width: 30px; min-height: 30px; padding: 4px; }
+.task-prompt { display: flex; align-items: center; gap: 4px; min-width: 0; font-size: 13px; color: var(--c-primary); text-decoration: none; }
 .prompt-more { flex-shrink: 0; color: var(--c-muted); }
-.prompt-link { flex-shrink: 0; color: var(--c-primary); opacity: 0.6; }
-.task-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.task-id { font-weight: 700; font-size: 14px; color: var(--c-primary); text-decoration: none; }
-.task-meta { line-height: 1.5; overflow-wrap: anywhere; }
-.task-actions { display: flex; gap: 4px; flex-shrink: 0; margin-left: auto; }
-.checkbox-wrap { display: flex; align-items: center; gap: 6px; cursor: pointer; flex-shrink: 0; padding-top: 4px; }
-.checkbox-wrap input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--c-primary); cursor: pointer; }
+.task-result, .task-meta { flex-wrap: wrap; }
+.task-meta { column-gap: 10px; }
+.task-progress { max-width: 440px; }
+.task-progress .el-progress { margin-top: 3px; }
+.task-failure, :global(.task-delete) { color: var(--c-danger); }
+.task-reason { display: flex; flex-wrap: wrap; gap: 1px 6px; margin: 0; color: var(--c-text-secondary); overflow-wrap: anywhere; }
+.task-reason strong { color: var(--c-danger); }
+.task-reason span { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.checkbox-wrap { flex-shrink: 0; margin-right: 0; }
+@media (max-width: 640px) {
+  .task-row { grid-template-columns: auto 96px minmax(0, 1fr); gap: 8px; padding: 10px; }
+}
 .batch-bar { display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: var(--c-primary-light); border: 1px solid var(--c-primary-border); border-radius: 8px; margin-bottom: 8px; flex-wrap: wrap; }
 .batch-info { font-size: 13px; font-weight: 600; color: var(--c-primary); margin-right: 4px; }
-.badge-muted { background: var(--c-bg-subtle); color: var(--c-muted); }
-.badge-pending { background: #fef3c7; color: #92400e; }
-.badge-running { background: #dbeafe; color: #1e40af; }
-.badge-completed { background: #dcfce7; color: #166534; }
-.badge-failed { background: #fee2e2; color: #991b1b; }
-.badge-cancelled { background: #f3f4f6; color: #6b7280; }
-.btn-warn { color: #d97706; }
-.btn-danger { color: var(--c-danger); }
-.btn:disabled { opacity: 0.45; cursor: not-allowed; }
 </style>

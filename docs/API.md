@@ -350,7 +350,7 @@ PUT /api/settings/comfyui
 | 400 | 缺端口 | `ComfyUI 地址必须包含端口` |
 | 500 | 写库失败 | `save setting failed` |
 
-> 地址变更只影响**后续**提交。已在跑的任务用任务创建时的快照做展示，但实际出站请求一律实时读取当前设置。
+> 地址变更影响新建的任务和主动重试。已排队的任务按创建时的地址提交。取图和取消使用生成项实际接单的地址。
 
 ### 4.6 测试 ComfyUI 连通性
 
@@ -788,9 +788,20 @@ PUT /api/workflows/{id}/default
 |---|---|---|
 | 400 | `id` 非法 / body 非法 | `invalid workflow id` / `invalid JSON body` |
 | 404 | 记录不存在 | `workflow not found` |
+| 409 | 将禁用的工作流设为默认 | `请先启用该工作流，再设为默认` |
 | 500 | 操作失败 | `set default failed` |
 
 > 默认为**全局唯一**：设为默认时会先把其它工作流的默认标记清零。
+
+#### 启用或禁用工作流
+
+```
+PUT /api/workflows/{id}/enabled
+```
+
+请求体为 `{"enabled": false}` 或 `{"enabled": true}`。成功返回 `id`、`enabled` 和 `is_default`。缺少布尔值时返回 400，工作流不存在时返回 404。
+
+禁用会清除默认标记并阻止新建任务。已排队任务照常处理，失败的历史任务仍可重试。
 
 ### 5.9 识别落点（未保存的工作流）
 
@@ -914,7 +925,7 @@ POST /api/workflows/{id}/validate     # 校验已保存的工作流
 | kind | 归类 | 含义 |
 |---|---|---|
 | `workflow_format` | errors | 工作流不是合法 JSON / 无法转换为提交格式 / 没有任何可提交节点 |
-| `unsupported_feature` | errors | 使用了不支持的特性（如子图） |
+| `unsupported_feature` | errors | 使用了无法展开的前端结构（例如缺少内部节点或循环引用的子图） |
 | `node_type_missing` | errors | 目标 ComfyUI 上没有该节点类型（缺自定义节点/插件） |
 | `value_not_in_list` | errors | 取值不在候选列表里 |
 | `required_missing` | errors | 缺少必填输入（既没有值也没有连线） |
@@ -1159,7 +1170,7 @@ GET /api/tasks/{id}
 | `id` | int64 | |
 | `source_type` | string | |
 | `workflow_id` | int | |
-| `comfyui_url` | string | 任务创建时的地址快照 |
+| `comfyui_url` | string | 本次排队时采集的地址。每个生成项另带实际接单的 `comfyui_url` |
 | `parameters` | object | 原始参数，形如 `{"positive_prompt":"...","parameters":{...}}` |
 | `status` | string | |
 | `total_count` / `success_count` / `failed_count` | int | |
@@ -1247,6 +1258,7 @@ POST /api/tasks/{id}/cancel
 |---|---|---|
 | `id` | int64 | |
 | `status` | string | 固定 `cancelled` |
+| `remote_warning` | string | 远端取消未确认时的原因，其余情况为空串 |
 
 **前置条件**：任务状态必须是 `pending` 或 `running`。
 
@@ -1259,7 +1271,7 @@ POST /api/tasks/{id}/cancel
 
 取消会将任务及其仍在等待、提交中或已提交的生成项置为 `cancelled`。关联提示词若处于 `running` 且没有其他在途生成项，会按历史完成记录回到 `done` 或 `pending`。
 
-服务随后尝试从 ComfyUI 异步撤掉排队项。新提交的生成项使用实际接单的 ComfyUI 地址，旧记录回落到当前设置。地址缺失时仍可完成本地取消。已开始执行的 ComfyUI 任务可能继续运行。
+服务随后请求实际接单的 ComfyUI 撤队或停止执行。支持按任务取消的版本可以中断已开始的工作流。无法确认远端取消时，响应和生成项会显示原因。旧记录缺少接单地址时会回落到任务地址，再回落到当前设置。
 
 ### 6.7 重试任务
 
@@ -1274,7 +1286,7 @@ POST /api/tasks/{id}/retry
 | `id` | int64 | |
 | `status` | string | 固定 `pending` |
 
-**前置条件**：任务状态必须是 `failed`，且其关联工作流仍然存在。当前重试接口允许使用已停用的工作流。
+**前置条件**：任务状态必须是 `failed` 或 `completed`，至少有一个失败的生成项，且关联工作流仍存在。当前重试接口允许使用已停用的工作流。
 
 已成功的 item 保持不变（不会重复出图），只有失败的 item 被重置。
 
@@ -1283,7 +1295,7 @@ POST /api/tasks/{id}/retry
 | 状态码 | 触发条件 | 错误消息 |
 |---|---|---|
 | 404 | 任务不存在 | `task not found` |
-| 409 | 状态不是 `failed` | `only failed tasks can be retried` |
+| 409 | 没有可重试的失败项 | `task has no retryable failed items` |
 | 409 | 关联工作流已删除 | `工作流已删除，无法重试该任务` |
 | 500 | 其它错误 | `retry task failed` |
 
@@ -2167,7 +2179,7 @@ Content-Type: multipart/form-data
 |---|---|---|
 | `images` | 图片文件 + `images` 行。`generation_items` / `generation_tasks` 保留为空壳 | 图片自身的 `is_favorite` |
 | `tasks` | 任务 + 其全部 `generation_items` + 全部图片文件。`running` 的任务一律跳过 | 该任务名下**没有**收藏图、且不关联收藏提示词 |
-| `prompts` | 提示词行；`cascade_images=true` 时连带删图与生成项，否则只把 `items.prompt_id` 置 NULL | 提示词自身的 `is_favorite` |
+| `prompts` | 提示词行；`cascade_images=true` 时连带删图与生成项，否则只把 `items.prompt_id` 置 NULL | 默认保护收藏提示词。级联时也会跳过有关联收藏图片或仍在生成的提示词 |
 
 `with_prompts=true`（默认）时，只删「删完之后不再被任何 `generation_items` 引用」的提示词 —— 否则会误删别的任务还在用的。
 
@@ -2181,12 +2193,16 @@ POST /api/maintenance/preview
 
 **请求体**：见 10.1。
 
+可传查询参数 `image_page`，默认第 1 页，每页 24 张。页码超过范围时返回最后一页。统计数据始终覆盖完整命中范围。
+
 **响应**
 
 ```json
 {
   "target": "images",
   "primary_count": 5,
+  "image_page": 1,
+  "image_page_size": 24,
   "only_unfavorite": true,
   "warning": "已跳过 6 张收藏图片",
   "stats": {
@@ -2205,7 +2221,8 @@ POST /api/maintenance/preview
 | `primary_count` | 本次操作的主体数量（图片数 / 任务数 / 提示词数，取决于 `target`） |
 | `stats.bytes` | 能回收的磁盘体积。`files_found` 可能小于 `images`（文件早被手工删过） |
 | `stats.protected` | **真正被收藏拦下**的数量，不是「不看收藏的总数」 |
-| `samples` | 最多 8 条，供人眼确认 |
+| `samples` | 当前页的待删除图片，按图片 ID 升序排列。总张数见 `stats.images` |
+| `image_page` / `image_page_size` | 实际返回的图片页码和每页张数 |
 | `warning` | 针对当前模式的注意事项；命中为 0 时提示放宽条件 |
 | `blocked` | 命中数低于 `min_count` 时的阻止说明（非必返） |
 
@@ -2313,11 +2330,9 @@ GET /api/maintenance/trash/{id}
 POST /api/maintenance/trash/{id}/restore
 ```
 
-把该批次的图片文件移回 `data/images/`。
+把该批次的图片文件和图库记录一起恢复。仍存在的生成项或提示词关联会恢复。旧批次缺少元数据时，原图以独立图库图片恢复。恢复失败的图片保留在回收站。
 
-**响应**：`{"batch_id": 1, "files_restored": 5, "files_skipped": 0, "note": "..."}`
-
-> ⚠️ **只还原文件，不还原库记录**。清理时 `generation_items` 已被级联删除且未留快照，因此无法重建 `images` 行 —— 图片会回到磁盘目录，但不会出现在图片库里。响应里的 `note` 字段就是提醒这件事的。
+**响应**：`{"batch_id": 1, "files_restored": 5, "files_skipped": 0}`
 
 ### 10.10 彻底删除批次
 
@@ -2689,7 +2704,7 @@ Content-Type: multipart/form-data
 - 工作流文件名带 id 后缀，两个同名工作流不会共用文件。
 - 删除工作流会拦住在途任务，顺序为先删库、后删文件。
 - 默认工作流全局唯一。
-- 提交时读取当前 ComfyUI 地址，并在生成项上记录实际接单地址供后续取图和撤队列使用。`generation_tasks.comfyui_url` 仍是任务创建时的快照。
+- 任务排队时采集 ComfyUI 地址、工作流 JSON 和提示词映射。生成项记录实际接单地址和实际使用的负向词，供历史详情、取图和取消使用。主动重试时重新采集当前配置。
 
 **提示词与负向**
 
@@ -2726,7 +2741,7 @@ Content-Type: multipart/form-data
 
 **已知限制**
 
-- **子图（Subgraph）不支持**：含子图的工作流会在保存/提交时被拒绝。
+- **子图**支持常见的嵌套结构和边界连线。缺失内部节点、循环引用等无法展开的结构会在校验或提交时报错。
 - **无鉴权**：接口不做认证，请勿直接暴露到公网。
 - **CORS 实际不生效**：白名单配置项未被读取，不会输出跨域头；跨域访问需自建反向代理。
 - `POST /api/prompts/batch-delete` 与 `POST /api/prompts/batch-run` 不校验 500 条上限。

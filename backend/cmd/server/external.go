@@ -138,10 +138,6 @@ func (a *app) createExternalImage(w http.ResponseWriter, r *http.Request) {
 	// 文件名带平台与时间戳：图库按文件名搜索时能按平台捞到，导出后也一眼看得出处。
 	filename := fmt.Sprintf("ext_%s_%s_%s%s", platform.ID, now.Format("20060102_150405"), randomHex(2), ext)
 	target := filepath.Join(a.dataDir, "images", filename)
-	if err := writeAtomic(target, data); err != nil {
-		writeError(w, 500, "save image file failed")
-		return
-	}
 
 	// 尺寸从内存字节解，与 ComfyUI 出图走同一套逻辑（只读文件头）
 	imgW, imgH := imageSizeFromBytes(data)
@@ -151,17 +147,21 @@ func (a *app) createExternalImage(w http.ResponseWriter, r *http.Request) {
 
 	tx, err := a.db.BeginTx(r.Context(), nil)
 	if err != nil {
-		_ = os.Remove(target)
 		writeError(w, 500, "create import failed")
 		return
 	}
+	defer tx.Rollback()
+	if err := writeAtomic(target, data); err != nil {
+		writeError(w, 500, "save image file failed")
+		return
+	}
+
 	// status 直接给 completed：这条提示词一诞生就有成品图，显示「待生成」会让人以为要重跑。
 	promptResult, err := tx.ExecContext(r.Context(),
 		`INSERT INTO prompts(title, description, positive_prompt, group_name, group_id, status, source_platform, completed_at, created_at, updated_at)
 		 VALUES(?, '', ?, '', '', 'completed', ?, ?, ?, ?)`,
 		title, positive, platform.ID, now, now, now)
 	if err != nil {
-		_ = tx.Rollback()
 		_ = os.Remove(target)
 		writeError(w, 500, "create prompt failed")
 		return
@@ -173,7 +173,6 @@ func (a *app) createExternalImage(w http.ResponseWriter, r *http.Request) {
 		 VALUES(0, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		promptID, platform.ID, hash, filename, target, imgW, imgH, now)
 	if err != nil {
-		_ = tx.Rollback()
 		_ = os.Remove(target)
 		writeError(w, 500, "create image failed")
 		return
@@ -181,7 +180,6 @@ func (a *app) createExternalImage(w http.ResponseWriter, r *http.Request) {
 	imageID, _ := imageResult.LastInsertId()
 
 	if err := tx.Commit(); err != nil {
-		_ = tx.Rollback()
 		_ = os.Remove(target)
 		writeError(w, 500, "commit failed")
 		return

@@ -27,8 +27,7 @@ export default defineConfig({
     // 于是在 index.html 里加 modulepreload —— 首屏照样把它全量下载，
     // 拆分等于白做（首页仍要预加载 333 kB gzip 的 element-plus JS）。
     //
-    // 靠路由懒加载自然切分即可：Element Plus 只被 MaintenanceView 引用，
-    // 而该路由是动态 import，所以不进这个页面就不会下载它。
+    // 由路由懒加载和按需导入分摊各组件的体积。
     chunkSizeWarningLimit: 900,
   },
   server: {

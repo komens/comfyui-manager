@@ -1,5 +1,11 @@
 const BASE = ''
 
+export class ApiError extends Error {
+  constructor(public readonly status: number, message: string) {
+    super(message)
+  }
+}
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const url = path.startsWith('http') ? path : BASE + path
   const response = await fetch(url, init)
@@ -11,7 +17,7 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       // 非 JSON 响应，使用 statusText
     }
-    throw new Error(message)
+    throw new ApiError(response.status, message || `HTTP ${response.status}`)
   }
   try {
     return await response.json() as T
@@ -82,6 +88,9 @@ export type Task = {
   comfyui_url?: string
   parameters?: any
   status: string
+  connection_issue?: boolean
+  cancel_unconfirmed?: boolean
+  failure_reason?: string
   total_count: number
   success_count: number
   failed_count: number
@@ -90,6 +99,7 @@ export type Task = {
   completed_at?: string
   /** 列表接口附加：代表结果图 / 关联提示词 */
   image_id?: number
+  image_count?: number
   prompt_id?: number
   prompt_title?: string
   prompt_count?: number
@@ -161,7 +171,7 @@ export type CleanupStats = {
   files_on_disk: number
   image_bytes: number
   /** 磁盘上有、但库里没有任何记录引用的图片文件名 */
-  orphan_files: string[]
+  orphan_files: string[] | null
   db_bytes: number
   db_path: string
 }
@@ -182,6 +192,8 @@ export type CleanupPreview = {
   }
   /** 本次操作的主体数量（图片数/任务数/提示词数，取决于 target） */
   primary_count: number
+  image_page: number
+  image_page_size: number
   samples: { id: number; title: string; filename: string; group: string; created_at: string }[]
   only_unfavorite: boolean
   warning: string
